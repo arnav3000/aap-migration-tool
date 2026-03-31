@@ -18,31 +18,30 @@ logger = get_logger(__name__)
 
 
 # Define granular micro-phases in dependency order
+# Copied EXACTLY from migrate.py PHASE1_RESOURCE_TYPES + PHASE3_RESOURCE_TYPES
 MICRO_PHASES = [
-    # Phase 1: Infrastructure
-    {"id": "1.1", "name": "Organizations", "resource_type": "organizations", "phase": 1},
-    {"id": "1.2", "name": "Labels", "resource_type": "labels", "phase": 1},
-    {"id": "1.3", "name": "Users", "resource_type": "users", "phase": 1},
-    {"id": "1.4", "name": "Teams", "resource_type": "teams", "phase": 1},
-    {"id": "1.5", "name": "Credential Types", "resource_type": "credential_types", "phase": 1},
-    {"id": "1.6", "name": "Credentials", "resource_type": "credentials", "phase": 1},
-    {"id": "1.7", "name": "Execution Environments", "resource_type": "execution_environments", "phase": 1},
+    # Phase 1: Infrastructure (from PHASE1_RESOURCE_TYPES)
+    {"id": "1.1", "name": "Organizations", "resource_type": "organizations"},
+    {"id": "1.2", "name": "Labels", "resource_type": "labels"},
+    {"id": "1.3", "name": "Users", "resource_type": "users"},
+    {"id": "1.4", "name": "Teams", "resource_type": "teams"},
+    {"id": "1.5", "name": "Credential Types", "resource_type": "credential_types"},
+    {"id": "1.6", "name": "Credentials", "resource_type": "credentials"},
+    {"id": "1.7", "name": "Execution Environments", "resource_type": "execution_environments"},
+    {"id": "1.8", "name": "Inventories", "resource_type": "inventories"},
+    {"id": "1.9", "name": "Inventory Sources", "resource_type": "inventory_sources"},
+    {"id": "1.10", "name": "Inventory Groups", "resource_type": "inventory_groups"},
+    {"id": "1.11", "name": "Hosts", "resource_type": "hosts"},
+    {"id": "1.12", "name": "Instances", "resource_type": "instances"},
+    {"id": "1.13", "name": "Instance Groups", "resource_type": "instance_groups"},
+    {"id": "1.14", "name": "Projects", "resource_type": "projects"},
 
-    # Phase 2: Inventory
-    {"id": "2.1", "name": "Inventories", "resource_type": "inventories", "phase": 2},
-    {"id": "2.2", "name": "Inventory Sources", "resource_type": "inventory_sources", "phase": 2},
-    {"id": "2.3", "name": "Inventory Groups", "resource_type": "inventory_groups", "phase": 2},
-    {"id": "2.4", "name": "Hosts", "resource_type": "hosts", "phase": 2},
-
-    # Phase 3: Projects
-    {"id": "3.1", "name": "Projects", "resource_type": "projects", "phase": 3},
-
-    # Phase 4: Automation
-    {"id": "4.1", "name": "Notification Templates", "resource_type": "notification_templates", "phase": 4},
-    {"id": "4.2", "name": "Job Templates", "resource_type": "job_templates", "phase": 4},
-    {"id": "4.3", "name": "Workflow Templates", "resource_type": "workflow_job_templates", "phase": 4},
-    {"id": "4.4", "name": "Schedules", "resource_type": "schedules", "phase": 4},
-    {"id": "4.5", "name": "Applications", "resource_type": "applications", "phase": 4},
+    # Phase 2: Automation (from PHASE3_RESOURCE_TYPES)
+    {"id": "2.1", "name": "Notification Templates", "resource_type": "notification_templates"},
+    {"id": "2.2", "name": "Job Templates", "resource_type": "job_templates"},
+    {"id": "2.3", "name": "Workflow Templates", "resource_type": "workflow_job_templates"},
+    {"id": "2.4", "name": "Schedules", "resource_type": "schedules"},
+    {"id": "2.5", "name": "Applications", "resource_type": "applications"},
 ]
 
 
