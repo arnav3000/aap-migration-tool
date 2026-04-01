@@ -148,10 +148,10 @@ aap-bridge --version
 aap-bridge --help
 
 # Launch the interactive TUI (recommended for first-time users)
-aap-bridge tui
+aap-bridge
 ```
 
-💡 **Quick Tip:** First time using AAP Bridge? Launch the TUI with `aap-bridge tui` for a guided, interactive experience!
+💡 **Quick Tip:** First time using AAP Bridge? Launch the TUI with `aap-bridge` for a guided, interactive experience!
 
 ### Configuration
 
@@ -373,7 +373,7 @@ Review and adjust `config/config.yaml` for your environment:
 The easiest way to use AAP Bridge is through the interactive Text User Interface (TUI):
 
 ```bash
-aap-bridge tui
+aap-bridge
 ```
 
 **TUI Main Menu:**
@@ -412,7 +412,7 @@ b. Back / Exit
 - ✅ Visual progress bars and phase tracking
 
 **Recommended TUI Workflow:**
-1. Launch TUI: `aap-bridge tui`
+1. Launch TUI: `aap-bridge`
 2. Select **Option 1: Export Resources**
 3. Select **Option 2: Transform Resources**
 4. Select **Option 3: Import Resources**
