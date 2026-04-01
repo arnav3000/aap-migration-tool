@@ -136,30 +136,30 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="instance_groups",
         endpoint="instance_groups/",
         description="Instance Groups",
-        migration_order=117,  # After hosts (115), before projects (120)
+        migration_order=125,  # After instances (121), before job_templates (150)
         cleanup_order=87,  # Delete before EEs
         has_exporter=True,
         has_importer=True,
         has_transformer=False,
         batch_size=50,
     ),
-    # Projects and configuration
+    # Projects and configuration - MUST come after EE, before inventories
     "projects": ResourceTypeInfo(
         name="projects",
         endpoint="projects/",
         description="Projects",
-        migration_order=120,  # CHANGED: Was 75, now after hosts
+        migration_order=100,  # CHANGED: Was 120, now after EE (90), before inventories (110)
         cleanup_order=80,  # Delete before EEs
         has_exporter=True,
         has_importer=True,
         has_transformer=True,  # Extracts organization, default_environment, credential
     ),
-    # Inventory resources
+    # Inventory resources - MUST come after projects (for SCM inventories)
     "inventories": ResourceTypeInfo(
         name="inventories",
         endpoint="inventories/",
         description="Inventories",
-        migration_order=100,  # CHANGED: Was 85, now after execution_environments
+        migration_order=110,  # CHANGED: Was 100, now after projects (100)
         cleanup_order=60,
         has_exporter=True,
         has_importer=True,
@@ -169,7 +169,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="inventory_sources",
         endpoint="inventory_sources/",
         description="Inventory Sources",
-        migration_order=105,  # After inventories (100), before inventory_groups
+        migration_order=112,  # After inventories (110), before inventory_groups (115)
         cleanup_order=70,
         has_exporter=True,
         has_importer=True,
@@ -179,7 +179,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="inventory_groups",
         endpoint="groups/",
         description="Inventory Groups",
-        migration_order=110,  # After inventory_sources (105), before hosts
+        migration_order=115,  # After inventory_sources (112), before hosts (120)
         cleanup_order=50,
         has_exporter=True,  # InventoryGroupExporter
         has_importer=True,
@@ -189,7 +189,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="hosts",
         endpoint="hosts/",
         description="Hosts",
-        migration_order=115,  # After inventory_groups (110), before instances
+        migration_order=120,  # After inventory_groups (115), before instances (121)
         cleanup_order=40,
         has_exporter=True,
         has_importer=True,
@@ -201,7 +201,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="instances",
         endpoint="instances/",
         description="Instances (AAP Controller Nodes)",
-        migration_order=116,  # After hosts (115), before instance_groups (117)
+        migration_order=121,  # After hosts (120), before instance_groups (125)
         cleanup_order=88,  # After instance_groups (87) - delete dependents first
         has_exporter=True,
         has_importer=True,

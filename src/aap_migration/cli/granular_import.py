@@ -34,6 +34,7 @@ MICRO_PHASES = [
     {"id": "3.2", "name": "Projects", "resource_type": "projects"},
     {"id": "3.3", "name": "Inventories", "resource_type": "inventories"},
     {"id": "3.4", "name": "Inventory Sources", "resource_type": "inventory_sources"},
+    {"id": "3.5", "name": "Inventory Groups", "resource_type": "inventory_groups"},
 
     # Phase 4: Hosts
     {"id": "4.1", "name": "Hosts", "resource_type": "hosts"},
@@ -63,17 +64,19 @@ MICRO_PHASES = [
 class GranularImporter:
     """Granular step-by-step importer with micro-phase control."""
 
-    def __init__(self, ctx: Any, input_dir: Path):
+    def __init__(self, ctx: Any, input_dir: Path, auto_mode: bool = False):
         """Initialize granular importer.
 
         Args:
             ctx: Migration context
             input_dir: Directory with transformed data
+            auto_mode: If True, import all phases automatically without prompts
         """
         self.ctx = ctx
         self.input_dir = input_dir
         self.console = Console()
         self.state = ctx.migration_state
+        self.auto_mode = auto_mode
 
         # Load metadata
         metadata_file = input_dir / "metadata.json"
@@ -114,11 +117,36 @@ class GranularImporter:
         Returns:
             Dictionary with completed, failed, pending counts
         """
+        from aap_migration.migration.database import get_session
+        from aap_migration.migration.models import MigrationProgress
+        from sqlalchemy import func
+
         stats = self.state.get_import_stats(resource_type)
+
+        # Get completed and failed counts from MigrationProgress (same as import_menu.py)
+        with get_session(self.state.database_url) as session:
+            completed = (
+                session.query(func.count(MigrationProgress.id))
+                .filter(
+                    MigrationProgress.resource_type == resource_type,
+                    MigrationProgress.status == 'completed'
+                )
+                .scalar() or 0
+            )
+
+            failed = (
+                session.query(func.count(MigrationProgress.id))
+                .filter(
+                    MigrationProgress.resource_type == resource_type,
+                    MigrationProgress.status == 'failed'
+                )
+                .scalar() or 0
+            )
+
         return {
             "total": stats.get("total_exported", 0),
-            "completed": stats.get("completed", 0),
-            "failed": stats.get("failed", 0),
+            "completed": completed,
+            "failed": failed,
             "pending": stats.get("pending", 0),
         }
 
@@ -270,21 +298,33 @@ class GranularImporter:
     def run(self) -> None:
         """Run granular import with step-by-step control."""
         self.console.clear()
-        self.console.print(
-            Panel.fit(
-                "[bold cyan]Granular Micro-Phase Import[/bold cyan]\n\n"
-                "Import resources step-by-step with full control.\n"
-                "You can skip phases, retry, or abort at any time.",
-                border_style="cyan",
+
+        if self.auto_mode:
+            self.console.print(
+                Panel.fit(
+                    "[bold cyan]Automatic Import (All Resources)[/bold cyan]\n\n"
+                    "Importing all resources in proven migration order.\n"
+                    "Using the same sequence as granular import.",
+                    border_style="cyan",
+                )
             )
-        )
+        else:
+            self.console.print(
+                Panel.fit(
+                    "[bold cyan]Granular Micro-Phase Import[/bold cyan]\n\n"
+                    "Import resources step-by-step with full control.\n"
+                    "You can skip phases, retry, or abort at any time.",
+                    border_style="cyan",
+                )
+            )
 
         # Show initial status
         self.console.print("\n")
         self.console.print(self.create_phase_table())
         self.console.print("\n")
 
-        Prompt.ask("Press Enter to start...")
+        if not self.auto_mode:
+            Prompt.ask("Press Enter to start...")
 
         # Execute each micro-phase
         for micro_phase in MICRO_PHASES:
@@ -302,10 +342,11 @@ class GranularImporter:
                 continue
 
             # Show current status
-            self.console.clear()
-            self.console.print(f"\n[bold]Import Progress[/bold]\n")
-            self.console.print(self.create_phase_table(current_phase_id=phase_id))
-            self.console.print("\n")
+            if not self.auto_mode:
+                self.console.clear()
+                self.console.print(f"\n[bold]Import Progress[/bold]\n")
+                self.console.print(self.create_phase_table(current_phase_id=phase_id))
+                self.console.print("\n")
 
             # Check if already completed
             stats = self.get_import_stats(resource_type)
@@ -313,73 +354,77 @@ class GranularImporter:
                 echo_success(f"Phase {phase_id}: {name} - Already completed, skipping")
                 continue
 
-            # Ask user what to do
-            self.console.print(f"[bold cyan]Phase {phase_id}: {name}[/bold cyan]")
-            self.console.print(f"  Total: {total}")  # Use get_resource_count value, not database stats
-            self.console.print(f"  Completed: {stats['completed']}")
-            if stats["failed"] > 0:
-                self.console.print(f"  [red]Failed: {stats['failed']}[/red]")
-            if stats["pending"] > 0:
-                self.console.print(f"  Pending: {stats['pending']}")
-            self.console.print()
+            # In auto mode, just show what's being imported and proceed
+            if self.auto_mode:
+                echo_info(f"Importing Phase {phase_id}: {name} ({total} resources)")
+            else:
+                # Ask user what to do
+                self.console.print(f"[bold cyan]Phase {phase_id}: {name}[/bold cyan]")
+                self.console.print(f"  Total: {total}")  # Use get_resource_count value, not database stats
+                self.console.print(f"  Completed: {stats['completed']}")
+                if stats["failed"] > 0:
+                    self.console.print(f"  [red]Failed: {stats['failed']}[/red]")
+                if stats["pending"] > 0:
+                    self.console.print(f"  Pending: {stats['pending']}")
+                self.console.print()
 
-            self.console.print("[bold]Actions:[/bold]")
-            self.console.print("  [cyan]i[/cyan] - Import this phase")
-            self.console.print("  [yellow]s[/yellow] - Skip this phase (continue to next)")
-            self.console.print("  [blue]r[/blue] - Retry failed resources in this phase")
-            self.console.print("  [magenta]v[/magenta] - View errors for this phase")
-            self.console.print("  [red]a[/red] - Abort entire import")
-            self.console.print()
+                self.console.print("[bold]Actions:[/bold]")
+                self.console.print("  [cyan]i[/cyan] - Import this phase")
+                self.console.print("  [yellow]s[/yellow] - Skip this phase (continue to next)")
+                self.console.print("  [blue]r[/blue] - Retry failed resources in this phase")
+                self.console.print("  [magenta]v[/magenta] - View errors for this phase")
+                self.console.print("  [red]a[/red] - Abort entire import")
+                self.console.print()
 
-            choice = Prompt.ask(
-                "Select action",
-                choices=["i", "s", "r", "v", "a"],
-                default="i",
-            )
+                choice = Prompt.ask(
+                    "Select action",
+                    choices=["i", "s", "r", "v", "a"],
+                    default="i",
+                )
 
-            if choice == "s":
-                echo_warning(f"Skipping phase {phase_id}")
-                continue
+                if choice == "s":
+                    echo_warning(f"Skipping phase {phase_id}")
+                    continue
 
-            elif choice == "a":
-                echo_warning("Import aborted by user")
-                break
+                elif choice == "a":
+                    echo_warning("Import aborted by user")
+                    break
 
-            elif choice == "v":
-                # View errors
-                from aap_migration.migration.database import get_session
-                from aap_migration.migration.models import MigrationProgress
+                elif choice == "v":
+                    # View errors
+                    from aap_migration.migration.database import get_session
+                    from aap_migration.migration.models import MigrationProgress
 
-                with get_session(self.state.database_url) as session:
-                    error_records = (
-                        session.query(
-                            MigrationProgress.source_id,
-                            MigrationProgress.source_name,
-                            MigrationProgress.error_message
+                    with get_session(self.state.database_url) as session:
+                        error_records = (
+                            session.query(
+                                MigrationProgress.source_id,
+                                MigrationProgress.source_name,
+                                MigrationProgress.error_message
+                            )
+                            .filter(
+                                MigrationProgress.resource_type == resource_type,
+                                MigrationProgress.status == 'failed'
+                            )
+                            .limit(10)
+                            .all()
                         )
-                        .filter(
-                            MigrationProgress.resource_type == resource_type,
-                            MigrationProgress.status == 'failed'
-                        )
-                        .limit(10)
-                        .all()
-                    )
 
-                if error_records:
-                    self.console.print("\n[bold red]Failed Resources:[/bold red]")
-                    for err in error_records:
-                        self.console.print(f"  • {err[1]} (ID:{err[0]}): {err[2]}")
-                    self.console.print()
-                else:
-                    self.console.print("\n[green]No errors[/green]\n")
+                    if error_records:
+                        self.console.print("\n[bold red]Failed Resources:[/bold red]")
+                        for err in error_records:
+                            self.console.print(f"  • {err[1]} (ID:{err[0]}): {err[2]}")
+                        self.console.print()
+                    else:
+                        self.console.print("\n[green]No errors[/green]\n")
 
-                Prompt.ask("Press Enter to continue...")
-                # Re-show menu for this phase
-                continue
+                    Prompt.ask("Press Enter to continue...")
+                    # Re-show menu for this phase
+                    continue
 
-            elif choice == "r":
-                # Retry failed resources
-                echo_info("Retrying failed resources...")
+                elif choice == "r":
+                    # Retry failed resources
+                    echo_info("Retrying failed resources...")
 
             # Import this phase
             result = self._import_micro_phase(micro_phase)
@@ -392,25 +437,34 @@ class GranularImporter:
                     f"{result['completed']} succeeded, {result['failed']} failed"
                 )
 
-                # Ask if continue
-                choice = Prompt.ask(
-                    "Continue to next phase?",
-                    choices=["y", "n", "r"],
-                    default="y",
-                )
+                if not self.auto_mode:
+                    # Ask if continue
+                    choice = Prompt.ask(
+                        "Continue to next phase?",
+                        choices=["y", "n", "r"],
+                        default="y",
+                    )
 
-                if choice == "n":
-                    echo_warning("Import stopped by user")
-                    break
-                elif choice == "r":
-                    # TODO: Implement retry for this phase
-                    echo_warning("Retry not yet implemented, continuing...")
+                    if choice == "n":
+                        echo_warning("Import stopped by user")
+                        break
+                    elif choice == "r":
+                        # TODO: Implement retry for this phase
+                        echo_warning("Retry not yet implemented, continuing...")
+                # In auto mode, always continue even with errors
             else:
                 echo_success(
                     f"Phase {phase_id} completed: {result['completed']} resources imported"
                 )
 
-            Prompt.ask("\nPress Enter to continue...")
+            # Special message for inventory sources about EE sync issues
+            if resource_type == "inventory_sources" and result["completed"] > 0:
+                self.console.print()
+                self.console.print("[yellow]💡 Note:[/yellow] Check inventory sources manually for outdated EE's which are")
+                self.console.print("   pointing to older AAP-2.4 automation hub address.")
+
+            if not self.auto_mode:
+                Prompt.ask("\nPress Enter to continue...")
 
         # Final summary
         self.console.clear()
@@ -418,23 +472,32 @@ class GranularImporter:
         self.console.print(self.create_phase_table())
         self.console.print("\n")
 
+        # Check if inventory sources were imported
+        inv_src_stats = self.get_import_stats("inventory_sources")
+        if inv_src_stats.get("completed", 0) > 0:
+            self.console.print("[bold yellow]⚠️  Important Note:[/bold yellow]")
+            self.console.print("   Check inventory sources manually for outdated EE's which are pointing to")
+            self.console.print("   older AAP-2.4 automation hub address.")
+            self.console.print()
+
         # Remind about RBAC manual step
         self.console.print("[bold blue]📋 Next Step: RBAC Role Assignments[/bold blue]")
         self.console.print("   Run manually after all phases complete:")
         self.console.print("   [cyan]python rbac_migration.py[/cyan]\n")
 
 
-def granular_import_menu(ctx: Any, input_dir: Path | None = None) -> None:
+def granular_import_menu(ctx: Any, input_dir: Path | None = None, auto_mode: bool = False) -> None:
     """Launch granular import menu.
 
     Args:
         ctx: Migration context
         input_dir: Input directory with transformed data
+        auto_mode: If True, import all phases automatically without prompts
     """
     from pathlib import Path
 
     if input_dir is None:
         input_dir = Path(ctx.obj.config.paths.transform_dir)
 
-    importer = GranularImporter(ctx.obj, input_dir)
+    importer = GranularImporter(ctx.obj, input_dir, auto_mode=auto_mode)
     importer.run()

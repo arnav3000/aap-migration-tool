@@ -84,7 +84,8 @@ def retry_failed(
         input_dir = Path(ctx.config.paths.transform_dir)
 
     # Get failed resources from migration state
-    from aap_migration.migration.db import get_session, MigrationProgress
+    from aap_migration.migration.database import get_session
+    from aap_migration.migration.models import MigrationProgress
 
     state = ctx.migration_state
 
@@ -245,7 +246,8 @@ def retry_status(ctx: MigrationContext, resource_type: tuple) -> None:
         aap-bridge retry status -r credentials -r projects
     """
     from sqlalchemy import func
-    from aap_migration.migration.db import get_session, MigrationProgress
+    from aap_migration.migration.database import get_session
+    from aap_migration.migration.models import MigrationProgress
 
     console = Console()
     state = ctx.migration_state

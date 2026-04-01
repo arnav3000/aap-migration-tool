@@ -1735,6 +1735,7 @@ class InventorySourceImporter(ResourceImporter):
                         inventory_source_id=inventory_source_id,
                         inventory_source_name=inventory_source_name,
                         error=str(e),
+                        hint="Check inventory source manually for outdated EE's which are pointing to older AAP-2.4 automation hub address",
                     )
 
         return results

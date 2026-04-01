@@ -1154,7 +1154,17 @@ def import_cmd(
             source_id = resource.get("_source_id")
             if identifier and source_id:
                 resource_identifiers.append(identifier)
-                resource_by_identifier[identifier] = {"source_id": source_id, "data": resource}
+
+                # Use composite key for organization-scoped resources to avoid duplicates
+                if resource_type in ORGANIZATION_SCOPED_RESOURCES:
+                    org = resource.get("organization")
+                    # Use (name, org) as key for org-scoped resources
+                    dict_key = (identifier, org) if org is not None else identifier
+                else:
+                    # Use name only for globally unique resources
+                    dict_key = identifier
+
+                resource_by_identifier[dict_key] = {"source_id": source_id, "data": resource}
 
         if not resource_identifiers:
             logger.warning(
@@ -1248,20 +1258,22 @@ def import_cmd(
         found_count = 0
         to_import = []
 
-        for identifier, resource_info in resource_by_identifier.items():
+        for dict_key, resource_info in resource_by_identifier.items():
             source_id = resource_info["source_id"]
             resource_data = resource_info["data"]
 
             # Build lookup key based on resource scope
+            # For org-scoped resources, dict_key is already (name, org) tuple
+            # For globally unique resources, dict_key is just the name
             if resource_type in ORGANIZATION_SCOPED_RESOURCES:
-                # For org-scoped resources, use (name, organization) as key
-                name = resource_data.get("name")
-                org = resource_data.get("organization")
-                # Handle null organization (some credentials can have null org)
-                lookup_key = (name, org) if org is not None else name
+                # dict_key is already (name, org) or name
+                lookup_key = dict_key
+                # Extract identifier (name) for logging
+                identifier = dict_key[0] if isinstance(dict_key, tuple) else dict_key
             else:
-                # For globally unique resources, use identifier (name)
-                lookup_key = identifier
+                # dict_key is the identifier (name)
+                lookup_key = dict_key
+                identifier = dict_key
 
             # Debug: Log lookup key being used
             logger.debug(
@@ -1331,11 +1343,10 @@ def import_cmd(
         # Initialize phases
         phases = []
 
-        # If Phase 2, check for projects to patch and add as first phase
-        if phase == "phase2" and not dry_run:
-            # Duplicate scanning logic to get count for progress bar
+        # Scan for projects that need SCM patching (needed for both phase2 and all)
+        patch_count = 0
+        if not dry_run:
             projects_dir = input_dir / "projects"
-            patch_count = 0
             if projects_dir.exists():
                 json_files = sorted(projects_dir.glob("projects_*.json"))
                 # Silent scan (no step_progress)
@@ -1349,14 +1360,37 @@ def import_cmd(
                     except Exception:
                         pass
 
+        # Build phases list based on import phase
+        if phase == "phase2":
+            # Phase 2: Patching first, then automation resources
             if patch_count > 0:
                 phases.append(("patching", "Patching Projects", patch_count))
+            for rtype in types_to_import:
+                stats = metadata.get("resource_types", {}).get(rtype, {})
+                count = stats.get("count", 0)
+                description = rtype.replace("_", " ").title()
+                phases.append((rtype, description, count))
 
-        for rtype in types_to_import:
-            stats = metadata.get("resource_types", {}).get(rtype, {})
-            count = stats.get("count", 0)
-            description = rtype.replace("_", " ").title()
-            phases.append((rtype, description, count))
+        elif phase == "all":
+            # Phase "all": Import Phase1 resources, patch projects, then import Phase3 resources
+            # This ensures projects are synced before job templates and schedules are imported
+            for rtype in types_to_import:
+                stats = metadata.get("resource_types", {}).get(rtype, {})
+                count = stats.get("count", 0)
+                description = rtype.replace("_", " ").title()
+                phases.append((rtype, description, count))
+
+                # Insert patching phase after projects (if projects exist and have deferred SCM)
+                if rtype == "projects" and patch_count > 0:
+                    phases.append(("patching", "Patching Projects", patch_count))
+
+        else:
+            # Phase1 or Phase3: Just import the requested types
+            for rtype in types_to_import:
+                stats = metadata.get("resource_types", {}).get(rtype, {})
+                count = stats.get("count", 0)
+                description = rtype.replace("_", " ").title()
+                phases.append((rtype, description, count))
 
         # Filter out resources with 0 count - no value showing empty phases
         phases = [(rtype, desc, count) for rtype, desc, count in phases if count > 0]

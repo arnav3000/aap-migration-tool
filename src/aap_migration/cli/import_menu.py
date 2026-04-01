@@ -146,6 +146,14 @@ def show_import_status(ctx: Any) -> None:
             console.print(f"  [yellow]⧗ Pending: {totals['pending']}[/yellow]")
         console.print()
 
+        # Check if inventory sources were imported and show EE warning
+        inv_src_stat = next((s for s in all_stats if s["type"] == "inventory_sources"), None)
+        if inv_src_stat and inv_src_stat["completed"] > 0:
+            console.print("[bold yellow]⚠️  Important Note:[/bold yellow]")
+            console.print("Check inventory sources manually for outdated EE's which are pointing to")
+            console.print("older AAP-2.4 automation hub address.")
+            console.print()
+
     except Exception as e:
         import traceback
         echo_error(f"Failed to get import status: {e}")
@@ -226,9 +234,7 @@ def import_submenu(ctx: Any) -> None:
                 "1. Pre-flight Check (Validate Dependencies)\n"
                 "2. Import All Resources (Automatic)\n"
                 "3. Granular Import (Step-by-Step Control) ⭐ Recommended\n"
-                "4. Retry Failed Resources\n"
-                "5. View Import Status\n"
-                "6. View Failed Resources\n"
+                "4. View Import Status\n"
                 "b. Back to Main Menu",
                 title="Import Menu",
                 border_style="cyan",
@@ -237,7 +243,7 @@ def import_submenu(ctx: Any) -> None:
 
         choice = Prompt.ask(
             "Select an option",
-            choices=["1", "2", "3", "4", "5", "6", "b"],
+            choices=["1", "2", "3", "4", "b"],
             default="b"
         )
 
@@ -267,19 +273,8 @@ def import_submenu(ctx: Any) -> None:
                 granular_import_menu(ctx)
 
         elif choice == "4":
-            # Retry failed
-            console.print("[yellow]This will retry all previously failed resources.[/yellow]")
-            confirm = Prompt.ask("Continue?", choices=["y", "n"], default="n")
-            if confirm == "y":
-                run_command(["retry", "failed", "-y"])
-
-        elif choice == "5":
             # View status
             show_import_status(ctx)
-
-        elif choice == "6":
-            # View failed resources
-            show_failed_resources(ctx)
 
         # Pause after any action (except going back)
         Prompt.ask("\nPress Enter to continue...")
