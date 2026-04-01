@@ -309,13 +309,13 @@ class GranularImporter:
 
             # Check if already completed
             stats = self.get_import_stats(resource_type)
-            if stats["completed"] == stats["total"] and stats["failed"] == 0:
+            if stats["total"] > 0 and stats["completed"] == stats["total"] and stats["failed"] == 0:
                 echo_success(f"Phase {phase_id}: {name} - Already completed, skipping")
                 continue
 
             # Ask user what to do
             self.console.print(f"[bold cyan]Phase {phase_id}: {name}[/bold cyan]")
-            self.console.print(f"  Total: {stats['total']}")
+            self.console.print(f"  Total: {total}")  # Use get_resource_count value, not database stats
             self.console.print(f"  Completed: {stats['completed']}")
             if stats["failed"] > 0:
                 self.console.print(f"  [red]Failed: {stats['failed']}[/red]")
