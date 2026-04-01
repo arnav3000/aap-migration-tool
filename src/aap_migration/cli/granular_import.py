@@ -53,6 +53,10 @@ MICRO_PHASES = [
 
     # Phase 9: Settings (Optional - review before applying)
     {"id": "9.1", "name": "Settings", "resource_type": "settings"},
+
+    # Phase 10: RBAC (Manual - run after all phases complete)
+    # Note: Not an actual import phase - just shows in table as reminder
+    {"id": "10.1", "name": "RBAC (Manual)", "resource_type": "_rbac_manual", "manual": True},
 ]
 
 
@@ -85,7 +89,21 @@ class GranularImporter:
         Returns:
             Number of resources
         """
-        return self.metadata.get("resource_types", {}).get(resource_type, {}).get("count", 0)
+        # Try to get from metadata first
+        count = self.metadata.get("resource_types", {}).get(resource_type, {}).get("count", 0)
+
+        # For resources not in metadata (like settings), check if directory exists with data
+        if count == 0:
+            resource_dir = self.input_dir / resource_type
+            if resource_dir.exists():
+                # Count JSON files in directory
+                json_files = list(resource_dir.glob("*.json"))
+                if json_files:
+                    # Settings has 1 file with settings object, not a list
+                    # For now, return 1 if files exist (shows phase is available)
+                    return 1
+
+        return count
 
     def get_import_stats(self, resource_type: str) -> dict[str, int]:
         """Get import statistics for a resource type.
@@ -129,11 +147,6 @@ class GranularImporter:
             name = micro_phase["name"]
 
             total = self.get_resource_count(resource_type)
-
-            if total == 0:
-                # Skip phases with no resources
-                continue
-
             stats = self.get_import_stats(resource_type)
 
             # Progress bar
@@ -147,7 +160,12 @@ class GranularImporter:
                 progress = "░" * 15 + " 0%"
 
             # Status
-            if phase_id == current_phase_id:
+            if micro_phase.get("manual"):
+                # Manual phase (like RBAC) - show special status
+                status = "[blue]ℹ Manual[/blue]"
+                style = "blue"
+                progress = "See documentation"
+            elif phase_id == current_phase_id:
                 status = "[bold yellow]→ Running[/bold yellow]"
                 style = "bold yellow"
             elif stats["completed"] == stats["total"]:
@@ -274,6 +292,10 @@ class GranularImporter:
             resource_type = micro_phase["resource_type"]
             name = micro_phase["name"]
 
+            # Skip manual phases (e.g., RBAC)
+            if micro_phase.get("manual"):
+                continue
+
             # Skip if no resources
             total = self.get_resource_count(resource_type)
             if total == 0:
@@ -394,6 +416,11 @@ class GranularImporter:
         self.console.print("\n[bold green]Import Complete![/bold green]\n")
         self.console.print(self.create_phase_table())
         self.console.print("\n")
+
+        # Remind about RBAC manual step
+        self.console.print("[bold blue]📋 Next Step: RBAC Role Assignments[/bold blue]")
+        self.console.print("   Run manually after all phases complete:")
+        self.console.print("   [cyan]python rbac_migration.py[/cyan]\n")
 
 
 def granular_import_menu(ctx: Any, input_dir: Path | None = None) -> None:
