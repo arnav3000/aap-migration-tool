@@ -196,37 +196,43 @@ Overall Progress:
 **New option in Import submenu: "Granular Import (Step-by-Step Control)"**
 
 **What it does:**
-- Breaks import into 17 micro-phases
+- Breaks import into 15 micro-phases
 - Shows progress table for all phases
 - User controls each phase individually
 - Can skip, retry, view errors, or abort at any phase
 
 **Micro-Phases:**
 
-**Phase 1: Infrastructure**
+**Phase 1: Foundation**
 - 1.1 Organizations
-- 1.2 Labels
-- 1.3 Users
-- 1.4 Teams
-- 1.5 Credential Types
-- 1.6 Credentials
-- 1.7 Execution Environments
+- 1.2 Users
+- 1.3 Teams
 
-**Phase 2: Inventory**
-- 2.1 Inventories
-- 2.2 Inventory Sources
-- 2.3 Inventory Groups
-- 2.4 Hosts
+**Phase 2: Credentials** (CRITICAL - must be 100% complete)
+- 2.1 Credential Types
+- 2.2 Credentials
 
-**Phase 3: Projects**
-- 3.1 Projects
+**Phase 3: Infrastructure** (MUST follow this order)
+- 3.1 Execution Environments
+- 3.2 Projects (MUST come after EE, before Inventories)
+- 3.3 Inventories (depends on Projects for SCM inventories)
+- 3.4 Inventory Sources (depends on Inventories and Projects)
 
-**Phase 4: Automation**
-- 4.1 Notification Templates
-- 4.2 Job Templates
-- 4.3 Workflow Templates
-- 4.4 Schedules
-- 4.5 Applications
+**Phase 4: Hosts**
+- 4.1 Hosts
+
+**Phase 5: Instance Groups**
+- 5.1 Instance Groups
+
+**Phase 6: Automation**
+- 6.1 Job Templates
+- 6.2 Workflow Templates
+
+**Phase 7: Schedules**
+- 7.1 Schedules
+
+**Phase 8: Applications**
+- 8.1 Applications
 
 **Example Display:**
 
@@ -236,14 +242,14 @@ Import Progress
 Phase  Resource Type           Total  ✓    ✗   ⧗   Progress              Status
 ──────────────────────────────────────────────────────────────────────────────
 1.1    Organizations            15   15   -   -   ███████████████ 100%  ✓ Done
-1.2    Labels                    0    -   -   -   ░░░░░░░░░░░░░░░   0%  ⧗ Pending
-1.3    Users                    32   32   -   -   ███████████████ 100%  ✓ Done
-1.4    Teams                    17   17   -   -   ███████████████ 100%  ✓ Done
-1.5    Credential Types          8    8   -   -   ███████████████ 100%  ✓ Done
-1.6    Credentials              50   42   8   -   ████████████░░░  84%  → Running
-1.7    Execution Environments   12    -   -  12   ░░░░░░░░░░░░░░░   0%  ⧗ Pending
+1.2    Users                    32   32   -   -   ███████████████ 100%  ✓ Done
+1.3    Teams                    17   17   -   -   ███████████████ 100%  ✓ Done
+2.1    Credential Types          8    8   -   -   ███████████████ 100%  ✓ Done
+2.2    Credentials              50   42   8   -   ████████████░░░  84%  → Running
+3.1    Execution Environments   12    -   -  12   ░░░░░░░░░░░░░░░   0%  ⧗ Pending
+3.2    Projects                 18    -   -  18   ░░░░░░░░░░░░░░░   0%  ⧗ Pending
 
-Phase 1.6: Credentials
+Phase 2.2: Credentials
   Total: 50
   Completed: 42
   Failed: 8
@@ -346,7 +352,7 @@ job_templates  89         Deploy Application     Missing credential: 42
 
 **Phase 1/Phase 2 Options Removed:**
 - Users are encouraged to use Granular Import (Option 3) for better control
-- Provides 17 micro-phases instead of just 2 broad phases
+- Provides 15 micro-phases instead of just 2 broad phases
 - Better visibility into what's being imported
 - Easier to troubleshoot and retry specific phases
 - More user-friendly than generic "Phase 1" and "Phase 2"
@@ -455,7 +461,7 @@ job_templates  89         Deploy Application     Missing credential: 42
 feat: comprehensive TUI improvements for import workflow
 
 - Add enhanced import submenu with 6 focused options
-- Add granular micro-phase import (17 phases, step-by-step control) ⭐ Recommended
+- Add granular micro-phase import (15 phases, step-by-step control) ⭐ Recommended
 - Implement pre-flight dependency validation
 - Add granular resource-level progress tracking with error details
 - Create smart retry system for failed resources only
@@ -484,7 +490,7 @@ New commands:
 
 New TUI screens:
 - Enhanced import submenu (6 options)
-- Granular import with 17 micro-phases
+- Granular import with 15 micro-phases
 - Pre-flight validation report
 - Import status dashboard
 - Failed resources report

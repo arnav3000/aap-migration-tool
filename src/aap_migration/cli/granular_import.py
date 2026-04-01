@@ -18,30 +18,38 @@ logger = get_logger(__name__)
 
 
 # Define granular micro-phases in dependency order
-# Copied EXACTLY from migrate.py PHASE1_RESOURCE_TYPES + PHASE3_RESOURCE_TYPES
+# Follows EXACT proven migration order from manual testing
 MICRO_PHASES = [
-    # Phase 1: Infrastructure (from PHASE1_RESOURCE_TYPES)
+    # Phase 1: Foundation
     {"id": "1.1", "name": "Organizations", "resource_type": "organizations"},
-    {"id": "1.2", "name": "Labels", "resource_type": "labels"},
-    {"id": "1.3", "name": "Users", "resource_type": "users"},
-    {"id": "1.4", "name": "Teams", "resource_type": "teams"},
-    {"id": "1.5", "name": "Credential Types", "resource_type": "credential_types"},
-    {"id": "1.6", "name": "Credentials", "resource_type": "credentials"},
-    {"id": "1.7", "name": "Execution Environments", "resource_type": "execution_environments"},
-    {"id": "1.8", "name": "Inventories", "resource_type": "inventories"},
-    {"id": "1.9", "name": "Inventory Sources", "resource_type": "inventory_sources"},
-    {"id": "1.10", "name": "Inventory Groups", "resource_type": "inventory_groups"},
-    {"id": "1.11", "name": "Hosts", "resource_type": "hosts"},
-    {"id": "1.12", "name": "Instances", "resource_type": "instances"},
-    {"id": "1.13", "name": "Instance Groups", "resource_type": "instance_groups"},
-    {"id": "1.14", "name": "Projects", "resource_type": "projects"},
+    {"id": "1.2", "name": "Users", "resource_type": "users"},
+    {"id": "1.3", "name": "Teams", "resource_type": "teams"},
 
-    # Phase 2: Automation (from PHASE3_RESOURCE_TYPES)
-    {"id": "2.1", "name": "Notification Templates", "resource_type": "notification_templates"},
-    {"id": "2.2", "name": "Job Templates", "resource_type": "job_templates"},
-    {"id": "2.3", "name": "Workflow Templates", "resource_type": "workflow_job_templates"},
-    {"id": "2.4", "name": "Schedules", "resource_type": "schedules"},
-    {"id": "2.5", "name": "Applications", "resource_type": "applications"},
+    # Phase 2: Credentials (CRITICAL - must be 100% complete)
+    {"id": "2.1", "name": "Credential Types", "resource_type": "credential_types"},
+    {"id": "2.2", "name": "Credentials", "resource_type": "credentials"},
+
+    # Phase 3: Infrastructure (MUST follow this order)
+    {"id": "3.1", "name": "Execution Environments", "resource_type": "execution_environments"},
+    {"id": "3.2", "name": "Projects", "resource_type": "projects"},
+    {"id": "3.3", "name": "Inventories", "resource_type": "inventories"},
+    {"id": "3.4", "name": "Inventory Sources", "resource_type": "inventory_sources"},
+
+    # Phase 4: Hosts
+    {"id": "4.1", "name": "Hosts", "resource_type": "hosts"},
+
+    # Phase 5: Instance Groups
+    {"id": "5.1", "name": "Instance Groups", "resource_type": "instance_groups"},
+
+    # Phase 6: Automation
+    {"id": "6.1", "name": "Job Templates", "resource_type": "job_templates"},
+    {"id": "6.2", "name": "Workflow Templates", "resource_type": "workflow_job_templates"},
+
+    # Phase 7: Schedules
+    {"id": "7.1", "name": "Schedules", "resource_type": "schedules"},
+
+    # Phase 8: Applications
+    {"id": "8.1", "name": "Applications", "resource_type": "applications"},
 ]
 
 
