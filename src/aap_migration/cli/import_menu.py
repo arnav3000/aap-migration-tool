@@ -51,17 +51,42 @@ def show_import_status(ctx: Any) -> None:
             "settings"
         ]
 
-        for rtype in resource_types:
-            stats = state.get_import_stats(rtype)
-            if stats["total_exported"] > 0:
-                all_stats.append({
-                    "type": rtype,
-                    "total": stats["total_exported"],
-                    "completed": stats["completed"],
-                    "failed": stats["failed"],
-                    "pending": stats["pending"],
-                    "percent": stats["percent_complete"]
-                })
+        # Need to query MigrationProgress for completed/failed counts
+        from aap_migration.migration.database import get_session
+        from aap_migration.migration.models import MigrationProgress
+        from sqlalchemy import func
+
+        with get_session(state.database_url) as session:
+            for rtype in resource_types:
+                stats = state.get_import_stats(rtype)
+                if stats["total_exported"] > 0:
+                    # Get completed and failed counts from MigrationProgress
+                    completed = (
+                        session.query(func.count(MigrationProgress.id))
+                        .filter(
+                            MigrationProgress.resource_type == rtype,
+                            MigrationProgress.status == 'completed'
+                        )
+                        .scalar() or 0
+                    )
+
+                    failed = (
+                        session.query(func.count(MigrationProgress.id))
+                        .filter(
+                            MigrationProgress.resource_type == rtype,
+                            MigrationProgress.status == 'failed'
+                        )
+                        .scalar() or 0
+                    )
+
+                    all_stats.append({
+                        "type": rtype,
+                        "total": stats["total_exported"],
+                        "completed": completed,
+                        "failed": failed,
+                        "pending": stats["pending"],
+                        "percent": stats["percent_complete"]
+                    })
 
         if not all_stats:
             console.print("\n[yellow]No import progress found. Run export first.[/yellow]\n")
@@ -122,7 +147,10 @@ def show_import_status(ctx: Any) -> None:
         console.print()
 
     except Exception as e:
+        import traceback
         echo_error(f"Failed to get import status: {e}")
+        console.print(f"\n[red]Error details:[/red]")
+        console.print(traceback.format_exc())
 
 
 def show_failed_resources(ctx: Any) -> None:
@@ -180,7 +208,10 @@ def show_failed_resources(ctx: Any) -> None:
         console.print(f"\n[bold red]Total Failed: {len(failed_records)}[/bold red]\n")
 
     except Exception as e:
+        import traceback
         echo_error(f"Failed to get error details: {e}")
+        console.print(f"\n[red]Error details:[/red]")
+        console.print(traceback.format_exc())
 
 
 def import_submenu(ctx: Any) -> None:
