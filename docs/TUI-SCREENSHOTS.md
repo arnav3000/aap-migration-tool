@@ -18,6 +18,10 @@ b. Back / Exit
 Select an option:
 ```
 
+```
+<img width="675" height="291" alt="Screenshot 2026-04-01 at 17 55 18" src="https://github.com/user-attachments/assets/75a6a9ea-75ab-4294-9237-9e1d81d8cf07" />
+```
+
 ## Import Resources Menu
 
 ```
