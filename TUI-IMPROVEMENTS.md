@@ -196,7 +196,7 @@ Overall Progress:
 **New option in Import submenu: "Granular Import (Step-by-Step Control)"**
 
 **What it does:**
-- Breaks import into 15 micro-phases
+- Breaks import into 17 micro-phases
 - Shows progress table for all phases
 - User controls each phase individually
 - Can skip, retry, view errors, or abort at any phase
@@ -231,8 +231,14 @@ Overall Progress:
 **Phase 7: Schedules**
 - 7.1 Schedules
 
-**Phase 8: Applications**
+**Phase 8: Applications** (OAuth applications)
 - 8.1 Applications
+
+**Phase 9: Settings** (Optional - review before applying)
+- 9.1 Settings (LDAP, authentication, etc.)
+
+**Phase 10: RBAC** (Role-based access control - after main migration)
+- 10.1 RBAC Role Assignments (uses rbac_migration.py script)
 
 **Example Display:**
 
@@ -352,7 +358,7 @@ job_templates  89         Deploy Application     Missing credential: 42
 
 **Phase 1/Phase 2 Options Removed:**
 - Users are encouraged to use Granular Import (Option 3) for better control
-- Provides 15 micro-phases instead of just 2 broad phases
+- Provides 17 micro-phases instead of just 2 broad phases
 - Better visibility into what's being imported
 - Easier to troubleshoot and retry specific phases
 - More user-friendly than generic "Phase 1" and "Phase 2"
@@ -461,7 +467,7 @@ job_templates  89         Deploy Application     Missing credential: 42
 feat: comprehensive TUI improvements for import workflow
 
 - Add enhanced import submenu with 6 focused options
-- Add granular micro-phase import (15 phases, step-by-step control) ⭐ Recommended
+- Add granular micro-phase import (17 phases, step-by-step control) ⭐ Recommended
 - Implement pre-flight dependency validation
 - Add granular resource-level progress tracking with error details
 - Create smart retry system for failed resources only
@@ -490,7 +496,7 @@ New commands:
 
 New TUI screens:
 - Enhanced import submenu (6 options)
-- Granular import with 15 micro-phases
+- Granular import with 17 micro-phases
 - Pre-flight validation report
 - Import status dashboard
 - Failed resources report
