@@ -157,8 +157,8 @@ api_url = https://localhost:8443/api/v2/me/
 | **API Version** | `v2` (KV Secrets Engine v2) |
 | **Auth Method** | **AppRole** |
 | **Auth Path** | `approle` |
-| **Role ID** | `12345678-1234-1234-1234-123456789abc` |
-| **Secret ID** | `87654321-4321-4321-4321-cba987654321` |
+| **Role ID** | `$VAULT_ROLE_ID` |
+| **Secret ID** | `$VAULT_SECRET_ID` |
 | **CA Certificate** | Custom CA configured |
 
 **AppRole Authentication:**
