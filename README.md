@@ -62,6 +62,7 @@ curl -k https://your-target-aap/api/controller/v2/ping/
 
 ## Features
 
+- **🎯 Interactive TUI**: User-friendly Text User Interface with guided workflows, real-time progress tracking, and step-by-step control
 - **🔐 Credential-First Migration**: Ensures credentials are checked, compared, and migrated BEFORE all other resources
 - **Bulk Operations**: Leverages AAP bulk APIs for high-performance migrations
 - **State Management**: SQLite or PostgreSQL-backed state tracking with checkpoint/resume capability
@@ -80,8 +81,7 @@ curl -k https://your-target-aap/api/controller/v2/ping/
   and file (DEBUG) levels
 - **Split-File Export/Import**: Automatic file splitting for large datasets with
   metadata tracking
-- **CLI Interface**: Intuitive Click-based CLI with extensive options and
-  environment variable support
+- **Dual Interface**: Interactive TUI for guided experience, or powerful CLI for automation and scripting
 - **RBAC Migration**: Separate script for migrating role-based access control assignments
 
 ## Architecture
@@ -146,7 +146,12 @@ aap-bridge --version
 
 # View available commands
 aap-bridge --help
+
+# Launch the interactive TUI (recommended for first-time users)
+aap-bridge tui
 ```
+
+💡 **Quick Tip:** First time using AAP Bridge? Launch the TUI with `aap-bridge tui` for a guided, interactive experience!
 
 ### Configuration
 
@@ -363,9 +368,71 @@ Review and adjust `config/config.yaml` for your environment:
 
 ### Usage
 
-#### Recommended Workflow
+#### Option 1: Interactive TUI (Recommended) 🎯
 
-The recommended approach is to check credentials first, then run phased migration following the dependency order:
+The easiest way to use AAP Bridge is through the interactive Text User Interface (TUI):
+
+```bash
+aap-bridge tui
+```
+
+**TUI Main Menu:**
+```
+╔══════════════════════════════════════════════════════════╗
+║              AAP Migration Tool - Main Menu              ║
+╚══════════════════════════════════════════════════════════╝
+
+1. Export Resources
+   ├─ Export from AAP 2.4 source
+
+2. Transform Resources
+   ├─ Transform exported data for AAP 2.6 compatibility
+
+3. Import Resources
+   ├─ 1. Pre-flight Check (Validate Dependencies)
+   ├─ 2. Import All Resources (Automatic)
+   ├─ 3. Granular Import (Step-by-Step Control) ⭐ Recommended
+   └─ 4. View Import Status
+
+4. Credential Operations
+   ├─ Compare credentials between source and target
+
+5. Validation & Reporting
+
+b. Back / Exit
+```
+
+**Why use the TUI?**
+- ✅ User-friendly guided workflow
+- ✅ Built-in progress tracking and status display
+- ✅ Step-by-step control with granular import
+- ✅ Real-time feedback and warnings
+- ✅ Automatic dependency management
+- ✅ Easy to pause, retry, or skip phases
+- ✅ Visual progress bars and phase tracking
+
+**Recommended TUI Workflow:**
+1. Launch TUI: `aap-bridge tui`
+2. Select **Option 1: Export Resources**
+3. Select **Option 2: Transform Resources**
+4. Select **Option 3: Import Resources**
+5. Choose **Option 3: Granular Import (Step-by-Step Control)**
+   - Import one phase at a time with full visibility
+   - See exactly what's being imported in each phase
+   - Check status after each phase completes
+
+**Important Notes When Using TUI:**
+- ⚠️ After importing inventory sources, check them manually for outdated Execution Environments pointing to older AAP-2.4 automation hub addresses
+- ✓ Projects are automatically patched with SCM details during import
+- ✓ All organization-scoped resources (teams, credentials, projects) are properly deduplicated
+
+**📸 [View TUI Screenshots](docs/TUI-SCREENSHOTS.md)** - See detailed visual examples of the TUI interface
+
+---
+
+#### Option 2: Command Line Interface (CLI)
+
+For automation, scripting, or advanced users, use the CLI commands directly:
 
 ```bash
 # Step 1: Check what credentials are missing
