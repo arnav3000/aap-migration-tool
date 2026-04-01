@@ -281,5 +281,5 @@ def import_submenu(ctx: Any) -> None:
             # View failed resources
             show_failed_resources(ctx)
 
-        if choice not in ["5", "6"]:
-            Prompt.ask("\nPress Enter to continue...")
+        # Pause after any action (except going back)
+        Prompt.ask("\nPress Enter to continue...")
