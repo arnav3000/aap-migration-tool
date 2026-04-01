@@ -45,8 +45,10 @@ def show_import_status(ctx: Any) -> None:
         resource_types = [
             "organizations", "users", "teams", "credential_types",
             "credentials", "execution_environments", "projects",
-            "inventories", "hosts", "job_templates",
-            "workflow_job_templates", "schedules"
+            "inventories", "inventory_sources", "hosts",
+            "instance_groups", "job_templates",
+            "workflow_job_templates", "schedules", "applications",
+            "settings"
         ]
 
         for rtype in resource_types:
@@ -129,7 +131,8 @@ def show_failed_resources(ctx: Any) -> None:
 
     try:
         # Use the migration state from context
-        from aap_migration.migration.db import get_session, MigrationProgress
+        from aap_migration.migration.database import get_session
+        from aap_migration.migration.models import MigrationProgress
 
         state = ctx.obj.migration_state
 

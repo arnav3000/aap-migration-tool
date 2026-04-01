@@ -347,7 +347,8 @@ class GranularImporter:
 
             elif choice == "v":
                 # View errors
-                from aap_migration.migration.db import get_session, MigrationProgress
+                from aap_migration.migration.database import get_session
+                from aap_migration.migration.models import MigrationProgress
 
                 with get_session(self.state.database_url) as session:
                     error_records = (
