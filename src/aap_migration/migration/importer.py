@@ -4093,7 +4093,7 @@ class ApplicationImporter(ResourceImporter):
 
         # Resolve organization dependency
         if resolve_dependencies:
-            await self._resolve_dependencies(resource_type, data)
+            data = await self._resolve_dependencies(resource_type, data)
 
         # Handle client secret
         if data.get('_requires_new_secret'):
