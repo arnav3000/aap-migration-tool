@@ -2,38 +2,15 @@
 
 ## Main Menu
 
-```
-┌──────────────────────────────────────────────────────────┐
-│          AAP Migration Tool - Main Menu                  │
-└──────────────────────────────────────────────────────────┘
+![TUI Main Menu](screenshots/tui-main-menu.png)
 
-1. Export Resources
-2. Transform Resources
-3. Import Resources
-4. Credential Operations
-5. Validation & Reporting
-
-b. Back / Exit
-
-Select an option:
-```
+The main menu provides access to all migration operations through a clean, numbered interface.
 
 ## Import Resources Menu
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                    Import Resources                       │
-└──────────────────────────────────────────────────────────┘
+![TUI Import Menu](screenshots/tui-import-menu.png)
 
-1. Pre-flight Check (Validate Dependencies)
-2. Import All Resources (Automatic)
-3. Granular Import (Step-by-Step Control) ⭐ Recommended
-4. View Import Status
-
-b. Back to Main Menu
-
-Select an option:
-```
+The Import Resources submenu offers multiple import strategies, with Granular Import recommended for maximum control and visibility.
 
 ## Granular Import - Phase Progress
 
