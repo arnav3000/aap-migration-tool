@@ -3,7 +3,11 @@
 import logging
 import warnings
 
-__version__ = "0.1.0"
+try:
+    from importlib.metadata import version
+    __version__ = version("aap-bridge")
+except Exception:
+    __version__ = "0.0.0-dev"
 __author__ = "AAP Migration Team"
 __license__ = "Apache-2.0"
 
