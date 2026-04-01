@@ -196,7 +196,7 @@ Overall Progress:
 **New option in Import submenu: "Granular Import (Step-by-Step Control)"**
 
 **What it does:**
-- Breaks import into 17 micro-phases
+- Breaks import into 16 micro-phases
 - Shows progress table for all phases
 - User controls each phase individually
 - Can skip, retry, view errors, or abort at any phase
@@ -237,8 +237,7 @@ Overall Progress:
 **Phase 9: Settings** (Optional - review before applying)
 - 9.1 Settings (LDAP, authentication, etc.)
 
-**Phase 10: RBAC** (Role-based access control - after main migration)
-- 10.1 RBAC Role Assignments (uses rbac_migration.py script)
+**Note:** RBAC role assignments are migrated separately using `python rbac_migration.py` after all phases complete.
 
 **Example Display:**
 
@@ -358,7 +357,7 @@ job_templates  89         Deploy Application     Missing credential: 42
 
 **Phase 1/Phase 2 Options Removed:**
 - Users are encouraged to use Granular Import (Option 3) for better control
-- Provides 17 micro-phases instead of just 2 broad phases
+- Provides 16 micro-phases instead of just 2 broad phases
 - Better visibility into what's being imported
 - Easier to troubleshoot and retry specific phases
 - More user-friendly than generic "Phase 1" and "Phase 2"
@@ -496,7 +495,7 @@ New commands:
 
 New TUI screens:
 - Enhanced import submenu (6 options)
-- Granular import with 17 micro-phases
+- Granular import with 16 micro-phases
 - Pre-flight validation report
 - Import status dashboard
 - Failed resources report

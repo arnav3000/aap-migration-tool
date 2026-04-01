@@ -52,10 +52,7 @@ MICRO_PHASES = [
     {"id": "8.1", "name": "Applications", "resource_type": "applications"},
 
     # Phase 9: Settings (Optional - review before applying)
-    {"id": "9.1", "name": "Settings", "resource_type": "settings", "optional": True},
-
-    # Phase 10: RBAC (after main migration)
-    {"id": "10.1", "name": "RBAC Role Assignments", "resource_type": "rbac", "special": "rbac_script"},
+    {"id": "9.1", "name": "Settings", "resource_type": "settings"},
 ]
 
 
@@ -192,57 +189,22 @@ class GranularImporter:
         resource_type = micro_phase["resource_type"]
         phase_id = micro_phase["id"]
         name = micro_phase["name"]
-        special_handler = micro_phase.get("special")
 
         self.console.print(f"\n[bold cyan]Phase {phase_id}: {name}[/bold cyan]\n")
+
+        # Check if we have resources to import
+        resource_dir = self.input_dir / resource_type
+        if not resource_dir.exists():
+            echo_warning(f"No data found for {resource_type}")
+            return {"total": 0, "completed": 0, "failed": 0, "skipped": 0}
+
+        # Get stats BEFORE import
+        stats_before = self.get_import_stats(resource_type)
 
         # Build config path argument (only if config_path exists)
         config_arg = []
         if hasattr(self.ctx, 'config_path') and self.ctx.config_path:
             config_arg = ["--config", str(self.ctx.config_path)]
-
-        # Handle RBAC special case (uses rbac_migration.py script)
-        if special_handler == "rbac_script":
-            echo_info("Running RBAC migration script...")
-            echo_warning("Note: RBAC migration uses rbac_migration.py (not migrate command)")
-
-            # Check if rbac_migration.py exists
-            rbac_script = Path("rbac_migration.py")
-            if not rbac_script.exists():
-                echo_error("rbac_migration.py not found in current directory")
-                return {"total": 0, "completed": 0, "failed": 0, "skipped": 0}
-
-            cmd = [sys.executable, str(rbac_script)]
-
-            try:
-                result = subprocess.run(
-                    cmd,
-                    check=False,
-                    capture_output=False,  # Show output in real-time
-                    text=True
-                )
-
-                if result.returncode == 0:
-                    echo_success("RBAC migration completed")
-                    return {"total": 1, "completed": 1, "failed": 0, "skipped": 0}
-                else:
-                    echo_warning("RBAC migration finished with errors")
-                    return {"total": 1, "completed": 0, "failed": 1, "skipped": 0}
-
-            except Exception as e:
-                echo_error(f"Failed to run RBAC migration: {e}")
-                return {"total": 0, "completed": 0, "failed": 0, "skipped": 0}
-
-        # For regular resources, check if we have resources to import
-        # Settings doesn't need transformed data (exports directly)
-        if resource_type != "settings":
-            resource_dir = self.input_dir / resource_type
-            if not resource_dir.exists():
-                echo_warning(f"No data found for {resource_type}")
-                return {"total": 0, "completed": 0, "failed": 0, "skipped": 0}
-
-        # Get stats BEFORE import
-        stats_before = self.get_import_stats(resource_type)
 
         # Build command using the proven migrate command
         cmd = [
