@@ -1,0 +1,28 @@
+# Decrypted credential data - NEVER commit this!
+credentials_decrypted.json
+
+# Encrypted/encoded files (can be committed if necessary, but better not to)
+credentials_decrypted.json.gpg
+credentials_decrypted.json.enc
+credentials_decrypted.json.b64
+*.gpg
+*.enc
+*.b64
+
+# Extraction logs
+extraction.log
+*.log
+
+# Update reports
+credential-update-report.md
+credential-update-dry-run.md
+
+# Any backup or temporary files
+*.bak
+*.tmp
+*~
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
