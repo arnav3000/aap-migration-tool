@@ -256,3 +256,24 @@ SUCCESS-REPORT-PHASE2-PHASE3-FIXES.md
 # Generated migration reports
 PROJECT-FAILURES-REPORT.md
 CLAUDE.md
+
+# macOS system files
+.DS_Store
+
+# Backup directories
+backup-*/
+
+# Test scripts and directories
+cleanup_*.sh
+prepare_fresh_test_environment.sh
+run_clean_test.sh
+fix_duplicate_projects.py
+reset_stuck_credentials.sh
+sync_inventory_sources.py
+test_*.py
+test_*.sh
+test/
+
+# Credential toolkit and related files
+credential-toolkit.tar.gz
+credential_decrypt/
