@@ -376,32 +376,6 @@ The easiest way to use AAP Bridge is through the interactive Text User Interface
 aap-bridge
 ```
 
-**TUI Main Menu:**
-```
-╔══════════════════════════════════════════════════════════╗
-║              AAP Migration Tool - Main Menu              ║
-╚══════════════════════════════════════════════════════════╝
-
-1. Export Resources
-   ├─ Export from AAP 2.4 source
-
-2. Transform Resources
-   ├─ Transform exported data for AAP 2.6 compatibility
-
-3. Import Resources
-   ├─ 1. Pre-flight Check (Validate Dependencies)
-   ├─ 2. Import All Resources (Automatic)
-   ├─ 3. Granular Import (Step-by-Step Control) ⭐ Recommended
-   └─ 4. View Import Status
-
-4. Credential Operations
-   ├─ Compare credentials between source and target
-
-5. Validation & Reporting
-
-b. Back / Exit
-```
-
 **Why use the TUI?**
 - ✅ User-friendly guided workflow
 - ✅ Built-in progress tracking and status display
