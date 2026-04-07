@@ -39,7 +39,7 @@ def credentials():
     "--output",
     "-o",
     type=click.Path(),
-    default="./reports/credential-comparison.md",
+    default="./logs/credential-comparison.md",
     help="Output path for comparison report",
 )
 @pass_context
@@ -219,7 +219,7 @@ def migrate_credentials(ctx: MigrationContext, dry_run: bool, report_dir: str):
     "--output",
     "-o",
     type=click.Path(),
-    default="./reports/credential-status.md",
+    default="./logs/credential-status.md",
     help="Output path for status report",
 )
 @pass_context
