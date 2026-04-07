@@ -24,6 +24,11 @@ RUN wget https://github.com/arnav3000/aap-bridge-fork/archive/refs/heads/main.zi
 
 RUN unzip /app/main.zip
 
+RUN mkdir /app/aap-bridge-fork-main/logs
+RUN mkdir /app/aap-bridge-fork-main/exports
+RUN mkdir /app/aap-bridge-fork-main/xformed
+RUN mkdir /app/aap-bridge-fork-main/database
+
 # User setup
 RUN useradd appuser
 
