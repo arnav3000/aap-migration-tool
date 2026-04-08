@@ -19,7 +19,7 @@ class PathConfig(BaseModel):
     export_dir: str = Field(default="exports", description="Directory for exported data")
     transform_dir: str = Field(default="xformed", description="Directory for transformed data")
     schema_dir: str = Field(default="schemas", description="Directory for schema files")
-    report_dir: str = Field(default="logs", description="Directory for migration reports")
+    report_dir: str = Field(default="reports", description="Directory for migration reports")
     backup_dir: str = Field(default="backups", description="Directory for backups")
     mappings_file: str = Field(
         default="config/mappings.yaml",
@@ -391,7 +391,7 @@ class PerformanceConfig(BaseModel):
 class StateConfig(BaseModel):
     """State management configuration."""
 
-    db_path: str = Field(default="./database/migration_state.db", description="Path to state database file")
+    db_path: str = Field(default="./migration_state.db", description="Path to state database file")
     checkpoint_frequency: int = Field(
         default=100, ge=10, le=1000, description="Items between checkpoints"
     )

@@ -1,0 +1,8 @@
+# This directory is for container volume mounts
+# Structure:
+#   volumes/
+#   ├── database/    - SQLite database file
+#   ├── logs/        - Migration logs and reports
+#   ├── exports/     - Exported data from source AAP
+#   ├── xformed/     - Transformed data for target AAP
+#   └── config/      - Optional configuration overrides

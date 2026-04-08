@@ -1200,7 +1200,7 @@ class InstanceImporter(ResourceImporter):
         skipped_count = 0
 
         # Get instance hostname mappings from config/mappings.yaml
-        instance_mappings = self.resource_mappings.get("instances", {})
+        instance_mappings = self.resource_mappings.get("instances") or {}
 
         # Fetch all target instances once
         target_instances = await self.client.list_resources("instances")

@@ -20,14 +20,14 @@ RUN mkdir /app
 # Add app-bridge code
 WORKDIR /app
 
-RUN wget https://github.com/arnav3000/aap-bridge-fork/archive/refs/heads/fix-containers.zip
+RUN wget https://github.com/arnav3000/aap-bridge-fork/archive/refs/heads/main.zip
 
-RUN unzip /app/fix-containers.zip
+RUN unzip /app/main.zip
 
-RUN mkdir -p /app/aap-bridge-fork-fix-containers/logs
-RUN mkdir -p /app/aap-bridge-fork-fix-containers/exports
-RUN mkdir -p /app/aap-bridge-fork-fix-containers/xformed
-RUN mkdir -p /app/aap-bridge-fork-fix-containers/database
+RUN mkdir /app/aap-bridge-fork-main/logs
+RUN mkdir /app/aap-bridge-fork-main/exports
+RUN mkdir /app/aap-bridge-fork-main/xformed
+RUN mkdir /app/aap-bridge-fork-main/database
 
 # User setup
 RUN useradd appuser
@@ -38,13 +38,11 @@ USER appuser
 
 RUN pip3 install uv
 
-WORKDIR /app/aap-bridge-fork-fix-containers
+WORKDIR /app/aap-bridge-fork-main
 
 # Install AAP Bridge
 RUN ~/.local/bin/uv venv --seed --python 3.12
 RUN ~/.local/bin/uv sync
 
-# Activate venv by default when entering container
-RUN echo 'source /app/aap-bridge-fork-fix-containers/.venv/bin/activate' >> ~/.bashrc
-
-# Note: .env will be mounted at runtime - do not copy .env.example here
+# Configuration file
+RUN cp /app/aap-bridge-fork-main/.env.example /app/aap-bridge-fork-main/.env

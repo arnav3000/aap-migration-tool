@@ -1,0 +1,66 @@
+# AAP Bridge - Container Deployment
+# Base: Universal Base Image (UBI) 9
+# Generic Containerfile - works with any branch
+FROM registry.access.redhat.com/ubi9/ubi:latest
+
+# Build arguments
+ARG APP_VERSION=0.2.0
+ARG PYTHON_VERSION=3.12
+ARG REPO_URL=https://github.com/arnav3000/aap-bridge-fork
+ARG BRANCH=main
+
+# Labels (OCI standard)
+LABEL org.opencontainers.image.title="aap-bridge" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.description="Production-grade migration tool for Ansible Automation Platform" \
+      org.opencontainers.image.source="${REPO_URL}" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later" \
+      org.opencontainers.image.vendor="Antony Sallas"
+
+MAINTAINER Magnus Glantz <sudo@redhat.com>
+
+# Install prerequisites
+RUN dnf install -y \
+    python3 \
+    python3-pip \
+    wget \
+    unzip \
+    && dnf clean all
+
+# Create application directory
+WORKDIR /app
+
+# Download and extract application code
+RUN wget ${REPO_URL}/archive/refs/heads/${BRANCH}.zip -O source.zip && \
+    unzip source.zip && \
+    rm source.zip && \
+    mv aap-bridge-fork-* aap-bridge && \
+    cd aap-bridge && \
+    mkdir -p database logs exports xformed
+
+# Create non-root user
+RUN useradd -m -u 1001 appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
+
+# Install UV package manager
+RUN pip3 install --user uv
+
+# Set working directory to application
+WORKDIR /app/aap-bridge
+
+# Install application dependencies
+RUN ~/.local/bin/uv venv --seed --python ${PYTHON_VERSION} && \
+    ~/.local/bin/uv sync
+
+# Configure environment
+ENV PATH="/app/aap-bridge/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    AAP_BRIDGE_CONFIG=/app/aap-bridge/config/config.yaml
+
+# Activate venv by default
+RUN echo 'source /app/aap-bridge/.venv/bin/activate' >> ~/.bashrc
+
+# Default command - keeps container running
+CMD ["tail", "-f", "/dev/null"]

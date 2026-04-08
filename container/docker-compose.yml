@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  # AAP Bridge Migration Tool
+  aap-bridge:
+    build:
+      context: ..
+      dockerfile: container/Containerfile
+      args:
+        BRANCH: main
+        APP_VERSION: "0.2.0"
+    image: aap-bridge:latest
+    container_name: aap-bridge
+    network_mode: host  # Required for host.containers.internal on macOS/Podman
+    env_file:
+      - .env  # Copy .env.container to .env and customize
+    volumes:
+      # Persistent data volumes
+      - ./volumes/database:/app/aap-bridge/database:Z
+      - ./volumes/logs:/app/aap-bridge/logs:Z
+      - ./volumes/exports:/app/aap-bridge/exports:Z
+      - ./volumes/xformed:/app/aap-bridge/xformed:Z
+      # Configuration (override if needed)
+      - ./volumes/config:/app/aap-bridge/config:Z
+    restart: unless-stopped
+    command: tail -f /dev/null
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL (Optional - only if using PostgreSQL instead of SQLite)
+  postgres:
+    image: postgres:15-alpine
+    container_name: aap-postgres
+    profiles:
+      - postgres  # Only starts when explicitly enabled
+    environment:
+      POSTGRES_USER: aap_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: aap_migration
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aap_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres-data:
+    driver: local
+
+# Usage:
+# ======
+# 1. Copy .env.container to .env and customize your credentials
+# 2. Create volumes directory: mkdir -p volumes/{database,logs,exports,xformed,config}
+#
+# SQLite deployment (default):
+#   podman-compose up -d aap-bridge
+#   podman exec -it aap-bridge bash
+#
+# PostgreSQL deployment:
+#   podman-compose --profile postgres up -d
+#   # Update .env: MIGRATION_STATE_DB_PATH=postgresql://aap_user:changeme@postgres:5432/aap_migration
+#   podman exec -it aap-bridge bash
+#
+# Run migration:
+#   aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y
