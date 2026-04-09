@@ -471,6 +471,7 @@ class ResourceImporter:
                         source_id=source_id,
                         target_id=existing["id"],
                         target_name=existing.get("name"),
+                        source_name=data.get("name"),  # Auto-creates record if missing
                     )
                     return existing
                 else:
@@ -494,6 +495,7 @@ class ResourceImporter:
                                 source_id=source_id,
                                 target_id=manual_to_scm_result["id"],
                                 target_name=manual_to_scm_result.get("name"),
+                                source_name=data.get("name"),  # Auto-creates record if missing
                             )
                             return manual_to_scm_result
 
@@ -521,6 +523,7 @@ class ResourceImporter:
                         source_id=source_id,
                         target_id=updated["id"],
                         target_name=updated.get("name"),
+                        source_name=data.get("name"),  # Auto-creates record if missing
                     )
                     return updated
 
@@ -1200,7 +1203,7 @@ class InstanceImporter(ResourceImporter):
         skipped_count = 0
 
         # Get instance hostname mappings from config/mappings.yaml
-        instance_mappings = self.resource_mappings.get("instances", {})
+        instance_mappings = self.resource_mappings.get("instances") or {}
 
         # Fetch all target instances once
         target_instances = await self.client.list_resources("instances")
@@ -2335,6 +2338,7 @@ class HostImporter(ResourceImporter):
                         source_id=source_id,
                         target_id=existing_host["id"],
                         target_name=existing_host.get("name"),
+                        source_name=source_name,  # Auto-creates record if missing
                     )
                     logger.info(
                         "host_already_exists",
