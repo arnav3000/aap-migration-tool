@@ -277,3 +277,5 @@ test/
 # Credential toolkit and related files
 credential-toolkit.tar.gz
 credential_decrypt/
+
+container/diagnose_migration.sh
