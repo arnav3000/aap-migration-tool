@@ -262,6 +262,16 @@ CLAUDE.md
 
 # Backup directories
 backup-*/
+**/backup-*/
+backups/
+**/backups/
+
+# Exported credentials and sensitive data
+**/credentials/credentials_*.json
+**/xformed*/credentials/*.json
+**/exports*/credentials/*.json
+credentials_decrypted.json
+**/credentials_decrypted.json
 
 # Test scripts and directories
 cleanup_*.sh
