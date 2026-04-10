@@ -17,6 +17,15 @@ regexes = [
     '''fake[_-]?secret''',
     '''dummy[_-]?password''',
     '''placeholder''',
+    # AAP-specific placeholder patterns
+    '''<your-source-token>''',
+    '''<your-target-token>''',
+    '''<placeholder.*>''',
+    '''"<.*-token>"''',
+    '''SOURCE__TOKEN="<.*>"''',
+    '''TARGET__TOKEN="<.*>"''',
+    '''VAULT__.*="<.*>"''',
+    '''\*\*\*REMOVED\*\*\*''',  # Redacted tokens in container/.env.container
 ]
 
 # Paths to ignore - test fixtures, examples, documentation
@@ -25,6 +34,7 @@ paths = [
     '''tests/test_data/.*''',
     '''exports/.*''',
     '''xformed/.*''',
+    '''backup-.*''',
     '''.*\.backup.*''',
     '''.*\.bak$''',
     '''.*\.db$''',
@@ -36,6 +46,8 @@ paths = [
     '''.*REPORT\.md$''',
     '''.*INSTRUCTIONS\.md$''',
     '''.*RESULTS\.md$''',
+    '''container/\.env\.container$''',  # Template file with placeholders
+    '''CRITICAL-RULES\.md$''',  # Documentation
 ]
 
 # Specific commits to ignore (if needed)

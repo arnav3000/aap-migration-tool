@@ -14,6 +14,12 @@ repos:
     rev: v8.18.2
     hooks:
       - id: gitleaks
+        name: Detect secrets with gitleaks
+        args:
+          - --config=.gitleaks.toml
+          - --verbose
+          - --no-banner
+          - --redact
 
   # Code formatting and linting
   - repo: https://github.com/astral-sh/ruff-pre-commit
