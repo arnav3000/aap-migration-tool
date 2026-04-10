@@ -322,8 +322,10 @@ def _analyze_resource_type(
     except Exception as e:
         logger.warning(f"Failed to query database for {resource_type}: {e}")
 
-    # Calculate discrepancy
-    stats["discrepancy"] = stats["transformed_count"] - stats["completed_count"]
+    # Calculate discrepancy (resources that are neither completed nor failed)
+    stats["discrepancy"] = stats["transformed_count"] - (
+        stats["completed_count"] + stats["failed_count"]
+    )
 
     # Identify specific missing resources if there's a discrepancy
     if stats["discrepancy"] > 0:
