@@ -83,11 +83,22 @@ def generate_migration_report(
         if resource_type:
             resource_types = [resource_type]
         else:
-            # Auto-detect from exported files
+            # Auto-detect from database (most reliable source)
             resource_types = []
-            for file_path in export_dir.glob("*.json"):
-                if file_path.stem not in ["metadata", "export_summary"]:
-                    resource_types.append(file_path.stem)
+            try:
+                with get_session(migration_state.database_url) as session:
+                    db_resource_types = (
+                        session.query(MigrationProgress.resource_type)
+                        .distinct()
+                        .all()
+                    )
+                    resource_types = [rt[0] for rt in db_resource_types]
+            except Exception as e:
+                logger.warning(f"Failed to query database for resource types: {e}")
+                # Fallback: detect from export subdirectories
+                for dir_path in export_dir.iterdir():
+                    if dir_path.is_dir():
+                        resource_types.append(dir_path.name)
 
         # Collect statistics for each resource type
         report_data = []
@@ -134,17 +145,40 @@ def _identify_missing_resources(
         List of missing resource details
     """
     missing = []
+    transformed_data = []
 
-    # Load transformed resources
-    transform_file = transform_dir / f"{resource_type}.json"
-    if not transform_file.exists():
-        return missing
+    # Load transformed resources (handle both flat and directory structure)
+    transform_subdir = transform_dir / resource_type
+    if transform_subdir.exists() and transform_subdir.is_dir():
+        # Directory-based structure: xformed/{resource_type}/{resource_type}_*.json
+        for batch_file in sorted(transform_subdir.glob(f"{resource_type}_*.json")):
+            try:
+                with open(batch_file) as f:
+                    batch_data = json.load(f)
+                    if isinstance(batch_data, list):
+                        transformed_data.extend(batch_data)
+                    else:
+                        transformed_data.append(batch_data)
+            except Exception as e:
+                logger.warning(f"Failed to read transform batch file {batch_file}: {e}")
+    else:
+        # Fallback: flat file structure: xformed/{resource_type}.json
+        transform_file = transform_dir / f"{resource_type}.json"
+        if not transform_file.exists():
+            return missing
 
-    try:
-        with open(transform_file) as f:
-            transformed_data = json.load(f)
-    except Exception as e:
-        logger.warning(f"Failed to read transform file for {resource_type}: {e}")
+        try:
+            with open(transform_file) as f:
+                batch_data = json.load(f)
+                if isinstance(batch_data, list):
+                    transformed_data = batch_data
+                else:
+                    transformed_data = [batch_data]
+        except Exception as e:
+            logger.warning(f"Failed to read transform file {transform_file}: {e}")
+            return missing
+
+    if not transformed_data:
         return missing
 
     # Get completed source IDs from database
@@ -193,25 +227,69 @@ def _analyze_resource_type(
         "missing_resources": [],
     }
 
-    # Count exported resources
-    export_file = export_dir / f"{resource_type}.json"
-    if export_file.exists():
-        try:
-            with open(export_file) as f:
-                exported_data = json.load(f)
-                stats["exported_count"] = len(exported_data)
-        except Exception as e:
-            logger.warning(f"Failed to read export file for {resource_type}: {e}")
+    # Count exported resources (handle both flat and directory structure)
+    exported_data = []
 
-    # Count transformed resources
-    transform_file = transform_dir / f"{resource_type}.json"
-    if transform_file.exists():
-        try:
-            with open(transform_file) as f:
-                transformed_data = json.load(f)
-                stats["transformed_count"] = len(transformed_data)
-        except Exception as e:
-            logger.warning(f"Failed to read transform file for {resource_type}: {e}")
+    # Try directory-based structure first: exports/{resource_type}/{resource_type}_*.json
+    export_subdir = export_dir / resource_type
+    if export_subdir.exists() and export_subdir.is_dir():
+        for batch_file in sorted(export_subdir.glob(f"{resource_type}_*.json")):
+            try:
+                with open(batch_file) as f:
+                    batch_data = json.load(f)
+                    if isinstance(batch_data, list):
+                        exported_data.extend(batch_data)
+                    else:
+                        exported_data.append(batch_data)
+            except Exception as e:
+                logger.warning(f"Failed to read export batch file {batch_file}: {e}")
+    else:
+        # Fallback: try flat file structure: exports/{resource_type}.json
+        export_file = export_dir / f"{resource_type}.json"
+        if export_file.exists():
+            try:
+                with open(export_file) as f:
+                    batch_data = json.load(f)
+                    if isinstance(batch_data, list):
+                        exported_data = batch_data
+                    else:
+                        exported_data = [batch_data]
+            except Exception as e:
+                logger.warning(f"Failed to read export file {export_file}: {e}")
+
+    stats["exported_count"] = len(exported_data)
+
+    # Count transformed resources (handle both flat and directory structure)
+    transformed_data = []
+
+    # Try directory-based structure first: xformed/{resource_type}/{resource_type}_*.json
+    transform_subdir = transform_dir / resource_type
+    if transform_subdir.exists() and transform_subdir.is_dir():
+        for batch_file in sorted(transform_subdir.glob(f"{resource_type}_*.json")):
+            try:
+                with open(batch_file) as f:
+                    batch_data = json.load(f)
+                    if isinstance(batch_data, list):
+                        transformed_data.extend(batch_data)
+                    else:
+                        transformed_data.append(batch_data)
+            except Exception as e:
+                logger.warning(f"Failed to read transform batch file {batch_file}: {e}")
+    else:
+        # Fallback: try flat file structure: xformed/{resource_type}.json
+        transform_file = transform_dir / f"{resource_type}.json"
+        if transform_file.exists():
+            try:
+                with open(transform_file) as f:
+                    batch_data = json.load(f)
+                    if isinstance(batch_data, list):
+                        transformed_data = batch_data
+                    else:
+                        transformed_data = [batch_data]
+            except Exception as e:
+                logger.warning(f"Failed to read transform file {transform_file}: {e}")
+
+    stats["transformed_count"] = len(transformed_data)
 
     # Query database for migration progress
     try:
