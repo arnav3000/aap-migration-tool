@@ -413,6 +413,46 @@ def _run_migration_workflow(
     echo_info(f"  Transformed: {xformed_dir}/")
     echo_info(f"  Imported to: {ctx.config.target.url}")
 
+    # Check for failures and show prominent reminder
+    try:
+        from aap_migration.migration.database import get_session
+        from aap_migration.migration.models import MigrationProgress
+
+        with get_session(ctx.migration_state.database_url) as session:
+            failed_count = (
+                session.query(MigrationProgress)
+                .filter_by(status="failed")
+                .count()
+            )
+
+            if failed_count > 0:
+                # Get resource types with failures
+                failed_resource_types = (
+                    session.query(MigrationProgress.resource_type)
+                    .filter_by(status="failed")
+                    .distinct()
+                    .all()
+                )
+                failed_rtypes = [rt[0] for rt in failed_resource_types]
+
+                click.echo()
+                click.echo("=" * 80)
+                echo_error(f"⚠️  ATTENTION: {failed_count} resources failed during import")
+                click.echo()
+                echo_warning("💡 Run this command for detailed failure analysis:")
+                click.echo()
+
+                if len(failed_rtypes) == 1:
+                    click.echo(click.style(f"   aap-bridge migration-report --resource-type {failed_rtypes[0]}", fg="yellow", bold=True))
+                else:
+                    click.echo(click.style("   aap-bridge migration-report", fg="yellow", bold=True))
+
+                click.echo()
+                click.echo("=" * 80)
+    except Exception as e:
+        # Don't fail migration if we can't check for failures
+        logger.debug(f"Could not check for failures: {e}")
+
 
 @click.group(name="migrate", invoke_without_command=True)
 @click.option(
