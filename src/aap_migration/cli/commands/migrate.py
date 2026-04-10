@@ -414,22 +414,30 @@ def _run_migration_workflow(
     echo_info(f"  Imported to: {ctx.config.target.url}")
 
     # Check for failures and show prominent reminder
+    # Only show failures from resource types migrated in THIS run
     try:
         from aap_migration.migration.database import get_session
         from aap_migration.migration.models import MigrationProgress
 
         with get_session(ctx.migration_state.database_url) as session:
+            # Filter by resource types migrated in this run only
             failed_count = (
                 session.query(MigrationProgress)
-                .filter_by(status="failed")
+                .filter(
+                    MigrationProgress.status == "failed",
+                    MigrationProgress.resource_type.in_(resource_types)
+                )
                 .count()
             )
 
             if failed_count > 0:
-                # Get resource types with failures
+                # Get resource types with failures (from current run only)
                 failed_resource_types = (
                     session.query(MigrationProgress.resource_type)
-                    .filter_by(status="failed")
+                    .filter(
+                        MigrationProgress.status == "failed",
+                        MigrationProgress.resource_type.in_(resource_types)
+                    )
                     .distinct()
                     .all()
                 )
@@ -437,7 +445,7 @@ def _run_migration_workflow(
 
                 click.echo()
                 click.echo("=" * 80)
-                echo_error(f"⚠️  ATTENTION: {failed_count} resources failed during import")
+                echo_error(f"⚠️  ATTENTION: {failed_count} resources failed during this migration")
                 click.echo()
                 echo_warning("💡 Run this command for detailed failure analysis:")
                 click.echo()
