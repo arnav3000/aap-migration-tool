@@ -111,6 +111,29 @@ The tool is organized into several key components:
 
 ### Installation
 
+#### Option 1: Containerized Deployment (Recommended) 🐳
+
+Production-ready containerized deployment with zero Python setup required:
+
+```bash
+# 1. Build the container
+podman build -f container/Containerfile -t aap-bridge:latest .
+
+# 2. Run the container with volume mounts
+podman run -d --name aap-bridge --network host \
+  -v $(pwd)/database:/app/aap-bridge/database:Z \
+  -v $(pwd)/.env:/app/aap-bridge/.env:Z \
+  aap-bridge:latest
+
+# 3. Enter container and run migration
+podman exec -it aap-bridge bash
+aap-bridge --help
+```
+
+📖 **For detailed container setup and deployment options**, see the [Container Deployment Guide](https://github.com/arnav3000/aap-bridge-fork/blob/add-reporting-for-missing-items/container/README.md)
+
+#### Option 2: Local Python Installation
+
 ```bash
 # Clone the repository
 git clone https://github.com/arnav3000/aap-bridge-fork.git
