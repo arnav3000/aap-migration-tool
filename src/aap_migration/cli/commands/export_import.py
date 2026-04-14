@@ -1434,7 +1434,7 @@ def import_cmd(
     async def run_import():
         # PRE-IMPORT VALIDATION: Check for missing mappings to prevent duplicates
         should_continue, validation_stats = validate_pre_import_state(
-            input_dir, migration_state, yes
+            input_dir, ctx.migration_state, yes
         )
         if not should_continue:
             return  # User cancelled import
