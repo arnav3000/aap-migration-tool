@@ -458,6 +458,7 @@ def _run_migration_workflow(
         # CRITICAL: Reinitialize HTTP clients before Phase 3 import
         # The patch phase closed its event loop, making clients invalid
         from aap_migration.client.aap_source_client import AAPSourceClient
+        from aap_migration.client.aap_target_client import AAPTargetClient
         ctx._target_client = AAPTargetClient(
             config=ctx.config.target,
             rate_limit=ctx.config.performance.rate_limit,
