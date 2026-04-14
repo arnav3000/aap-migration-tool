@@ -75,35 +75,22 @@ def cli(
 
     Running without arguments launches an interactive menu.
 
-    MAIN WORKFLOW:
-        migrate              Run migrations (full, status, resume)
-        credentials          Manage credentials (compare, migrate, report)
-        migration-report     Generate detailed migration report
-        config               Configuration and validation
-
-    MANUAL WORKFLOW:
-        export               Export resources from source
-        transform            Transform exported data
-        import               Import resources to target
-
     Examples:
 
         # Interactive menu
         aap-bridge
 
-        # Run full migration (recommended)
-        aap-bridge migrate full
+        # Validate configuration
+        aap-bridge config validate --config config.yaml
 
-        # Manual step-by-step migration
-        aap-bridge export
-        aap-bridge transform
-        aap-bridge import
+        # Run full migration
+        aap-bridge migrate full --config config.yaml
 
-        # Check credential status
-        aap-bridge credentials compare
+        # Export resources only
+        aap-bridge export --config config.yaml --output export.json
 
-        # Generate migration report
-        aap-bridge migration-report
+        # Show migration status
+        aap-bridge migrate status --config config.yaml
     """
     # Setup logging with optional file output
     # If --log-file is provided, use it; otherwise default to logs/migration.log
@@ -133,31 +120,27 @@ def cli(
         interactive_menu(ctx)
 
 
-# Register command groups - VISIBLE (Main Workflow)
+# Register command groups
+cli.add_command(checkpoint_commands.checkpoint)
 cli.add_command(config_commands.config)
 cli.add_command(credentials_commands.credentials)
+cli.add_command(metadata_commands.metadata)
 cli.add_command(migrate_commands.migrate)
+cli.add_command(retry_commands.retry_group, name="retry")
+cli.add_command(schema_commands.schema_group)
+cli.add_command(state_commands.state)
 
-# Register standalone commands - VISIBLE (Manual Workflow)
+# Register standalone commands
+cli.add_command(cleanup_commands.cleanup)
+cli.add_command(prep_commands.prep)
 cli.add_command(export_import.export)
 cli.add_command(transform_commands.transform)
 cli.add_command(export_import.import_cmd, name="import")
+cli.add_command(patch_projects_commands.patch_projects)
+cli.add_command(project_failures_commands.analyze_project_failures)
+cli.add_command(validate_commands.validate)
+cli.add_command(validate_commands.report)
 cli.add_command(migration_report_commands.generate_migration_report)
-
-# HIDDEN: Utility commands (accessible but not shown in --help)
-cli.add_command(cleanup_commands.cleanup, hidden=True)
-cli.add_command(retry_commands.retry_group, name="retry", hidden=True)
-cli.add_command(validate_commands.validate, hidden=True)
-cli.add_command(project_failures_commands.analyze_project_failures, hidden=True)
-
-# HIDDEN: Internal/Advanced commands
-cli.add_command(checkpoint_commands.checkpoint, hidden=True)
-cli.add_command(metadata_commands.metadata, hidden=True)
-cli.add_command(schema_commands.schema_group, hidden=True)
-cli.add_command(state_commands.state, hidden=True)
-cli.add_command(prep_commands.prep, hidden=True)
-cli.add_command(patch_projects_commands.patch_projects, hidden=True)
-cli.add_command(validate_commands.report, hidden=True)
 
 
 def main() -> int:
