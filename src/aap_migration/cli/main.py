@@ -12,22 +12,16 @@ import click
 from dotenv import load_dotenv
 
 from aap_migration import __version__
-from aap_migration.cli.commands import checkpoint as checkpoint_commands
 from aap_migration.cli.commands import cleanup as cleanup_commands
 from aap_migration.cli.commands import config as config_commands
 from aap_migration.cli.commands import credentials as credentials_commands
 from aap_migration.cli.commands import export_import
-from aap_migration.cli.commands import metadata as metadata_commands
 from aap_migration.cli.commands import migrate as migrate_commands
 from aap_migration.cli.commands import migration_report as migration_report_commands
-from aap_migration.cli.commands import patch_projects as patch_projects_commands
-from aap_migration.cli.commands import prep as prep_commands
 from aap_migration.cli.commands import project_failures as project_failures_commands
 from aap_migration.cli.commands import retry as retry_commands
-from aap_migration.cli.commands import schema as schema_commands
 from aap_migration.cli.commands import state as state_commands
 from aap_migration.cli.commands import transform as transform_commands
-from aap_migration.cli.commands import validate as validate_commands
 from aap_migration.cli.context import MigrationContext
 from aap_migration.cli.menu import interactive_menu
 from aap_migration.utils.logging import configure_logging, get_logger
@@ -121,25 +115,18 @@ def cli(
 
 
 # Register command groups
-cli.add_command(checkpoint_commands.checkpoint)
 cli.add_command(config_commands.config)
 cli.add_command(credentials_commands.credentials)
-cli.add_command(metadata_commands.metadata)
 cli.add_command(migrate_commands.migrate)
 cli.add_command(retry_commands.retry_group, name="retry")
-cli.add_command(schema_commands.schema_group)
 cli.add_command(state_commands.state)
 
 # Register standalone commands
 cli.add_command(cleanup_commands.cleanup)
-cli.add_command(prep_commands.prep)
 cli.add_command(export_import.export)
 cli.add_command(transform_commands.transform)
 cli.add_command(export_import.import_cmd, name="import")
-cli.add_command(patch_projects_commands.patch_projects)
 cli.add_command(project_failures_commands.analyze_project_failures)
-cli.add_command(validate_commands.validate)
-cli.add_command(validate_commands.report)
 cli.add_command(migration_report_commands.generate_migration_report)
 
 
