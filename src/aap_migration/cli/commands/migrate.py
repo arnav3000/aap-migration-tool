@@ -5,6 +5,7 @@ This module provides commands for executing migrations from source AAP to target
 """
 
 import asyncio
+import json
 from pathlib import Path
 
 import click
@@ -131,6 +132,57 @@ async def _map_managed_credential_types(source_client, target_client, state) -> 
     except Exception as e:
         logger.error(f"Failed to map managed credential types: {e}")
         return 0
+
+
+def _scan_scm_inventory_source_projects(xformed_dir: Path) -> set[int]:
+    """Scan inventory sources to find which projects are referenced by SCM sources.
+
+    Only SCM-based inventory sources need their projects to be synced.
+    Other source types (ec2, vmware, file, etc.) don't use projects.
+
+    Args:
+        xformed_dir: Path to transformed data directory
+
+    Returns:
+        Set of project source IDs referenced by SCM inventory sources
+    """
+    referenced_projects = set()
+    inv_sources_dir = xformed_dir / "inventory_sources"
+
+    if not inv_sources_dir.exists():
+        logger.debug("No inventory_sources directory found")
+        return referenced_projects
+
+    try:
+        for json_file in inv_sources_dir.glob("inventory_sources_*.json"):
+            try:
+                with open(json_file) as f:
+                    sources = json.load(f)
+                    for source in sources:
+                        # Only SCM sources need project sync
+                        if source.get("source") == "scm":
+                            project_id = source.get("source_project")
+                            if project_id:
+                                referenced_projects.add(project_id)
+                                logger.debug(
+                                    "scm_inventory_source_found",
+                                    source_name=source.get("name"),
+                                    source_project=project_id,
+                                )
+            except Exception as e:
+                logger.warning(f"Error scanning {json_file}: {e}")
+                continue
+
+        if referenced_projects:
+            logger.info(
+                "scm_projects_referenced",
+                count=len(referenced_projects),
+                project_ids=sorted(referenced_projects),
+            )
+    except Exception as e:
+        logger.error(f"Error scanning inventory sources: {e}")
+
+    return referenced_projects
 
 
 def _run_migration_workflow(
@@ -337,37 +389,70 @@ def _run_migration_workflow(
         types1 = [t for t in resource_types if t in PHASE1_RESOURCE_TYPES]
         run_import(types1, "Infrastructure & Projects", import_phase="phase1")
 
-        # 2. Patch Projects (Phase 2 logic)
-        echo_info("Phase 2 (Patching): Patching Projects with SCM details...")
+        # 2. Patch Projects (Phase 2 logic) - Smart conditional patching
+        should_patch = False
+        patch_all = False
+        scm_project_ids = None
 
-        # CRITICAL: Reinitialize HTTP client before patch phase
-        # The previous import phase closed its event loop, making the existing
-        # client's connection pool invalid. We need a fresh client for this new
-        # asyncio.run() context.
-        from aap_migration.client.aap_target_client import AAPTargetClient
-        ctx._target_client = AAPTargetClient(
-            config=ctx.config.target,
-            rate_limit=ctx.config.performance.rate_limit,
-            log_payloads=ctx.config.logging.log_payloads,
-            max_payload_size=ctx.config.logging.max_payload_size,
-            max_connections=ctx.config.performance.http_max_connections,
-            max_keepalive_connections=ctx.config.performance.http_max_keepalive_connections,
-        )
+        if "projects" in resource_types:
+            # Migrating projects - patch all of them
+            should_patch = True
+            patch_all = True
+        elif "inventory_sources" in resource_types:
+            # Check if any inventory sources use SCM (need project sync)
+            scm_project_ids = _scan_scm_inventory_source_projects(xformed_dir)
+            if scm_project_ids:
+                should_patch = True
+                logger.info(
+                    "selective_patching_enabled",
+                    scm_project_count=len(scm_project_ids),
+                    project_ids=sorted(scm_project_ids),
+                )
 
-        async def run_patch():
-            await patch_project_scm_details(
-                ctx,
-                xformed_dir,
-                batch_size=ctx.config.performance.project_patch_batch_size,
-                interval=ctx.config.performance.project_patch_batch_interval,
+        if should_patch:
+            if patch_all:
+                echo_info("Phase 2 (Patching): Patching all migrated projects...")
+            else:
+                echo_info(
+                    f"Phase 2 (Patching): Patching {len(scm_project_ids)} "
+                    f"projects referenced by SCM inventory sources..."
+                )
+
+            # CRITICAL: Reinitialize HTTP client before patch phase
+            # The previous import phase closed its event loop, making the existing
+            # client's connection pool invalid. We need a fresh client for this new
+            # asyncio.run() context.
+            from aap_migration.client.aap_target_client import AAPTargetClient
+            ctx._target_client = AAPTargetClient(
+                config=ctx.config.target,
+                rate_limit=ctx.config.performance.rate_limit,
+                log_payloads=ctx.config.logging.log_payloads,
+                max_payload_size=ctx.config.logging.max_payload_size,
+                max_connections=ctx.config.performance.http_max_connections,
+                max_keepalive_connections=ctx.config.performance.http_max_keepalive_connections,
             )
 
-        try:
-            asyncio.run(run_patch())
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(run_patch())
-        click.echo()
+            async def run_patch():
+                await patch_project_scm_details(
+                    ctx,
+                    xformed_dir,
+                    batch_size=ctx.config.performance.project_patch_batch_size,
+                    interval=ctx.config.performance.project_patch_batch_interval,
+                    project_source_ids=scm_project_ids if not patch_all else None,
+                )
+
+            try:
+                asyncio.run(run_patch())
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(run_patch())
+            click.echo()
+        else:
+            logger.debug(
+                "skipping_project_patching",
+                reason="projects not in migration scope and no SCM inventory sources found",
+                resource_types=resource_types,
+            )
 
         # 3. Import Phase 3 - Pass "phase3" to trigger the batch_precheck fix
         # CRITICAL: Reinitialize HTTP clients before Phase 3 import
