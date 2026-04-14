@@ -32,6 +32,17 @@ ORGANIZATION_SCOPED_RESOURCES = {
     "notification_templates",
 }
 
+# Resource types that REQUIRE an organization (cannot be global/None)
+# These resources must have organization field populated to be created in AAP
+ORGANIZATION_REQUIRED_RESOURCES = {
+    "teams",
+    "projects",
+    "inventories",
+    "job_templates",
+    "workflow_job_templates",
+    "notification_templates",
+}
+
 
 class ResourceImporter:
     """Base class for importing resources to AAP 2.6.
@@ -115,6 +126,41 @@ class ResourceImporter:
             if resolve_dependencies:
                 data = await self._resolve_dependencies(resource_type, data)
 
+            # VALIDATION: Check required fields
+            # Some resources MUST have an organization to be created in AAP
+            if resource_type in ORGANIZATION_REQUIRED_RESOURCES:
+                organization_id = data.get("organization")
+                if organization_id is None:
+                    error_msg = (
+                        f"Missing required field 'organization' for {resource_type}. "
+                        f"Resource '{data.get('name', 'unknown')}' (source ID {source_id}) "
+                        f"cannot be created without an organization. This indicates invalid "
+                        f"data in source AAP that needs manual correction."
+                    )
+                    logger.error(
+                        "validation_failed_missing_organization",
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        name=data.get("name"),
+                        error=error_msg,
+                    )
+                    self.stats["error_count"] += 1
+                    self.state.mark_failed(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        error_message=f"Validation failed: {error_msg}",
+                    )
+                    self.import_errors.append(
+                        {
+                            "resource_type": resource_type,
+                            "source_id": source_id,
+                            "name": data.get("name", "unknown"),
+                            "error": error_msg,
+                            "error_type": "ValidationError",
+                        }
+                    )
+                    return None
+
             # Remove None/null values from data before API call
             # AAP 2.6 API requires null-valued fields to be absent, not sent as null
             # EXCEPTION: Preserve None for credential ownership fields (organization/user/team)
@@ -130,14 +176,35 @@ class ResourceImporter:
                     # For organization-scoped resources, check duplicates within same org only
                     # This prevents mapping resources with same name in different orgs to single target
                     organization_id = None
+                    skip_duplicate_check = False
+
                     if resource_type in ORGANIZATION_SCOPED_RESOURCES:
                         organization_id = data.get("organization")
 
-                    existing = await self.client.find_resource_by_name(
-                        resource_type,
-                        resource_name,
-                        organization_id=organization_id,
-                    )
+                        # Skip duplicate detection if organization is None
+                        # Passing None would search globally, incorrectly matching resources from other orgs
+                        # Note: Resources requiring org were already validated above and failed if org=None
+                        # This handles resources that CAN be global (like credentials, execution_environments)
+                        if organization_id is None:
+                            skip_duplicate_check = True
+                            logger.debug(
+                                "skipping_duplicate_detection_no_org",
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                name=resource_name,
+                                reason="organization_is_none",
+                            )
+
+                    if skip_duplicate_check:
+                        # Skip duplicate check - will attempt creation
+                        # If duplicate exists, API will return 409/400 and we handle it below
+                        existing = None
+                    else:
+                        existing = await self.client.find_resource_by_name(
+                            resource_type,
+                            resource_name,
+                            organization_id=organization_id,
+                        )
                     if existing:
                         logger.warning(
                             "resource_exists_but_not_mapped",
