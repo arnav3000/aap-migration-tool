@@ -20,6 +20,18 @@ from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Resource types that are scoped to organizations
+# Names must be unique within an organization, but can duplicate across organizations
+ORGANIZATION_SCOPED_RESOURCES = {
+    "teams",
+    "projects",
+    "inventories",
+    "credentials",
+    "job_templates",
+    "workflow_job_templates",
+    "notification_templates",
+}
+
 
 class ResourceImporter:
     """Base class for importing resources to AAP 2.6.
@@ -115,7 +127,17 @@ class ResourceImporter:
             resource_name = data.get("name")
             if resource_name:
                 try:
-                    existing = await self.client.find_resource_by_name(resource_type, resource_name)
+                    # For organization-scoped resources, check duplicates within same org only
+                    # This prevents mapping resources with same name in different orgs to single target
+                    organization_id = None
+                    if resource_type in ORGANIZATION_SCOPED_RESOURCES:
+                        organization_id = data.get("organization")
+
+                    existing = await self.client.find_resource_by_name(
+                        resource_type,
+                        resource_name,
+                        organization_id=organization_id,
+                    )
                     if existing:
                         logger.warning(
                             "resource_exists_but_not_mapped",
@@ -123,6 +145,7 @@ class ResourceImporter:
                             source_id=source_id,
                             target_id=existing["id"],
                             name=resource_name,
+                            organization_id=organization_id,
                             action="updating_mapping_instead_of_creating_duplicate",
                         )
                         # Update mapping to prevent future attempts
