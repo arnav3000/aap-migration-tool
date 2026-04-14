@@ -34,13 +34,13 @@ ORGANIZATION_SCOPED_RESOURCES = {
 
 # Resource types that REQUIRE an organization (cannot be global/None)
 # These resources must have organization field populated to be created in AAP
+# Note: job_templates and workflow_job_templates inherit org from project/inventory
+#       credentials can be global or org-scoped (organization is optional for both)
 ORGANIZATION_REQUIRED_RESOURCES = {
-    "teams",
-    "projects",
-    "inventories",
-    "job_templates",
-    "workflow_job_templates",
-    "notification_templates",
+    "teams",                    # Must have org
+    "projects",                 # Must have org
+    "inventories",              # Must have org
+    "notification_templates",   # Must have org
 }
 
 
