@@ -28,7 +28,7 @@ from aap_migration.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-@click.group(name="state")
+@click.group(name="state", hidden=True)
 def state() -> None:
     """Migration state management commands.
 

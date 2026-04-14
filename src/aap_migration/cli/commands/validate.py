@@ -26,7 +26,7 @@ from aap_migration.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-@click.command(name="validate")
+@click.command(name="validate", hidden=True)
 @click.option(
     "--resource-type",
     "-r",
@@ -168,7 +168,7 @@ def validate(
         loop.run_until_complete(run_validation())
 
 
-@click.command(name="report")
+@click.command(name="report", hidden=True)
 @click.option(
     "--output",
     "-o",

@@ -17,7 +17,7 @@ from aap_migration.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-@click.group(name="metadata")
+@click.group(name="metadata", hidden=True)
 def metadata():
     """Manage metadata.json for export directories.
 

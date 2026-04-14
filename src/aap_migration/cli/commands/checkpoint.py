@@ -28,7 +28,7 @@ from aap_migration.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-@click.group(name="checkpoint")
+@click.group(name="checkpoint", hidden=True)
 def checkpoint() -> None:
     """Checkpoint management commands.
 

@@ -1298,7 +1298,7 @@ def clear_database(database_url: str) -> tuple[int, int]:
     return deleted_progress, deleted_mappings
 
 
-@click.command(name="cleanup")
+@click.command(name="cleanup", hidden=True)
 @click.option(
     "-r",
     "--resource-type",

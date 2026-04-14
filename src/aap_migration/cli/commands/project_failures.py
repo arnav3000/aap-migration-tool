@@ -18,7 +18,7 @@ from aap_migration.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-@click.command(name="analyze-project-failures")
+@click.command(name="analyze-project-failures", hidden=True)
 @click.option(
     "--output",
     "-o",

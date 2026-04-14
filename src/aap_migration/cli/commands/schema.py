@@ -16,7 +16,7 @@ from aap_migration.schema.persistence import (
 )
 
 
-@click.group(name="schema")
+@click.group(name="schema", hidden=True)
 def schema_group():
     """Schema management commands for AAP migration."""
 

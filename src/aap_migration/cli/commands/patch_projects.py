@@ -248,7 +248,7 @@ async def patch_project_scm_details(
                 echo_warning("Phase 2 completed but no projects were patched.")
 
 
-@click.command(name="patch-projects")
+@click.command(name="patch-projects", hidden=True)
 @click.option(
     "--input",
     "-i",
