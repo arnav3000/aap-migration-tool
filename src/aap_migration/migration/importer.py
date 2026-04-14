@@ -110,6 +110,40 @@ class ResourceImporter:
             ownership_fields = {"user", "team"}
             data = {k: v for k, v in data.items() if v is not None or k in ownership_fields}
 
+            # DUPLICATE DETECTION: Check if resource already exists in target AAP
+            # This prevents creating duplicates when database mapping is missing
+            resource_name = data.get("name")
+            if resource_name:
+                try:
+                    existing = await self.client.find_resource_by_name(resource_type, resource_name)
+                    if existing:
+                        logger.warning(
+                            "resource_exists_but_not_mapped",
+                            resource_type=resource_type,
+                            source_id=source_id,
+                            target_id=existing["id"],
+                            name=resource_name,
+                            action="updating_mapping_instead_of_creating_duplicate",
+                        )
+                        # Update mapping to prevent future attempts
+                        self.state.mark_completed(
+                            resource_type=resource_type,
+                            source_id=source_id,
+                            target_id=existing["id"],
+                            target_name=existing.get("name"),
+                            source_name=resource_name,
+                        )
+                        self.stats["skipped_count"] += 1
+                        return existing
+                except Exception as e:
+                    # If lookup fails, continue with normal create (don't break import)
+                    logger.debug(
+                        "duplicate_detection_failed",
+                        resource_type=resource_type,
+                        error=str(e),
+                        action="continuing_with_create",
+                    )
+
             # Create resource
             result = await self.client.create_resource(
                 resource_type=resource_type,

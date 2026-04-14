@@ -739,6 +739,106 @@ def export(
         loop.run_until_complete(run_export())
 
 
+def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tuple[bool, dict]:
+    """Validate database state before import to prevent duplicates.
+
+    Checks for missing ID mappings that could cause duplicate resource creation.
+
+    Args:
+        input_dir: Directory containing transformed files
+        state: Migration state object
+        yes: Auto-confirm prompts
+
+    Returns:
+        Tuple of (should_continue, validation_stats)
+    """
+    validation_stats = {
+        "transformed_count": 0,
+        "mapped_count": 0,
+        "missing_mappings": 0,
+        "resource_details": {},
+    }
+
+    try:
+        # Count resources in transformed files
+        for resource_dir in input_dir.iterdir():
+            if not resource_dir.is_dir():
+                continue
+
+            resource_type = resource_dir.name
+            resource_count = 0
+
+            # Count resources in JSON files
+            for json_file in resource_dir.glob("*.json"):
+                try:
+                    with open(json_file) as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            resource_count += len(data)
+                        else:
+                            resource_count += 1
+                except Exception:
+                    continue
+
+            if resource_count > 0:
+                validation_stats["transformed_count"] += resource_count
+
+                # Count existing mappings in database
+                try:
+                    mapped_count = state.count_mapped_resources(resource_type)
+                except Exception:
+                    mapped_count = 0
+
+                validation_stats["mapped_count"] += mapped_count
+
+                missing = resource_count - mapped_count
+                if missing > 0:
+                    validation_stats["missing_mappings"] += missing
+                    validation_stats["resource_details"][resource_type] = {
+                        "transformed": resource_count,
+                        "mapped": mapped_count,
+                        "missing": missing,
+                    }
+
+        # If missing mappings found, warn user
+        if validation_stats["missing_mappings"] > 0:
+            echo_warning(
+                f"\n⚠️  Pre-Import Validation Warning:\n"
+                f"   Found {validation_stats['missing_mappings']} resources without ID mappings in database.\n"
+                f"   Re-importing these may create DUPLICATE resources in target AAP!\n"
+            )
+
+            echo_info("\nMissing mappings by resource type:")
+            for rtype, details in validation_stats["resource_details"].items():
+                if details["missing"] > 0:
+                    echo_warning(
+                        f"   {rtype}: {details['missing']} missing "
+                        f"({details['mapped']}/{details['transformed']} mapped)"
+                    )
+
+            echo_info(
+                "\n💡 Recommendations:\n"
+                "   1. Run 'aap-bridge migration-report' to check import status\n"
+                "   2. If first import failed, clean target AAP and re-import\n"
+                "   3. If resources exist in target, duplicate detection will prevent duplicates\n"
+            )
+
+            if not yes:
+                if not click.confirm(
+                    "\n⚠️  Continue with import? (Duplicate detection is enabled)",
+                    default=False,
+                ):
+                    echo_warning("Import cancelled by user.")
+                    return False, validation_stats
+
+        return True, validation_stats
+
+    except Exception as e:
+        logger.warning(f"Pre-import validation failed: {e}")
+        # Don't block import if validation fails
+        return True, validation_stats
+
+
 @click.command(name="import")
 @click.option(
     "--input",
@@ -1332,6 +1432,19 @@ def import_cmd(
         return to_import
 
     async def run_import():
+        # PRE-IMPORT VALIDATION: Check for missing mappings to prevent duplicates
+        should_continue, validation_stats = validate_pre_import_state(
+            input_dir, migration_state, yes
+        )
+        if not should_continue:
+            return  # User cancelled import
+
+        if validation_stats["missing_mappings"] > 0:
+            echo_info(
+                f"\n✓ Duplicate detection enabled - will prevent creating duplicates for "
+                f"{validation_stats['missing_mappings']} unmapped resources\n"
+            )
+
         total_imported = 0
         total_failed = 0
         total_skipped = 0
