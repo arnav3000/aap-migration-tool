@@ -35,6 +35,7 @@ async def patch_project_scm_details(
     batch_size: int = 100,
     interval: int = 600,
     progress_display: MigrationProgressDisplay | None = None,
+    project_source_ids: set[int] | None = None,
 ) -> None:
     """Execute Phase 2: Patch projects with SCM details.
 
@@ -50,6 +51,8 @@ async def patch_project_scm_details(
         batch_size: Number of projects to patch at once (default 100)
         interval: Seconds to sleep between batches (default 600)
         progress_display: Optional existing progress display to use
+        project_source_ids: If provided, only patch projects with these source IDs
+                           (used for selective patching when migrating inventory_sources)
     """
     projects_dir = input_dir / "projects"
     if not projects_dir.exists():
@@ -82,6 +85,20 @@ async def patch_project_scm_details(
                             projects_to_patch.append(resource)
             except Exception as e:
                 echo_error(f"Failed to load {json_file}: {e}")
+
+    # Filter to specific projects if requested (selective patching)
+    if project_source_ids is not None:
+        original_count = len(projects_to_patch)
+        projects_to_patch = [
+            p for p in projects_to_patch
+            if p.get("_source_id") in project_source_ids
+        ]
+        logger.info(
+            "selective_project_patching",
+            requested_count=len(project_source_ids),
+            found_count=len(projects_to_patch),
+            filtered_out=original_count - len(projects_to_patch),
+        )
 
     if not projects_to_patch:
         if not progress_display:
@@ -248,7 +265,7 @@ async def patch_project_scm_details(
                 echo_warning("Phase 2 completed but no projects were patched.")
 
 
-@click.command(name="patch-projects")
+@click.command(name="patch-projects", hidden=True)
 @click.option(
     "--input",
     "-i",

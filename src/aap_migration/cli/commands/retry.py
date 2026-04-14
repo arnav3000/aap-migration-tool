@@ -21,7 +21,7 @@ from aap_migration.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-@click.group(name="retry")
+@click.group(name="retry", hidden=True)
 def retry_group():
     """Retry failed imports and resume interrupted migrations."""
     pass

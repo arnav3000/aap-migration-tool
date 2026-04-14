@@ -39,7 +39,7 @@ from aap_migration.utils.version_validation import (
 logger = get_logger(__name__)
 
 
-@click.command(name="prep")
+@click.command(name="prep", hidden=True)
 @click.option(
     "--output-dir",
     type=click.Path(path_type=Path),

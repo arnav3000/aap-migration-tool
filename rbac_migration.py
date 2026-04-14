@@ -58,7 +58,8 @@ class RBACMigrator:
             'roles_created': 0,
             'roles_skipped': 0,
             'roles_failed': 0,
-            'errors': []
+            'errors': [],
+            'skipped_details': []
         }
 
     def _create_session(self) -> requests.Session:
@@ -309,7 +310,10 @@ class RBACMigrator:
 
         # Skip implicit/inherited roles
         if not resource_id:
+            skip_reason = f"{username}: Implicit/inherited role '{role_name}' (no resource_id)"
+            print(f"      ⏭️  Skipped: {skip_reason}")
             self.stats['roles_skipped'] += 1
+            self.stats['skipped_details'].append(skip_reason)
             return True
 
         # Map resource type to API endpoint
@@ -325,8 +329,10 @@ class RBACMigrator:
 
         endpoint = resource_type_map.get(resource_type)
         if not endpoint:
-            print(f"      ⚠️  Unknown resource type: {resource_type}")
+            skip_reason = f"{username}: Unknown resource type '{resource_type}' for '{resource_name}' (role: {role_name})"
+            print(f"      ⏭️  Skipped: {skip_reason}")
             self.stats['roles_skipped'] += 1
+            self.stats['skipped_details'].append(skip_reason)
             return True
 
         # Get target resource ID
@@ -492,13 +498,21 @@ class RBACMigrator:
             success_rate = (self.stats['roles_created'] / self.stats['roles_found']) * 100
             print(f"\n   Success Rate: {success_rate:.1f}%")
 
+        if self.stats['skipped_details']:
+            print(f"\n⏭️  Skipped Roles ({len(self.stats['skipped_details'])}):")
+            for skip in self.stats['skipped_details'][:20]:  # Show first 20
+                print(f"   - {skip}")
+
+            if len(self.stats['skipped_details']) > 20:
+                print(f"   ... and {len(self.stats['skipped_details']) - 20} more")
+
         if self.stats['errors']:
-            print(f"\n⚠️  Errors ({len(self.stats['errors'])}):")
-            for error in self.stats['errors'][:10]:  # Show first 10
+            print(f"\n❌ Failed Roles ({len(self.stats['errors'])}):")
+            for error in self.stats['errors'][:20]:  # Show first 20
                 print(f"   - {error}")
 
-            if len(self.stats['errors']) > 10:
-                print(f"   ... and {len(self.stats['errors']) - 10} more")
+            if len(self.stats['errors']) > 20:
+                print(f"   ... and {len(self.stats['errors']) - 20} more")
 
         print("\n" + "="*70)
 

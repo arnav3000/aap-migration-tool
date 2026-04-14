@@ -248,6 +248,7 @@ class AAPTargetClient(BaseAPIClient):
         resource_type: str,
         name: str,
         organization: str | None = None,
+        organization_id: int | None = None,
     ) -> dict[str, Any] | None:
         """Find a resource by name.
 
@@ -255,12 +256,17 @@ class AAPTargetClient(BaseAPIClient):
             resource_type: Resource type (e.g., 'inventories', 'hosts')
             name: Resource name
             organization: Optional organization name to filter by
+            organization_id: Optional organization ID to filter by (takes precedence over organization)
 
         Returns:
             Resource data if found, None otherwise
         """
         params: dict[str, Any] = {"name": name, "page_size": 1}
-        if organization:
+
+        # Filter by organization ID (preferred) or organization name
+        if organization_id:
+            params["organization"] = organization_id
+        elif organization:
             params["organization__name"] = organization
 
         endpoint = f"{resource_type}/"

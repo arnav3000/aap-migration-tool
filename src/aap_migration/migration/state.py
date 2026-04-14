@@ -237,6 +237,45 @@ class MigrationState:
                 )
                 raise StateError(f"Failed to fetch source IDs: {e}") from e
 
+    def count_mapped_resources(self, resource_type: str) -> int:
+        """
+        Count how many resources of a type have target_id mappings.
+
+        Used for pre-import validation to detect missing mappings.
+
+        Args:
+            resource_type: Type of resource (e.g., 'hosts', 'inventories')
+
+        Returns:
+            Number of resources with target_id mappings
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    # Count resources with target_id (successfully imported)
+                    count = (
+                        session.query(func.count(IDMapping.id))
+                        .filter_by(resource_type=resource_type)
+                        .filter(IDMapping.target_id.isnot(None))
+                        .scalar()
+                    )
+
+                    logger.debug(
+                        "counted_mapped_resources",
+                        resource_type=resource_type,
+                        count=count,
+                    )
+
+                    return count or 0
+
+            except Exception as e:
+                logger.error(
+                    "failed_to_count_mapped_resources",
+                    resource_type=resource_type,
+                    error=str(e),
+                )
+                return 0
+
     def get_max_exported_id(self, resource_type: str) -> int | None:
         """
         Get the maximum source_id that has been exported for a resource type.
