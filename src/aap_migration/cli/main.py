@@ -19,6 +19,7 @@ from aap_migration.cli.commands import credentials as credentials_commands
 from aap_migration.cli.commands import export_import
 from aap_migration.cli.commands import metadata as metadata_commands
 from aap_migration.cli.commands import migrate as migrate_commands
+from aap_migration.cli.commands import migration_report as migration_report_commands
 from aap_migration.cli.commands import patch_projects as patch_projects_commands
 from aap_migration.cli.commands import prep as prep_commands
 from aap_migration.cli.commands import project_failures as project_failures_commands
@@ -139,6 +140,7 @@ cli.add_command(patch_projects_commands.patch_projects)
 cli.add_command(project_failures_commands.analyze_project_failures)
 cli.add_command(validate_commands.validate)
 cli.add_command(validate_commands.report)
+cli.add_command(migration_report_commands.generate_migration_report)
 
 
 def main() -> int:

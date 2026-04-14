@@ -1822,6 +1822,24 @@ def import_cmd(
                 else:
                     click.echo(f"  {description}: {status_str}")
 
+            # Show helpful message if there are failures
+            if total_failed > 0:
+                click.echo()
+                click.echo("=" * 80)
+                echo_error(f"⚠️  {total_failed} resources failed to import")
+                click.echo()
+                echo_warning("💡 For detailed failure analysis, run:")
+                click.echo()
+                if len([r for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0]) == 1:
+                    # Single resource type failed
+                    failed_rtype = next(r[0] for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0)
+                    click.echo(click.style(f"   aap-bridge migration-report --resource-type {failed_rtype}", fg="yellow", bold=True))
+                else:
+                    # Multiple resource types failed
+                    click.echo(click.style("   aap-bridge migration-report", fg="yellow", bold=True))
+                click.echo()
+                click.echo("=" * 80)
+
             # Show skipped resources if any
             if skipped_no_importer:
                 click.echo()

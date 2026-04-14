@@ -8,6 +8,46 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-14
+
+### Added
+
+- **Migration Reporting**
+  - New `migration-report` command for comprehensive post-migration analysis
+  - Detailed failure tracking with source IDs, names, phases, and error messages
+  - Discrepancy detection: identifies resources transformed but not imported
+  - Missing resource identification with specific details (ID, name, type)
+  - Console summary with color-coded status indicators
+  - Markdown report output with tables and statistics
+- **Project Failure Analysis**
+  - New `analyze-project-failures` command for troubleshooting failed project imports
+  - Root cause identification (name collisions, dependency issues, credential mapping failures)
+  - Step-by-step manual intervention instructions with API examples
+  - SQL snippets for manual ID mapping updates
+- **Enhanced Error Handling**
+  - Import exceptions now mark resources as "failed" in database
+  - Current-run-only failure reporting (excludes historical failures)
+  - Automatic migration-report hint displayed when imports fail
+- **Documentation Improvements**
+  - Containerized deployment featured as primary installation method in README
+  - Added guides/ and workflows/ directories to MkDocs navigation
+  - 7 user guides and 3 workflow diagrams now accessible from documentation site
+- **Security Enhancements**
+  - Enhanced pre-commit hooks with AAP-specific secret patterns
+  - Additional gitleaks patterns for AAP tokens and credentials
+
+### Fixed
+
+- Migration report discrepancy calculation now excludes failed resources
+- Directory-based export structure properly handled in migration report
+- Failure tracking now shows only current migration run failures
+
+### Changed
+
+- Repository cleanup: removed 650KB+ of test output and generated files
+- Improved `.gitignore` to prevent future test output from being committed
+- Enhanced failure notification visibility during imports
+
 ## [0.1.0] - 2025-12-05
 
 ### Added
@@ -63,5 +103,6 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 - Environment variable support for all credentials
 - No hardcoded secrets in configuration files
 
-[Unreleased]: https://github.com/antonysallas/aap-bridge/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/antonysallas/aap-bridge/releases/tag/v0.1.0
+[Unreleased]: https://github.com/arnav3000/aap-bridge-fork/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/arnav3000/aap-bridge-fork/compare/v0.1.0...v0.4.0
+[0.1.0]: https://github.com/arnav3000/aap-bridge-fork/releases/tag/v0.1.0

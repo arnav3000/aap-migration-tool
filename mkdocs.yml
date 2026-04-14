@@ -40,6 +40,18 @@ nav:
       - Migration Workflow: user-guide/migration-workflow.md
       - Filtering and Skipping: user-guide/filtering-and-skipping.md
       - Troubleshooting: user-guide/troubleshooting.md
+  - Guides:
+      - Getting Started Guide: guides/GETTING-STARTED.md
+      - Quick Start: guides/QUICK-START.md
+      - Migration Guide: guides/MIGRATION-GUIDE.md
+      - Complete User Guide: guides/USER-GUIDE.md
+      - Selective Migration: guides/SELECTIVE-MIGRATION-GUIDE.md
+      - Credential Migration: guides/credential-migration.md
+      - What Is Not Migrated: guides/WHAT-IS-NOT-MIGRATED.md
+  - Workflows:
+      - Credential-First Workflow: workflows/CREDENTIAL-FIRST-WORKFLOW.md
+      - Migration Workflow Diagrams: workflows/MIGRATION-WORKFLOW-DIAGRAM.md
+      - RBAC Migration: workflows/RBAC-MIGRATION-GUIDE.md
   - Developer Guide:
       - Contributing: developer-guide/contributing.md
       - Adding Resource Types: developer-guide/adding-resource-types.md

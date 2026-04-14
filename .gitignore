@@ -287,3 +287,11 @@ test/
 # Credential toolkit and related files
 credential-toolkit.tar.gz
 credential_decrypt/
+credential_migration/
+credential_migration_demo/
+
+# Test output directories (generated data, not source code)
+test_creds_export/
+test_prep/
+
+container/diagnose_migration.sh

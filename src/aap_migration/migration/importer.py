@@ -193,7 +193,13 @@ class ResourceImporter:
                     )
                     return None
             else:
-                # Not an "already exists" error - re-raise
+                # Not an "already exists" error - mark failed then re-raise
+                self.stats["error_count"] += 1
+                self.state.mark_failed(
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    error_message=f"API error ({type(e).__name__}): {str(e)}",
+                )
                 raise
 
         except Exception as e:
@@ -621,6 +627,13 @@ class ResourceImporter:
 
                 except Exception as e:
                     failed_count += 1
+
+                    # Mark as failed in database (safety net for re-raised exceptions)
+                    self.state.mark_failed(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        error_message=f"{type(e).__name__}: {str(e)}",
+                    )
 
                     # Update progress even on exception
                     if progress_callback:
@@ -2036,6 +2049,13 @@ class WorkflowNodeImporter(ResourceImporter):
             except Exception as e:
                 failed_count += 1
 
+                # Mark as failed in database
+                self.state.mark_failed(
+                    resource_type="workflow_nodes",
+                    source_id=source_id,
+                    error_message=f"{type(e).__name__}: {str(e)}",
+                )
+
                 # Log the error
                 logger.error(
                     "workflow_node_import_failed",
@@ -3190,6 +3210,14 @@ class JobTemplateImporter(ResourceImporter):
 
             except Exception as e:
                 failed_count += 1
+
+                # Mark as failed in database
+                self.state.mark_failed(
+                    resource_type="job_templates",
+                    source_id=source_id,
+                    error_message=f"{type(e).__name__}: {str(e)}",
+                )
+
                 logger.error(
                     "job_template_import_failed",
                     source_id=source_id,
@@ -3350,11 +3378,34 @@ class WorkflowImporter(ResourceImporter):
             # Extract notification associations for separate import
             notifications = workflow.pop("notifications", None)
 
-            result = await self.import_resource(
-                resource_type="workflow_job_templates",
-                source_id=source_id,
-                data=workflow,
-            )
+            try:
+                result = await self.import_resource(
+                    resource_type="workflow_job_templates",
+                    source_id=source_id,
+                    data=workflow,
+                )
+            except Exception as e:
+                failed_count += 1
+
+                # Mark as failed in database
+                self.state.mark_failed(
+                    resource_type="workflow_job_templates",
+                    source_id=source_id,
+                    error_message=f"{type(e).__name__}: {str(e)}",
+                )
+
+                logger.error(
+                    "workflow_import_failed",
+                    source_id=source_id,
+                    name=workflow.get("name"),
+                    error=str(e),
+                )
+
+                # Update progress after failure
+                if progress_callback:
+                    progress_callback(success_count, failed_count, skipped_count)
+
+                continue  # Skip to next workflow
 
             if result:
                 if nodes and len(nodes) > 0:
