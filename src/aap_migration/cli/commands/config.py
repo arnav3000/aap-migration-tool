@@ -231,3 +231,8 @@ def show(ctx: MigrationContext) -> None:
 
     click.echo("\nState Configuration:")
     click.echo(f"  Database: {config.state.db_path}")
+
+    if config.migration_id:
+        click.echo(f"\nMigration ID: {config.migration_id}")
+    if config.migration_name:
+        click.echo(f"Migration Name: {config.migration_name}")
