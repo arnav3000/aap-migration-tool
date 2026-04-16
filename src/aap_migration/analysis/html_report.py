@@ -1,4 +1,4 @@
-"""Self-contained HTML report generator for dependency analysis.
+"""Self-contained HTML mind map generator for dependency analysis.
 
 All CSS, JavaScript, and assets are embedded inline for air-gapped environments.
 No external dependencies, CDNs, or internet connection required.
@@ -6,6 +6,7 @@ No external dependencies, CDNs, or internet connection required.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
 
 
 def generate_html_report(report: GlobalDependencyReport) -> str:
-    """Generate self-contained HTML dependency report.
+    """Generate self-contained HTML mind map report.
 
     Args:
         report: Global dependency analysis report
@@ -22,85 +23,112 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
     Returns:
         Complete HTML string with embedded CSS/JS
     """
-    # Build nodes and edges for graph
-    nodes_data = []
-    edges_data = []
-
+    # Build organization data with all resources
+    orgs_data = []
     for org_name, org_report in report.org_reports.items():
-        # Node data
-        node_type = "independent" if not org_report.has_cross_org_deps else "dependent"
-        nodes_data.append({
-            "id": org_name,
-            "label": org_name,
-            "resources": org_report.resource_count,
-            "type": node_type,
-            "dependencies": org_report.required_migrations_before
+        # Build resource tree for mind map
+        resource_tree = {}
+        for rtype, items in org_report.resources.items():
+            if not items:
+                continue
+
+            # Friendly names for resource types
+            type_display_name = {
+                "job_templates": "Job Templates",
+                "workflow_job_templates": "Workflow Templates",
+                "projects": "Projects",
+                "inventories": "Inventories",
+                "inventory_sources": "Inventory Sources",
+                "credentials": "Credentials",
+                "teams": "Teams",
+                "schedules": "Schedules",
+                "notification_templates": "Notifications",
+                "hosts": "Hosts",
+                "inventory_groups": "Groups",
+                "credential_input_sources": "Credential Inputs",
+            }.get(rtype, rtype.replace("_", " ").title())
+
+            resource_tree[type_display_name] = []
+            for item in items:
+                resource_info = {
+                    "id": item.get("id"),
+                    "name": item.get("name", f"ID {item.get('id')}"),
+                    "type": rtype,
+                }
+
+                # Check if this resource has cross-org dependencies
+                has_cross_org_dep = False
+                dep_details = []
+
+                for dep_org, deps in org_report.dependencies.items():
+                    for dep in deps:
+                        # Check if this resource uses the dependency
+                        for usage in dep.required_by:
+                            if usage["id"] == item.get("id") and usage["type"] == rtype:
+                                has_cross_org_dep = True
+                                dep_details.append({
+                                    "org": dep_org,
+                                    "resource_type": dep.resource_type,
+                                    "resource_name": dep.resource_name,
+                                    "resource_id": dep.resource_id,
+                                })
+
+                if has_cross_org_dep:
+                    resource_info["cross_org_deps"] = dep_details
+
+                resource_tree[type_display_name].append(resource_info)
+
+        orgs_data.append({
+            "name": org_name,
+            "id": org_report.org_id,
+            "total_resources": org_report.resource_count,
+            "has_dependencies": org_report.has_cross_org_deps,
+            "required_before": org_report.required_migrations_before,
+            "resource_tree": resource_tree,
+            "dependencies": [
+                {
+                    "org": dep_org,
+                    "resources": [
+                        {
+                            "type": dep.resource_type,
+                            "name": dep.resource_name,
+                            "id": dep.resource_id,
+                            "used_by": dep.required_by,
+                        }
+                        for dep in deps
+                    ],
+                }
+                for dep_org, deps in org_report.dependencies.items()
+            ],
         })
 
-        # Edge data
+    # Build org-to-org edges
+    edges_data = []
+    for org_name, org_report in report.org_reports.items():
         for dep_org in org_report.required_migrations_before:
-            edges_data.append({
-                "from": dep_org,
-                "to": org_name
-            })
+            edges_data.append({"from": dep_org, "to": org_name})
 
-    # Build phase data
-    phases_html = []
+    # Build phases
+    phases_data = []
     for phase in report.migration_phases:
-        phase_num = phase["phase"]
-        orgs = phase["orgs"]
+        phases_data.append({
+            "phase": phase["phase"],
+            "description": phase["description"],
+            "orgs": phase["orgs"],
+        })
 
-        org_cards = []
-        for org in orgs:
-            org_report = report.org_reports[org]
-            card_class = "org-card independent" if not org_report.has_cross_org_deps else "org-card dependent"
-            org_cards.append(f'''
-                <div class="{card_class}" onclick="highlightOrg('{org}')">
-                    <div class="org-name">{org}</div>
-                    <div class="org-resources">{org_report.resource_count} resources</div>
-                </div>
-            ''')
+    # Serialize data to JSON for embedding
+    orgs_json = json.dumps(orgs_data, indent=2)
+    edges_json = json.dumps(edges_data, indent=2)
+    phases_json = json.dumps(phases_data, indent=2)
 
-        phases_html.append(f'''
-            <div class="phase">
-                <div class="phase-header">Phase {phase_num}</div>
-                <div class="phase-orgs">
-                    {''.join(org_cards)}
-                </div>
-            </div>
-        ''')
-
-    # Build detailed table
-    details_rows = []
-    for org_name in sorted(report.org_reports.keys()):
-        org_report = report.org_reports[org_name]
-
-        if org_report.has_cross_org_deps:
-            deps = ', '.join(org_report.required_migrations_before)
-            status_icon = "⚠️"
-            status_text = "Has Dependencies"
-        else:
-            deps = "-"
-            status_icon = "✓"
-            status_text = "Independent"
-
-        details_rows.append(f'''
-            <tr class="{'dependent-row' if org_report.has_cross_org_deps else ''}">
-                <td>{status_icon}</td>
-                <td>{org_name}</td>
-                <td class="number">{org_report.resource_count}</td>
-                <td>{status_text}</td>
-                <td>{deps}</td>
-            </tr>
-        ''')
-
-    # Generate complete HTML
+    # Generate HTML
     html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AAP Migration Dependency Analysis Report</title>
+    <title>AAP Migration Mind Map - Dependency Analysis</title>
     <style>
         * {{
             margin: 0;
@@ -109,540 +137,695 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
         }}
 
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 20px;
-            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1e3a8a 0%, #7c3aed 100%);
+            overflow: hidden;
+            height: 100vh;
         }}
 
         .container {{
-            max-width: 1400px;
-            margin: 0 auto;
+            display: grid;
+            grid-template-rows: auto 1fr;
+            height: 100vh;
             background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            overflow: hidden;
         }}
 
         .header {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #1e3a8a 0%, #7c3aed 100%);
             color: white;
-            padding: 40px;
-            text-align: center;
+            padding: 20px 40px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            z-index: 100;
         }}
 
         .header h1 {{
-            font-size: 2.5em;
-            margin-bottom: 10px;
-            font-weight: 700;
+            font-size: 1.8em;
+            margin-bottom: 5px;
         }}
 
         .header .subtitle {{
-            font-size: 1.1em;
+            font-size: 0.9em;
             opacity: 0.9;
         }}
 
-        .stats {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            padding: 30px 40px;
-            background: #f8f9fa;
-            border-bottom: 2px solid #e9ecef;
-        }}
-
-        .stat-card {{
-            background: white;
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            text-align: center;
-            transition: transform 0.2s;
-        }}
-
-        .stat-card:hover {{
-            transform: translateY(-5px);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-        }}
-
-        .stat-value {{
-            font-size: 2.5em;
-            font-weight: 700;
-            color: #667eea;
-        }}
-
-        .stat-label {{
-            font-size: 0.9em;
-            color: #6c757d;
-            margin-top: 5px;
-        }}
-
-        .stat-card.warning .stat-value {{
-            color: #f59e0b;
-        }}
-
-        .stat-card.success .stat-value {{
-            color: #10b981;
-        }}
-
-        .section {{
-            padding: 40px;
-        }}
-
-        .section-title {{
-            font-size: 1.8em;
-            font-weight: 700;
-            margin-bottom: 25px;
-            color: #1f2937;
-            border-bottom: 3px solid #667eea;
-            padding-bottom: 10px;
-        }}
-
-        .graph-container {{
-            background: #f8f9fa;
-            border-radius: 12px;
-            padding: 30px;
-            margin-bottom: 30px;
-            min-height: 400px;
-            position: relative;
-        }}
-
-        .graph-svg {{
-            width: 100%;
-            height: 500px;
-        }}
-
-        .node {{
-            cursor: pointer;
-            transition: all 0.3s;
-        }}
-
-        .node:hover {{
-            filter: brightness(1.1);
-        }}
-
-        .node.independent circle {{
-            fill: #10b981;
-            stroke: #059669;
-        }}
-
-        .node.dependent circle {{
-            fill: #f59e0b;
-            stroke: #d97706;
-        }}
-
-        .node circle {{
-            stroke-width: 3;
-        }}
-
-        .node.highlighted circle {{
-            stroke: #dc2626;
-            stroke-width: 5;
-        }}
-
-        .node text {{
-            font-size: 12px;
-            font-weight: 600;
-            fill: #1f2937;
-            pointer-events: none;
-        }}
-
-        .edge {{
-            stroke: #9ca3af;
-            stroke-width: 2;
-            fill: none;
-            marker-end: url(#arrowhead);
-        }}
-
-        .edge.highlighted {{
-            stroke: #dc2626;
-            stroke-width: 3;
-        }}
-
-        .phases {{
+        .stats-bar {{
             display: flex;
-            flex-direction: column;
-            gap: 20px;
+            gap: 30px;
+            margin-top: 15px;
+            font-size: 0.85em;
         }}
 
-        .phase {{
-            background: white;
-            border-radius: 12px;
-            border: 2px solid #e5e7eb;
+        .stat-item {{
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }}
+
+        .main-content {{
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            height: 100%;
             overflow: hidden;
         }}
 
-        .phase-header {{
-            background: #667eea;
-            color: white;
-            padding: 15px 20px;
-            font-weight: 700;
-            font-size: 1.2em;
-        }}
-
-        .phase-orgs {{
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 15px;
+        .sidebar {{
+            background: #f8fafc;
+            border-right: 2px solid #e2e8f0;
+            overflow-y: auto;
             padding: 20px;
         }}
 
-        .org-card {{
-            background: #f8f9fa;
+        .sidebar h2 {{
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            color: #1e293b;
+        }}
+
+        .org-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }}
+
+        .org-item {{
+            background: white;
             padding: 15px;
             border-radius: 8px;
-            border: 2px solid #e5e7eb;
+            border: 2px solid #e2e8f0;
             cursor: pointer;
             transition: all 0.2s;
         }}
 
-        .org-card:hover {{
-            transform: translateY(-3px);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        .org-item:hover {{
+            border-color: #3b82f6;
+            transform: translateX(5px);
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
         }}
 
-        .org-card.independent {{
-            border-color: #10b981;
-            background: #f0fdf4;
+        .org-item.active {{
+            border-color: #3b82f6;
+            background: #eff6ff;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
         }}
 
-        .org-card.dependent {{
-            border-color: #f59e0b;
-            background: #fffbeb;
+        .org-item.independent {{
+            border-left: 4px solid #10b981;
         }}
 
-        .org-name {{
+        .org-item.dependent {{
+            border-left: 4px solid #f59e0b;
+        }}
+
+        .org-item-name {{
             font-weight: 600;
-            color: #1f2937;
+            color: #1e293b;
             margin-bottom: 5px;
         }}
 
-        .org-resources {{
-            font-size: 0.85em;
-            color: #6c757d;
+        .org-item-meta {{
+            font-size: 0.8em;
+            color: #64748b;
         }}
 
-        .details-table {{
-            width: 100%;
-            border-collapse: collapse;
-            background: white;
-            border-radius: 12px;
+        .org-item-deps {{
+            font-size: 0.75em;
+            color: #f59e0b;
+            margin-top: 5px;
+            font-weight: 500;
+        }}
+
+        .canvas-area {{
+            position: relative;
+            background: #ffffff;
             overflow: hidden;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
         }}
 
-        .details-table th {{
-            background: #667eea;
-            color: white;
-            padding: 15px;
-            text-align: left;
-            font-weight: 600;
+        .mindmap-canvas {{
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+        }}
+
+        .mindmap-svg {{
+            width: 100%;
+            height: 100%;
+            min-width: 100%;
+            min-height: 100%;
+        }}
+
+        .placeholder {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #94a3b8;
+        }}
+
+        .placeholder-icon {{
+            font-size: 4em;
+            margin-bottom: 20px;
+        }}
+
+        .placeholder-text {{
+            font-size: 1.2em;
+        }}
+
+        /* Mind map styling */
+        .node-circle {{
             cursor: pointer;
-            user-select: none;
+            transition: all 0.3s;
         }}
 
-        .details-table th:hover {{
-            background: #5568d3;
+        .node-circle:hover {{
+            filter: brightness(1.1);
+            stroke-width: 3;
         }}
 
-        .details-table td {{
-            padding: 12px 15px;
-            border-bottom: 1px solid #e5e7eb;
+        .org-node circle {{
+            fill: #3b82f6;
+            stroke: #1e40af;
+            stroke-width: 4;
         }}
 
-        .details-table tr:hover {{
-            background: #f8f9fa;
+        .type-node circle {{
+            fill: #8b5cf6;
+            stroke: #6d28d9;
+            stroke-width: 3;
         }}
 
-        .dependent-row {{
-            background: #fffbeb;
+        .resource-node circle {{
+            fill: #10b981;
+            stroke: #059669;
+            stroke-width: 2;
         }}
 
-        .number {{
-            text-align: center;
+        .resource-node.has-cross-org circle {{
+            fill: #ef4444;
+            stroke: #dc2626;
+            stroke-width: 3;
+        }}
+
+        .node-text {{
+            font-size: 12px;
+            font-weight: 600;
+            fill: #1e293b;
+            pointer-events: none;
+            text-anchor: middle;
+        }}
+
+        .node-text-small {{
+            font-size: 10px;
+            fill: white;
+            text-anchor: middle;
+            pointer-events: none;
+        }}
+
+        .link {{
+            fill: none;
+            stroke: #94a3b8;
+            stroke-width: 2;
+        }}
+
+        .link-cross-org {{
+            fill: none;
+            stroke: #ef4444;
+            stroke-width: 3;
+            stroke-dasharray: 5,5;
+        }}
+
+        .tooltip {{
+            position: absolute;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 6px;
+            font-size: 0.85em;
+            pointer-events: none;
+            z-index: 1000;
+            max-width: 300px;
+            display: none;
+        }}
+
+        .tooltip h4 {{
+            margin-bottom: 5px;
+            color: #60a5fa;
+        }}
+
+        .tooltip-row {{
+            margin: 3px 0;
+        }}
+
+        .controls {{
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            z-index: 50;
+        }}
+
+        .control-btn {{
+            display: block;
+            width: 100%;
+            padding: 8px 15px;
+            margin: 5px 0;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.2s;
+        }}
+
+        .control-btn:hover {{
+            background: #2563eb;
         }}
 
         .legend {{
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            margin-top: 20px;
-            padding: 15px;
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
             background: white;
+            padding: 15px;
             border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            font-size: 0.8em;
+        }}
+
+        .legend-title {{
+            font-weight: 700;
+            margin-bottom: 10px;
+            color: #1e293b;
         }}
 
         .legend-item {{
             display: flex;
             align-items: center;
             gap: 8px;
+            margin: 5px 0;
         }}
 
         .legend-color {{
-            width: 20px;
-            height: 20px;
+            width: 16px;
+            height: 16px;
             border-radius: 50%;
             border: 2px solid;
         }}
 
-        .legend-color.independent {{
+        .legend-color.org {{
+            background: #3b82f6;
+            border-color: #1e40af;
+        }}
+
+        .legend-color.type {{
+            background: #8b5cf6;
+            border-color: #6d28d9;
+        }}
+
+        .legend-color.resource {{
             background: #10b981;
             border-color: #059669;
         }}
 
-        .legend-color.dependent {{
-            background: #f59e0b;
-            border-color: #d97706;
+        .legend-color.cross-org {{
+            background: #ef4444;
+            border-color: #dc2626;
         }}
 
-        @media print {{
-            body {{
-                background: white;
-            }}
-            .container {{
-                box-shadow: none;
-            }}
+        .phase-indicator {{
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: white;
+            padding: 10px 15px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            font-size: 0.85em;
+            font-weight: 600;
+            color: #1e293b;
+        }}
+
+        .phase-indicator .phase-number {{
+            color: #3b82f6;
+            font-size: 1.2em;
+        }}
+
+        @keyframes fadeIn {{
+            from {{ opacity: 0; transform: scale(0.8); }}
+            to {{ opacity: 1; transform: scale(1); }}
+        }}
+
+        .animated {{
+            animation: fadeIn 0.5s ease-out;
         }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>📊 AAP Migration Dependency Analysis</h1>
-            <div class="subtitle">Generated: {report.analysis_date.strftime('%Y-%m-%d %H:%M:%S')}</div>
-            <div class="subtitle">Source: {report.source_url}</div>
-        </div>
-
-        <div class="stats">
-            <div class="stat-card">
-                <div class="stat-value">{report.total_organizations}</div>
-                <div class="stat-label">Total Organizations</div>
+            <h1>🧠 AAP Migration Mind Map - Dependency Analysis</h1>
+            <div class="subtitle">
+                Generated: {report.analysis_date.strftime('%Y-%m-%d %H:%M:%S')} |
+                Source: {report.source_url}
             </div>
-            <div class="stat-card success">
-                <div class="stat-value">{len(report.independent_orgs)}</div>
-                <div class="stat-label">Independent</div>
-            </div>
-            <div class="stat-card warning">
-                <div class="stat-value">{len(report.dependent_orgs)}</div>
-                <div class="stat-label">With Dependencies</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value">{len(report.migration_phases)}</div>
-                <div class="stat-label">Migration Phases</div>
-            </div>
-        </div>
-
-        <div class="section">
-            <div class="section-title">Dependency Graph</div>
-            <div class="graph-container">
-                <svg class="graph-svg" id="dependencyGraph"></svg>
-                <div class="legend">
-                    <div class="legend-item">
-                        <div class="legend-color independent"></div>
-                        <span>Independent (no dependencies)</span>
-                    </div>
-                    <div class="legend-item">
-                        <div class="legend-color dependent"></div>
-                        <span>Has dependencies</span>
-                    </div>
+            <div class="stats-bar">
+                <div class="stat-item">
+                    📊 <strong>{report.total_organizations}</strong> Organizations
+                </div>
+                <div class="stat-item">
+                    ✅ <strong>{len(report.independent_orgs)}</strong> Independent
+                </div>
+                <div class="stat-item">
+                    ⚠️ <strong>{len(report.dependent_orgs)}</strong> With Dependencies
+                </div>
+                <div class="stat-item">
+                    📈 <strong>{len(report.migration_phases)}</strong> Migration Phases
                 </div>
             </div>
         </div>
 
-        <div class="section">
-            <div class="section-title">Migration Phases</div>
-            <div class="phases">
-                {''.join(phases_html)}
+        <div class="main-content">
+            <div class="sidebar">
+                <h2>Organizations</h2>
+                <div class="org-list" id="orgList"></div>
             </div>
-        </div>
 
-        <div class="section">
-            <div class="section-title">Detailed Organization Analysis</div>
-            <table class="details-table">
-                <thead>
-                    <tr>
-                        <th onclick="sortTable(0)">Status</th>
-                        <th onclick="sortTable(1)">Organization</th>
-                        <th onclick="sortTable(2)">Resources</th>
-                        <th onclick="sortTable(3)">Migration Status</th>
-                        <th onclick="sortTable(4)">Dependencies</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {''.join(details_rows)}
-                </tbody>
-            </table>
+            <div class="canvas-area">
+                <div class="mindmap-canvas" id="mindmapCanvas">
+                    <div class="placeholder">
+                        <div class="placeholder-icon">🧠</div>
+                        <div class="placeholder-text">Select an organization to view its resource mind map</div>
+                    </div>
+                </div>
+                <div class="tooltip" id="tooltip"></div>
+            </div>
         </div>
     </div>
 
     <script>
-        // Graph data
-        const nodes = {repr(nodes_data)};
-        const edges = {repr(edges_data)};
+        // Data
+        const orgsData = {orgs_json};
+        const edgesData = {edges_json};
+        const phasesData = {phases_json};
 
-        // Draw dependency graph
-        function drawGraph() {{
-            const svg = document.getElementById('dependencyGraph');
-            const width = svg.clientWidth;
-            const height = svg.clientHeight;
-
-            // Create arrow marker
-            const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-            const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-            marker.setAttribute('id', 'arrowhead');
-            marker.setAttribute('markerWidth', '10');
-            marker.setAttribute('markerHeight', '10');
-            marker.setAttribute('refX', '25');
-            marker.setAttribute('refY', '3');
-            marker.setAttribute('orient', 'auto');
-            const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-            polygon.setAttribute('points', '0 0, 6 3, 0 6');
-            polygon.setAttribute('fill', '#9ca3af');
-            marker.appendChild(polygon);
-            defs.appendChild(marker);
-            svg.appendChild(defs);
-
-            // Calculate positions (force-directed layout simulation)
-            const nodePositions = {{}};
-            const numNodes = nodes.length;
-            const centerX = width / 2;
-            const centerY = height / 2;
-            const radius = Math.min(width, height) * 0.35;
-
-            // Separate independent and dependent nodes
-            const independentNodes = nodes.filter(n => n.type === 'independent');
-            const dependentNodes = nodes.filter(n => n.type === 'dependent');
-
-            // Position independent nodes in outer circle
-            independentNodes.forEach((node, i) => {{
-                const angle = (i / independentNodes.length) * 2 * Math.PI;
-                nodePositions[node.id] = {{
-                    x: centerX + radius * Math.cos(angle),
-                    y: centerY + radius * Math.sin(angle)
-                }};
-            }});
-
-            // Position dependent nodes in inner circle
-            dependentNodes.forEach((node, i) => {{
-                const angle = (i / Math.max(dependentNodes.length, 1)) * 2 * Math.PI;
-                nodePositions[node.id] = {{
-                    x: centerX + (radius * 0.5) * Math.cos(angle),
-                    y: centerY + (radius * 0.5) * Math.sin(angle)
-                }};
-            }});
-
-            // Draw edges
-            edges.forEach(edge => {{
-                const from = nodePositions[edge.from];
-                const to = nodePositions[edge.to];
-                if (from && to) {{
-                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                    path.setAttribute('class', 'edge');
-                    path.setAttribute('d', `M ${{from.x}} ${{from.y}} L ${{to.x}} ${{to.y}}`);
-                    path.setAttribute('data-from', edge.from);
-                    path.setAttribute('data-to', edge.to);
-                    svg.appendChild(path);
-                }}
-            }});
-
-            // Draw nodes
-            nodes.forEach(node => {{
-                const pos = nodePositions[node.id];
-                if (!pos) return;
-
-                const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-                g.setAttribute('class', `node ${{node.type}}`);
-                g.setAttribute('data-org', node.id);
-                g.setAttribute('onclick', `highlightOrg('${{node.id}}')`);
-
-                // Node circle (size based on resource count)
-                const nodeRadius = Math.max(20, Math.min(40, 15 + node.resources / 2));
-                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-                circle.setAttribute('cx', pos.x);
-                circle.setAttribute('cy', pos.y);
-                circle.setAttribute('r', nodeRadius);
-                g.appendChild(circle);
-
-                // Node label
-                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-                text.setAttribute('x', pos.x);
-                text.setAttribute('y', pos.y + nodeRadius + 15);
-                text.setAttribute('text-anchor', 'middle');
-                text.textContent = node.id.length > 15 ? node.id.substring(0, 13) + '...' : node.id;
-                g.appendChild(text);
-
-                // Resource count
-                const count = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-                count.setAttribute('x', pos.x);
-                count.setAttribute('y', pos.y + 5);
-                count.setAttribute('text-anchor', 'middle');
-                count.setAttribute('fill', 'white');
-                count.setAttribute('font-weight', 'bold');
-                count.textContent = node.resources;
-                g.appendChild(count);
-
-                svg.appendChild(g);
-            }});
-        }}
-
-        // Highlight organization and its dependencies
-        function highlightOrg(orgName) {{
-            // Reset all highlights
-            document.querySelectorAll('.node').forEach(n => n.classList.remove('highlighted'));
-            document.querySelectorAll('.edge').forEach(e => e.classList.remove('highlighted'));
-
-            // Highlight selected node
-            const node = document.querySelector(`.node[data-org="${{orgName}}"]`);
-            if (node) {{
-                node.classList.add('highlighted');
-
-                // Highlight incoming edges (dependencies)
-                document.querySelectorAll(`.edge[data-to="${{orgName}}"]`).forEach(e => {{
-                    e.classList.add('highlighted');
-                    const from = e.getAttribute('data-from');
-                    const fromNode = document.querySelector(`.node[data-org="${{from}}"]`);
-                    if (fromNode) fromNode.classList.add('highlighted');
-                }});
-
-                // Highlight outgoing edges (dependents)
-                document.querySelectorAll(`.edge[data-from="${{orgName}}"]`).forEach(e => {{
-                    e.classList.add('highlighted');
-                    const to = e.getAttribute('data-to');
-                    const toNode = document.querySelector(`.node[data-org="${{to}}"]`);
-                    if (toNode) toNode.classList.add('highlighted');
-                }});
-            }}
-        }}
-
-        // Sort table
-        function sortTable(columnIndex) {{
-            const table = document.querySelector('.details-table tbody');
-            const rows = Array.from(table.querySelectorAll('tr'));
-            const isNumeric = columnIndex === 2;
-
-            rows.sort((a, b) => {{
-                const aValue = a.cells[columnIndex].textContent.trim();
-                const bValue = b.cells[columnIndex].textContent.trim();
-
-                if (isNumeric) {{
-                    return parseInt(aValue) - parseInt(bValue);
-                }}
-                return aValue.localeCompare(bValue);
-            }});
-
-            rows.forEach(row => table.appendChild(row));
-        }}
+        let currentOrg = null;
 
         // Initialize
-        window.addEventListener('load', () => {{
-            drawGraph();
-        }});
+        function init() {{
+            renderOrgList();
+        }}
 
-        window.addEventListener('resize', () => {{
-            const svg = document.getElementById('dependencyGraph');
-            svg.innerHTML = '';
-            drawGraph();
-        }});
+        function renderOrgList() {{
+            const orgList = document.getElementById('orgList');
+            orgList.innerHTML = '';
+
+            orgsData.forEach(org => {{
+                const item = document.createElement('div');
+                item.className = `org-item ${{org.has_dependencies ? 'dependent' : 'independent'}}`;
+                item.onclick = () => selectOrg(org.name);
+
+                const name = document.createElement('div');
+                name.className = 'org-item-name';
+                name.textContent = org.name;
+                item.appendChild(name);
+
+                const meta = document.createElement('div');
+                meta.className = 'org-item-meta';
+                meta.textContent = `${{org.total_resources}} resources`;
+                item.appendChild(meta);
+
+                if (org.has_dependencies) {{
+                    const deps = document.createElement('div');
+                    deps.className = 'org-item-deps';
+                    deps.textContent = `⚠️ Requires: ${{org.required_before.join(', ')}}`;
+                    item.appendChild(deps);
+                }}
+
+                orgList.appendChild(item);
+            }});
+        }}
+
+        function selectOrg(orgName) {{
+            currentOrg = orgsData.find(o => o.name === orgName);
+
+            // Update active state
+            document.querySelectorAll('.org-item').forEach((item, idx) => {{
+                if (orgsData[idx].name === orgName) {{
+                    item.classList.add('active');
+                }} else {{
+                    item.classList.remove('active');
+                }}
+            }});
+
+            // Render mind map
+            renderMindMap(currentOrg);
+        }}
+
+        function renderMindMap(org) {{
+            const canvas = document.getElementById('mindmapCanvas');
+            canvas.innerHTML = '';
+
+            // Get migration phase for this org
+            let phaseNum = 0;
+            phasesData.forEach(phase => {{
+                if (phase.orgs.includes(org.name)) {{
+                    phaseNum = phase.phase;
+                }}
+            }});
+
+            // Create SVG
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('class', 'mindmap-svg animated');
+            svg.setAttribute('width', '100%');
+            svg.setAttribute('height', '100%');
+
+            const width = 1600;
+            const height = 1200;
+            svg.setAttribute('viewBox', `0 0 ${{width}} ${{height}}`);
+
+            // Center point
+            const centerX = width / 2;
+            const centerY = height / 2;
+
+            // Draw org node at center
+            const orgGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            orgGroup.setAttribute('class', 'org-node');
+
+            const orgCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            orgCircle.setAttribute('cx', centerX);
+            orgCircle.setAttribute('cy', centerY);
+            orgCircle.setAttribute('r', '80');
+            orgCircle.setAttribute('class', 'node-circle');
+            orgGroup.appendChild(orgCircle);
+
+            const orgText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            orgText.setAttribute('x', centerX);
+            orgText.setAttribute('y', centerY - 10);
+            orgText.setAttribute('class', 'node-text');
+            orgText.textContent = org.name.length > 20 ? org.name.substring(0, 18) + '...' : org.name;
+            orgGroup.appendChild(orgText);
+
+            const orgCount = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            orgCount.setAttribute('x', centerX);
+            orgCount.setAttribute('y', centerY + 10);
+            orgCount.setAttribute('class', 'node-text-small');
+            orgCount.setAttribute('fill', 'white');
+            orgCount.textContent = `${{org.total_resources}} resources`;
+            orgGroup.appendChild(orgCount);
+
+            svg.appendChild(orgGroup);
+
+            // Draw resource types radially
+            const resourceTypes = Object.keys(org.resource_tree);
+            const angleStep = (2 * Math.PI) / Math.max(resourceTypes.length, 1);
+            const typeRadius = 250;
+
+            resourceTypes.forEach((typeName, typeIdx) => {{
+                const angle = typeIdx * angleStep - Math.PI / 2;
+                const typeX = centerX + typeRadius * Math.cos(angle);
+                const typeY = centerY + typeRadius * Math.sin(angle);
+
+                // Draw link to center
+                const link = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                link.setAttribute('class', 'link');
+                link.setAttribute('d', `M ${{centerX}} ${{centerY}} L ${{typeX}} ${{typeY}}`);
+                svg.appendChild(link);
+
+                // Draw type node
+                const typeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                typeGroup.setAttribute('class', 'type-node');
+
+                const typeCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                typeCircle.setAttribute('cx', typeX);
+                typeCircle.setAttribute('cy', typeY);
+                typeCircle.setAttribute('r', '45');
+                typeCircle.setAttribute('class', 'node-circle');
+                typeCircle.setAttribute('data-type', typeName);
+                typeGroup.appendChild(typeCircle);
+
+                const typeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                typeText.setAttribute('x', typeX);
+                typeText.setAttribute('y', typeY - 5);
+                typeText.setAttribute('class', 'node-text-small');
+                typeText.setAttribute('fill', 'white');
+                typeText.textContent = typeName.length > 12 ? typeName.substring(0, 10) + '...' : typeName;
+                typeGroup.appendChild(typeText);
+
+                const typeCountText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                typeCountText.setAttribute('x', typeX);
+                typeCountText.setAttribute('y', typeY + 8);
+                typeCountText.setAttribute('class', 'node-text-small');
+                typeCountText.setAttribute('fill', 'white');
+                typeCountText.textContent = org.resource_tree[typeName].length;
+                typeGroup.appendChild(typeCountText);
+
+                svg.appendChild(typeGroup);
+
+                // Draw individual resources
+                const resources = org.resource_tree[typeName];
+                const resourceAngleStep = Math.PI / Math.max(resources.length + 1, 2);
+                const resourceRadius = 150;
+
+                resources.forEach((resource, resIdx) => {{
+                    const resAngle = angle - Math.PI / 4 + (resIdx + 1) * resourceAngleStep;
+                    const resX = typeX + resourceRadius * Math.cos(resAngle);
+                    const resY = typeY + resourceRadius * Math.sin(resAngle);
+
+                    // Draw link to type node
+                    const resLink = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    const linkClass = resource.cross_org_deps ? 'link-cross-org' : 'link';
+                    resLink.setAttribute('class', linkClass);
+                    resLink.setAttribute('d', `M ${{typeX}} ${{typeY}} L ${{resX}} ${{resY}}`);
+                    svg.appendChild(resLink);
+
+                    // Draw resource node
+                    const resGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                    const resClass = resource.cross_org_deps ? 'resource-node has-cross-org' : 'resource-node';
+                    resGroup.setAttribute('class', resClass);
+
+                    const resCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                    resCircle.setAttribute('cx', resX);
+                    resCircle.setAttribute('cy', resY);
+                    resCircle.setAttribute('r', '25');
+                    resCircle.setAttribute('class', 'node-circle');
+                    resCircle.onmouseover = (e) => showTooltip(e, resource, typeName);
+                    resCircle.onmouseout = hideTooltip;
+                    resGroup.appendChild(resCircle);
+
+                    const resText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                    resText.setAttribute('x', resX);
+                    resText.setAttribute('y', resY + 40);
+                    resText.setAttribute('class', 'node-text');
+                    resText.setAttribute('font-size', '10');
+                    const displayName = resource.name.length > 15 ? resource.name.substring(0, 13) + '...' : resource.name;
+                    resText.textContent = displayName;
+                    resGroup.appendChild(resText);
+
+                    svg.appendChild(resGroup);
+                }});
+            }});
+
+            // Add phase indicator
+            const phaseDiv = document.createElement('div');
+            phaseDiv.className = 'phase-indicator animated';
+            phaseDiv.innerHTML = `Migration Phase: <span class="phase-number">${{phaseNum}}</span>`;
+            canvas.appendChild(phaseDiv);
+
+            // Add controls
+            const controlsDiv = document.createElement('div');
+            controlsDiv.className = 'controls animated';
+            controlsDiv.innerHTML = `
+                <button class="control-btn" onclick="expandAll()">Expand All</button>
+                <button class="control-btn" onclick="collapseAll()">Collapse All</button>
+                <button class="control-btn" onclick="showDependencies()">Show Dependencies</button>
+            `;
+            canvas.appendChild(controlsDiv);
+
+            // Add legend
+            const legendDiv = document.createElement('div');
+            legendDiv.className = 'legend animated';
+            legendDiv.innerHTML = `
+                <div class="legend-title">Mind Map Legend</div>
+                <div class="legend-item">
+                    <div class="legend-color org"></div>
+                    <span>Organization</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color type"></div>
+                    <span>Resource Type</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color resource"></div>
+                    <span>Resource</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color cross-org"></div>
+                    <span>Cross-Org Dependency</span>
+                </div>
+            `;
+            canvas.appendChild(legendDiv);
+
+            canvas.appendChild(svg);
+        }}
+
+        function showTooltip(event, resource, typeName) {{
+            const tooltip = document.getElementById('tooltip');
+
+            let html = `<h4>${{resource.name}}</h4>`;
+            html += `<div class="tooltip-row"><strong>Type:</strong> ${{typeName}}</div>`;
+            html += `<div class="tooltip-row"><strong>ID:</strong> ${{resource.id}}</div>`;
+
+            if (resource.cross_org_deps) {{
+                html += `<div class="tooltip-row" style="color: #fca5a5; margin-top: 8px;"><strong>⚠️ Cross-Org Dependencies:</strong></div>`;
+                resource.cross_org_deps.forEach(dep => {{
+                    html += `<div class="tooltip-row" style="margin-left: 10px;">
+                        → ${{dep.resource_type}}: ${{dep.resource_name}} (from ${{dep.org}})
+                    </div>`;
+                }});
+            }}
+
+            tooltip.innerHTML = html;
+            tooltip.style.display = 'block';
+            tooltip.style.left = (event.pageX + 15) + 'px';
+            tooltip.style.top = (event.pageY + 15) + 'px';
+        }}
+
+        function hideTooltip() {{
+            document.getElementById('tooltip').style.display = 'none';
+        }}
+
+        function expandAll() {{
+            alert('All resources are already expanded in the mind map!');
+        }}
+
+        function collapseAll() {{
+            alert('Collapse feature - would hide individual resources, showing only type counts');
+        }}
+
+        function showDependencies() {{
+            if (!currentOrg || !currentOrg.has_dependencies) {{
+                alert('This organization has no cross-org dependencies!');
+                return;
+            }}
+
+            let msg = `${{currentOrg.name}} depends on:\\n\\n`;
+            currentOrg.dependencies.forEach(dep => {{
+                msg += `📦 ${{dep.org}}:\\n`;
+                dep.resources.forEach(res => {{
+                    msg += `  • ${{res.type}}: ${{res.name}}\\n`;
+                }});
+                msg += '\\n';
+            }});
+
+            alert(msg);
+        }}
+
+        // Initialize on load
+        window.addEventListener('load', init);
     </script>
 </body>
 </html>'''

@@ -76,6 +76,7 @@ class OrgDependencyReport:
     dependencies: dict[str, list[ResourceDependency]]  # org_name -> resources
     can_migrate_standalone: bool
     required_migrations_before: list[str]
+    resources: dict[str, list[dict[str, Any]]] = field(default_factory=dict)  # All resources by type
 
     def get_total_cross_org_resources(self) -> int:
         """Count total cross-org resource dependencies."""
@@ -153,6 +154,7 @@ class CrossOrgDependencyAnalyzer:
             dependencies=cross_org_deps,
             can_migrate_standalone=len(cross_org_deps) == 0,
             required_migrations_before=sorted(cross_org_deps.keys()),
+            resources=resources,
         )
 
         logger.info(
