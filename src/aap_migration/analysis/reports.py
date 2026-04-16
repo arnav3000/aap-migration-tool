@@ -112,22 +112,6 @@ def format_summary_report(report: GlobalDependencyReport) -> str:
     lines.append("╰─────────────────────────────────────────────────────────────────╯")
     lines.append("")
 
-    # Suggested commands
-    if report.migration_phases:
-        lines.append("Commands to execute:")
-        for phase in report.migration_phases:
-            orgs = phase["orgs"]
-            if len(orgs) <= 3:
-                org_str = " -o \"" + "\" -o \"".join(orgs) + "\""
-                lines.append(f"  # Phase {phase['phase']}")
-                lines.append(f"  aap-bridge migrate{org_str}")
-                lines.append("")
-            else:
-                lines.append(f"  # Phase {phase['phase']} ({len(orgs)} organizations)")
-                for org in orgs:
-                    lines.append(f"  aap-bridge migrate -o \"{org}\"")
-                lines.append("")
-
     return "\n".join(lines)
 
 
