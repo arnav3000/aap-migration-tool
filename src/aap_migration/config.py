@@ -505,8 +505,8 @@ class ExportConfig(BaseModel):
         description="Skip hosts with inventory sources (filter: inventory_sources__isnull=true)",
     )
     skip_smart_inventories: bool = Field(
-        default=True,
-        description="Skip inventories with sources or pending deletion (filter: inventory_sources__isnull=true&pending_deletion=false&kind=",
+        default=False,
+        description="Skip smart inventories (kind='smart'). Set to True to only migrate regular inventories.",
     )
     skip_inventory_sources: list[str] = Field(
         default_factory=list,

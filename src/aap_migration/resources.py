@@ -291,9 +291,9 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         description="Job Execution Records",
         migration_order=175,  # After schedules (170), jobs reference templates
         cleanup_order=5,  # Early cleanup (historical data)
-        has_exporter=True,
+        has_exporter=False,  # Historical data - not for migration
         has_importer=False,  # Export-only - historical data
-        has_transformer=True,  # Transform for reporting
+        has_transformer=False,  # No transform needed - not migrated
         batch_size=100,
     ),
 }
