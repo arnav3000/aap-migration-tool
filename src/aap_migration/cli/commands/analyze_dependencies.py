@@ -95,14 +95,24 @@ def serialize_global_report_to_json(report) -> str:
     "output_format",
     type=click.Choice(["text", "html", "json"], case_sensitive=False),
     default="text",
-    help="Output format: text (default), html, or json.",
+    help="Output format: text (default), html, or json. Deprecated: use --output-html or --output-json instead.",
 )
 @click.option(
     "--output",
     "-out",
     "output_file",
     type=click.Path(),
-    help="Output file path (required for HTML and JSON formats).",
+    help="Output file path. Deprecated: use --output-html or --output-json instead.",
+)
+@click.option(
+    "--output-html",
+    type=click.Path(),
+    help="Generate HTML report at specified path.",
+)
+@click.option(
+    "--output-json",
+    type=click.Path(),
+    help="Generate JSON report at specified path.",
 )
 @pass_context
 def analyze_dependencies_cmd(
@@ -112,6 +122,8 @@ def analyze_dependencies_cmd(
     verbose: bool,
     output_format: str,
     output_file: str | None,
+    output_html: str | None,
+    output_json: str | None,
 ):
     """Analyze cross-organization dependencies for migration planning.
 
@@ -133,12 +145,15 @@ def analyze_dependencies_cmd(
         aap-bridge analyze-dependencies -o "Default" --verbose
 
         # Generate HTML report
-        aap-bridge analyze-dependencies --all --format html --output report.html
+        aap-bridge analyze-dependencies --all --output-html report.html
 
         # Generate JSON report for automation
-        aap-bridge analyze-dependencies --all --format json --output deps.json
+        aap-bridge analyze-dependencies --all --output-json deps.json
+
+        # Generate both HTML and JSON
+        aap-bridge analyze-dependencies --all --output-html report.html --output-json deps.json
     """
-    asyncio.run(run_analysis(ctx, organization, analyze_all, verbose, output_format, output_file))
+    asyncio.run(run_analysis(ctx, organization, analyze_all, verbose, output_format, output_file, output_html, output_json))
 
 
 async def run_analysis(
@@ -148,6 +163,8 @@ async def run_analysis(
     verbose: bool,
     output_format: str,
     output_file: str | None,
+    output_html: str | None,
+    output_json: str | None,
 ):
     """Run dependency analysis."""
     try:
@@ -161,7 +178,15 @@ async def run_analysis(
             click.echo("Error: Cannot use --all with -o ORGANIZATION")
             sys.exit(1)
 
-        if output_format in ("html", "json") and not output_file:
+        # Handle old-style --format + --output for backwards compatibility
+        if output_file:
+            if output_format == "html":
+                output_html = output_file
+            elif output_format == "json":
+                output_json = output_file
+
+        # Validate new-style options
+        if output_format in ("html", "json") and not output_file and not output_html and not output_json:
             click.echo(f"Error: --output is required when using --format {output_format}")
             sys.exit(1)
 
@@ -175,20 +200,22 @@ async def run_analysis(
 
             global_report = await analyzer.analyze_all_organizations()
 
-            if output_format == "html":
-                # Generate HTML report
+            # Generate HTML if requested
+            if output_html:
                 html_content = generate_html_report(global_report)
-                with open(output_file, "w", encoding="utf-8") as f:
+                with open(output_html, "w", encoding="utf-8") as f:
                     f.write(html_content)
-                click.echo(f"✓ HTML report generated: {output_file}")
-            elif output_format == "json":
-                # Generate JSON report
+                click.echo(f"✓ HTML report generated: {output_html}")
+
+            # Generate JSON if requested
+            if output_json:
                 json_content = serialize_global_report_to_json(global_report)
-                with open(output_file, "w", encoding="utf-8") as f:
+                with open(output_json, "w", encoding="utf-8") as f:
                     f.write(json_content)
-                click.echo(f"✓ JSON report generated: {output_file}")
-            else:
-                # Print summary report
+                click.echo(f"✓ JSON report generated: {output_json}")
+
+            # Print to console if no output files specified
+            if not output_html and not output_json:
                 click.echo(format_summary_report(global_report))
 
         elif len(organizations) == 1:
@@ -199,8 +226,8 @@ async def run_analysis(
 
             org_report = await analyzer.analyze_organization(org_name)
 
-            if output_format == "html":
-                # Build a global report for this single org
+            # If output requested, build global report
+            if output_html or output_json:
                 from datetime import datetime
                 from aap_migration.analysis.dependency_graph import (
                     group_into_phases,
@@ -228,45 +255,21 @@ async def run_analysis(
                     migration_phases=migration_phases,
                 )
 
-                html_content = generate_html_report(global_report)
-                with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(html_content)
-                click.echo(f"✓ HTML report generated: {output_file}")
-            elif output_format == "json":
-                # Build a global report for this single org (same as HTML)
-                from datetime import datetime
-                from aap_migration.analysis.dependency_graph import (
-                    group_into_phases,
-                    topological_sort,
-                )
-                from aap_migration.analysis.dependency_analyzer import (
-                    GlobalDependencyReport,
-                )
+                # Generate HTML if requested
+                if output_html:
+                    html_content = generate_html_report(global_report)
+                    with open(output_html, "w", encoding="utf-8") as f:
+                        f.write(html_content)
+                    click.echo(f"✓ HTML report generated: {output_html}")
 
-                independent = [] if org_report.has_cross_org_deps else [org_name]
-                dependent = [org_name] if org_report.has_cross_org_deps else []
-                graph = {org_name: org_report.required_migrations_before}
-                migration_order = topological_sort(graph)
-                migration_phases = group_into_phases(graph, migration_order)
-
-                global_report = GlobalDependencyReport(
-                    analysis_date=datetime.now(),
-                    source_url=str(ctx.source_client.base_url),
-                    total_organizations=1,
-                    analyzed_organizations=[org_name],
-                    independent_orgs=independent,
-                    dependent_orgs=dependent,
-                    org_reports={org_name: org_report},
-                    migration_order=migration_order,
-                    migration_phases=migration_phases,
-                )
-
-                json_content = serialize_global_report_to_json(global_report)
-                with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(json_content)
-                click.echo(f"✓ JSON report generated: {output_file}")
+                # Generate JSON if requested
+                if output_json:
+                    json_content = serialize_global_report_to_json(global_report)
+                    with open(output_json, "w", encoding="utf-8") as f:
+                        f.write(json_content)
+                    click.echo(f"✓ JSON report generated: {output_json}")
             else:
-                # Print detailed report
+                # Print detailed report to console
                 click.echo(format_detailed_report(org_report))
 
         else:
@@ -314,20 +317,22 @@ async def run_analysis(
                 migration_phases=migration_phases,
             )
 
-            if output_format == "html":
-                # Generate HTML report
+            # Generate HTML if requested
+            if output_html:
                 html_content = generate_html_report(global_report)
-                with open(output_file, "w", encoding="utf-8") as f:
+                with open(output_html, "w", encoding="utf-8") as f:
                     f.write(html_content)
-                click.echo(f"✓ HTML report generated: {output_file}")
-            elif output_format == "json":
-                # Generate JSON report
+                click.echo(f"✓ HTML report generated: {output_html}")
+
+            # Generate JSON if requested
+            if output_json:
                 json_content = serialize_global_report_to_json(global_report)
-                with open(output_file, "w", encoding="utf-8") as f:
+                with open(output_json, "w", encoding="utf-8") as f:
                     f.write(json_content)
-                click.echo(f"✓ JSON report generated: {output_file}")
-            else:
-                # Print summary
+                click.echo(f"✓ JSON report generated: {output_json}")
+
+            # Print to console if no output files specified
+            if not output_html and not output_json:
                 click.echo(format_summary_report(global_report))
 
                 # If verbose, also print detailed for each org
