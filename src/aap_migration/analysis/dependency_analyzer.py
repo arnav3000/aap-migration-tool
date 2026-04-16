@@ -172,7 +172,7 @@ class CrossOrgDependencyAnalyzer:
             GlobalDependencyReport with complete analysis
         """
         # Get all organizations
-        orgs = await self.client.list("organizations")
+        orgs = await self.client.get_paginated("organizations/")
         org_names = sorted([org["name"] for org in orgs])
 
         logger.info(
@@ -233,7 +233,7 @@ class CrossOrgDependencyAnalyzer:
 
     async def _get_organization(self, org_name: str) -> dict:
         """Fetch organization by name."""
-        orgs = await self.client.list("organizations", name=org_name)
+        orgs = await self.client.get_paginated("organizations/", params={"name": org_name})
         if not orgs:
             raise ValueError(f"Organization not found: {org_name}")
         return orgs[0]
@@ -263,7 +263,9 @@ class CrossOrgDependencyAnalyzer:
         resources = {}
         for rtype in resource_types:
             try:
-                items = await self.client.list(rtype, organization=org_id)
+                # Build endpoint with trailing slash
+                endpoint = f"{rtype}/"
+                items = await self.client.get_paginated(endpoint, params={"organization": org_id})
                 resources[rtype] = items
                 logger.debug(
                     "dependency_analysis_resource_fetch",
@@ -364,7 +366,8 @@ class CrossOrgDependencyAnalyzer:
 
         # Fetch resource
         try:
-            resource = await self.client.get(resource_type, resource_id)
+            endpoint = f"{resource_type}/{resource_id}/"
+            resource = await self.client.get(endpoint)
 
             # Cache it
             if resource_type not in self._resource_cache:
@@ -401,7 +404,8 @@ class CrossOrgDependencyAnalyzer:
                 )
 
         try:
-            resource = await self.client.get(resource_type, resource_id)
+            endpoint = f"{resource_type}/{resource_id}/"
+            resource = await self.client.get(endpoint)
             return resource.get("name", f"{resource_type}_{resource_id}")
         except:
             return f"{resource_type}_{resource_id}"
@@ -412,7 +416,8 @@ class CrossOrgDependencyAnalyzer:
             return self._org_cache[org_id]
 
         try:
-            org = await self.client.get("organizations", org_id)
+            endpoint = f"organizations/{org_id}/"
+            org = await self.client.get(endpoint)
             self._org_cache[org_id] = org["name"]
             return org["name"]
         except:
