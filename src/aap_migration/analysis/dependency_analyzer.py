@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from aap_migration.clients.aap_client import AAPClient
+from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -100,7 +100,7 @@ class GlobalDependencyReport:
 class CrossOrgDependencyAnalyzer:
     """Analyzes cross-organization dependencies in AAP."""
 
-    def __init__(self, source_client: AAPClient):
+    def __init__(self, source_client: AAPSourceClient):
         """Initialize analyzer.
 
         Args:
