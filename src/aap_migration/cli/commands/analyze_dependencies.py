@@ -13,7 +13,7 @@ from aap_migration.analysis.reports import (
     format_summary_report,
 )
 from aap_migration.cli.context import MigrationContext
-from aap_migration.cli.decorators import with_migration_context
+from aap_migration.cli.decorators import pass_context
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -38,7 +38,7 @@ logger = get_logger(__name__)
     is_flag=True,
     help="Show detailed analysis for each organization (Format B).",
 )
-@with_migration_context
+@pass_context
 def analyze_dependencies_cmd(
     ctx: MigrationContext,
     organization: tuple[str, ...],
