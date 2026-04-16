@@ -12,6 +12,7 @@ import click
 from dotenv import load_dotenv
 
 from aap_migration import __version__
+from aap_migration.cli.commands import analyze_dependencies as analyze_dependencies_commands
 from aap_migration.cli.commands import cleanup as cleanup_commands
 from aap_migration.cli.commands import config as config_commands
 from aap_migration.cli.commands import credentials as credentials_commands
@@ -124,6 +125,7 @@ cli.add_command(retry_commands.retry_group, name="retry")
 cli.add_command(state_commands.state)
 
 # Register standalone commands
+cli.add_command(analyze_dependencies_commands.analyze_dependencies_cmd)
 cli.add_command(cleanup_commands.cleanup)
 cli.add_command(prep_commands.prep)
 cli.add_command(export_import.export)
