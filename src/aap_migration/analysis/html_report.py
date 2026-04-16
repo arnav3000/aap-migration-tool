@@ -102,7 +102,7 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             ],
         })
 
-    # Build org-to-org edges
+    # Build org-to-org edges for overview graph
     edges_data = []
     for org_name, org_report in report.org_reports.items():
         for dep_org in org_report.required_migrations_before:
@@ -145,7 +145,7 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
 
         .container {{
             display: grid;
-            grid-template-rows: auto 1fr;
+            grid-template-rows: auto auto 1fr;
             height: 100vh;
             background: white;
         }}
@@ -168,10 +168,30 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             opacity: 0.9;
         }}
 
+        .header-controls {{
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            margin-top: 15px;
+        }}
+
+        .search-box {{
+            flex: 1;
+            max-width: 400px;
+        }}
+
+        .search-input {{
+            width: 100%;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.9em;
+            background: rgba(255,255,255,0.95);
+        }}
+
         .stats-bar {{
             display: flex;
             gap: 30px;
-            margin-top: 15px;
             font-size: 0.85em;
         }}
 
@@ -181,96 +201,330 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             gap: 5px;
         }}
 
+        .tabs {{
+            display: flex;
+            background: #f1f5f9;
+            border-bottom: 2px solid #cbd5e1;
+            padding: 0 40px;
+        }}
+
+        .tab {{
+            padding: 15px 30px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            font-size: 1em;
+            font-weight: 600;
+            color: #64748b;
+            border-bottom: 3px solid transparent;
+            transition: all 0.2s;
+        }}
+
+        .tab:hover {{
+            background: rgba(59, 130, 246, 0.1);
+            color: #3b82f6;
+        }}
+
+        .tab.active {{
+            color: #3b82f6;
+            border-bottom-color: #3b82f6;
+            background: white;
+        }}
+
         .main-content {{
-            display: grid;
-            grid-template-columns: 350px 1fr;
-            height: 100%;
-            overflow: hidden;
-        }}
-
-        .sidebar {{
-            background: #f8fafc;
-            border-right: 2px solid #e2e8f0;
             overflow-y: auto;
-            padding: 20px;
+            background: #f8fafc;
         }}
 
-        .sidebar h2 {{
-            font-size: 1.2em;
-            margin-bottom: 15px;
+        .tab-content {{
+            display: none;
+            padding: 40px;
+            animation: fadeIn 0.3s;
+        }}
+
+        .tab-content.active {{
+            display: block;
+        }}
+
+        /* Overview Tab */
+        .overview-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }}
+
+        .stat-card {{
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            text-align: center;
+        }}
+
+        .stat-value {{
+            font-size: 3em;
+            font-weight: 700;
+            color: #3b82f6;
+        }}
+
+        .stat-label {{
+            font-size: 0.9em;
+            color: #64748b;
+            margin-top: 10px;
+        }}
+
+        .stat-card.success .stat-value {{
+            color: #10b981;
+        }}
+
+        .stat-card.warning .stat-value {{
+            color: #f59e0b;
+        }}
+
+        .overview-graph {{
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }}
+
+        .overview-graph h3 {{
+            margin-bottom: 20px;
             color: #1e293b;
         }}
 
-        .org-list {{
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
+        /* Migration Phases Tab */
+        .phases-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 25px;
         }}
 
-        .org-item {{
+        .phase-card {{
             background: white;
-            padding: 15px;
-            border-radius: 8px;
-            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            overflow: hidden;
+            transition: all 0.3s;
+        }}
+
+        .phase-card:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+        }}
+
+        .phase-header {{
+            background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+            color: white;
+            padding: 20px;
+            font-weight: 700;
+            font-size: 1.3em;
+        }}
+
+        .phase-description {{
+            padding: 15px 20px;
+            background: #eff6ff;
+            color: #1e40af;
+            font-size: 0.9em;
+            font-weight: 500;
+        }}
+
+        .phase-orgs {{
+            padding: 20px;
+        }}
+
+        .phase-org-item {{
+            padding: 12px 15px;
+            margin: 8px 0;
+            background: #f8fafc;
+            border-left: 4px solid #3b82f6;
+            border-radius: 6px;
             cursor: pointer;
             transition: all 0.2s;
         }}
 
-        .org-item:hover {{
-            border-color: #3b82f6;
-            transform: translateX(5px);
-            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
-        }}
-
-        .org-item.active {{
-            border-color: #3b82f6;
+        .phase-org-item:hover {{
             background: #eff6ff;
-            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+            transform: translateX(5px);
+            box-shadow: 0 2px 8px rgba(59, 130, 246, 0.2);
         }}
 
-        .org-item.independent {{
-            border-left: 4px solid #10b981;
+        .phase-org-item.has-deps {{
+            border-left-color: #f59e0b;
         }}
 
-        .org-item.dependent {{
-            border-left: 4px solid #f59e0b;
-        }}
-
-        .org-item-name {{
+        .phase-org-name {{
             font-weight: 600;
             color: #1e293b;
-            margin-bottom: 5px;
         }}
 
-        .org-item-meta {{
+        .phase-org-meta {{
             font-size: 0.8em;
             color: #64748b;
+            margin-top: 3px;
         }}
 
-        .org-item-deps {{
-            font-size: 0.75em;
-            color: #f59e0b;
-            margin-top: 5px;
-            font-weight: 500;
+        /* Organizations Tab */
+        .org-selector {{
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
         }}
 
-        .canvas-area {{
+        .org-dropdown {{
             position: relative;
-            background: #ffffff;
+            max-width: 500px;
+        }}
+
+        .org-dropdown-btn {{
+            width: 100%;
+            padding: 15px 20px;
+            background: white;
+            border: 2px solid #cbd5e1;
+            border-radius: 8px;
+            font-size: 1em;
+            cursor: pointer;
+            text-align: left;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.2s;
+        }}
+
+        .org-dropdown-btn:hover {{
+            border-color: #3b82f6;
+        }}
+
+        .org-dropdown-menu {{
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            margin-top: 5px;
+            background: white;
+            border: 2px solid #cbd5e1;
+            border-radius: 8px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+            max-height: 400px;
+            overflow-y: auto;
+            z-index: 1000;
+            display: none;
+        }}
+
+        .org-dropdown-menu.open {{
+            display: block;
+        }}
+
+        .org-dropdown-search {{
+            padding: 15px;
+            border-bottom: 1px solid #e2e8f0;
+            sticky: top;
+            background: white;
+        }}
+
+        .org-dropdown-search input {{
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font-size: 0.9em;
+        }}
+
+        .org-dropdown-group {{
+            padding: 10px 0;
+        }}
+
+        .org-dropdown-group-title {{
+            padding: 10px 15px;
+            font-size: 0.8em;
+            font-weight: 700;
+            color: #64748b;
+            text-transform: uppercase;
+            background: #f8fafc;
+        }}
+
+        .org-dropdown-item {{
+            padding: 12px 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-left: 3px solid transparent;
+        }}
+
+        .org-dropdown-item:hover {{
+            background: #eff6ff;
+            border-left-color: #3b82f6;
+        }}
+
+        .org-dropdown-item.independent {{
+            border-left-color: #10b981;
+        }}
+
+        .org-dropdown-item.dependent {{
+            border-left-color: #f59e0b;
+        }}
+
+        /* Mind Map Canvas */
+        .mindmap-container {{
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             overflow: hidden;
+            position: relative;
+            min-height: 600px;
+        }}
+
+        .mindmap-title {{
+            padding: 20px 30px;
+            background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+            color: white;
+            font-size: 1.3em;
+            font-weight: 700;
+        }}
+
+        .mindmap-controls {{
+            padding: 15px 30px;
+            background: #f8fafc;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            gap: 10px;
+        }}
+
+        .control-btn {{
+            padding: 8px 15px;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.2s;
+        }}
+
+        .control-btn:hover {{
+            background: #2563eb;
+        }}
+
+        .control-btn.secondary {{
+            background: #64748b;
+        }}
+
+        .control-btn.secondary:hover {{
+            background: #475569;
         }}
 
         .mindmap-canvas {{
-            width: 100%;
-            height: 100%;
+            padding: 30px;
             overflow: auto;
+            max-height: 700px;
         }}
 
         .mindmap-svg {{
             width: 100%;
             height: 100%;
-            min-width: 100%;
-            min-height: 100%;
+            min-height: 600px;
         }}
 
         .placeholder {{
@@ -278,7 +532,7 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            height: 100%;
+            padding: 100px 20px;
             color: #94a3b8;
         }}
 
@@ -289,17 +543,17 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
 
         .placeholder-text {{
             font-size: 1.2em;
+            text-align: center;
         }}
 
-        /* Mind map styling */
-        .node-circle {{
+        /* SVG Nodes */
+        .node-group {{
             cursor: pointer;
             transition: all 0.3s;
         }}
 
-        .node-circle:hover {{
+        .node-group:hover {{
             filter: brightness(1.1);
-            stroke-width: 3;
         }}
 
         .org-node circle {{
@@ -314,6 +568,11 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             stroke-width: 3;
         }}
 
+        .type-node.collapsed circle {{
+            fill: #64748b;
+            stroke: #475569;
+        }}
+
         .resource-node circle {{
             fill: #10b981;
             stroke: #059669;
@@ -324,6 +583,10 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             fill: #ef4444;
             stroke: #dc2626;
             stroke-width: 3;
+        }}
+
+        .resource-node.hidden {{
+            display: none;
         }}
 
         .node-text {{
@@ -343,8 +606,12 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
 
         .link {{
             fill: none;
-            stroke: #94a3b8;
+            stroke: #cbd5e1;
             stroke-width: 2;
+        }}
+
+        .link.hidden {{
+            display: none;
         }}
 
         .link-cross-org {{
@@ -354,133 +621,72 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             stroke-dasharray: 5,5;
         }}
 
+        .overview-link {{
+            fill: none;
+            stroke: #94a3af;
+            stroke-width: 2;
+            marker-end: url(#arrowhead);
+        }}
+
+        .overview-node {{
+            cursor: pointer;
+        }}
+
+        .overview-node circle {{
+            transition: all 0.2s;
+        }}
+
+        .overview-node:hover circle {{
+            filter: brightness(1.2);
+        }}
+
+        .overview-node.independent circle {{
+            fill: #10b981;
+            stroke: #059669;
+            stroke-width: 3;
+        }}
+
+        .overview-node.dependent circle {{
+            fill: #f59e0b;
+            stroke: #d97706;
+            stroke-width: 3;
+        }}
+
+        /* Tooltip */
         .tooltip {{
             position: absolute;
             background: rgba(0, 0, 0, 0.9);
             color: white;
-            padding: 10px 15px;
-            border-radius: 6px;
+            padding: 12px 16px;
+            border-radius: 8px;
             font-size: 0.85em;
             pointer-events: none;
-            z-index: 1000;
-            max-width: 300px;
+            z-index: 2000;
+            max-width: 350px;
             display: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
         }}
 
         .tooltip h4 {{
-            margin-bottom: 5px;
+            margin-bottom: 8px;
             color: #60a5fa;
+            font-size: 1.1em;
         }}
 
         .tooltip-row {{
-            margin: 3px 0;
-        }}
-
-        .controls {{
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            z-index: 50;
-        }}
-
-        .control-btn {{
-            display: block;
-            width: 100%;
-            padding: 8px 15px;
             margin: 5px 0;
-            background: #3b82f6;
-            color: white;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.85em;
-            transition: all 0.2s;
+            line-height: 1.4;
         }}
 
-        .control-btn:hover {{
-            background: #2563eb;
-        }}
-
-        .legend {{
-            position: absolute;
-            bottom: 20px;
-            left: 20px;
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            font-size: 0.8em;
-        }}
-
-        .legend-title {{
-            font-weight: 700;
-            margin-bottom: 10px;
-            color: #1e293b;
-        }}
-
-        .legend-item {{
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin: 5px 0;
-        }}
-
-        .legend-color {{
-            width: 16px;
-            height: 16px;
-            border-radius: 50%;
-            border: 2px solid;
-        }}
-
-        .legend-color.org {{
-            background: #3b82f6;
-            border-color: #1e40af;
-        }}
-
-        .legend-color.type {{
-            background: #8b5cf6;
-            border-color: #6d28d9;
-        }}
-
-        .legend-color.resource {{
-            background: #10b981;
-            border-color: #059669;
-        }}
-
-        .legend-color.cross-org {{
-            background: #ef4444;
-            border-color: #dc2626;
-        }}
-
-        .phase-indicator {{
-            position: absolute;
-            top: 20px;
-            left: 20px;
-            background: white;
-            padding: 10px 15px;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            font-size: 0.85em;
-            font-weight: 600;
-            color: #1e293b;
-        }}
-
-        .phase-indicator .phase-number {{
-            color: #3b82f6;
-            font-size: 1.2em;
+        .tooltip-deps {{
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255,255,255,0.2);
         }}
 
         @keyframes fadeIn {{
-            from {{ opacity: 0; transform: scale(0.8); }}
-            to {{ opacity: 1; transform: scale(1); }}
-        }}
-
-        .animated {{
-            animation: fadeIn 0.5s ease-out;
+            from {{ opacity: 0; }}
+            to {{ opacity: 1; }}
         }}
     </style>
 </head>
@@ -488,42 +694,88 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
     <div class="container">
         <div class="header">
             <h1>🧠 AAP Migration Mind Map - Dependency Analysis</h1>
-            <div class="subtitle">
-                Generated: {report.analysis_date.strftime('%Y-%m-%d %H:%M:%S')} |
-                Source: {report.source_url}
-            </div>
-            <div class="stats-bar">
-                <div class="stat-item">
-                    📊 <strong>{report.total_organizations}</strong> Organizations
+            <div class="header-controls">
+                <div class="search-box">
+                    <input type="text" class="search-input" id="globalSearch" placeholder="🔍 Search organizations..." onkeyup="globalSearch()">
                 </div>
-                <div class="stat-item">
-                    ✅ <strong>{len(report.independent_orgs)}</strong> Independent
-                </div>
-                <div class="stat-item">
-                    ⚠️ <strong>{len(report.dependent_orgs)}</strong> With Dependencies
-                </div>
-                <div class="stat-item">
-                    📈 <strong>{len(report.migration_phases)}</strong> Migration Phases
+                <div class="stats-bar">
+                    <div class="stat-item">📊 <strong>{report.total_organizations}</strong> Orgs</div>
+                    <div class="stat-item">✅ <strong>{len(report.independent_orgs)}</strong> Independent</div>
+                    <div class="stat-item">⚠️ <strong>{len(report.dependent_orgs)}</strong> Dependent</div>
+                    <div class="stat-item">📈 <strong>{len(report.migration_phases)}</strong> Phases</div>
                 </div>
             </div>
+        </div>
+
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('overview')">Overview</button>
+            <button class="tab" onclick="switchTab('phases')">Migration Phases</button>
+            <button class="tab" onclick="switchTab('organizations')">Organizations</button>
         </div>
 
         <div class="main-content">
-            <div class="sidebar">
-                <h2>Organizations</h2>
-                <div class="org-list" id="orgList"></div>
-            </div>
-
-            <div class="canvas-area">
-                <div class="mindmap-canvas" id="mindmapCanvas">
-                    <div class="placeholder">
-                        <div class="placeholder-icon">🧠</div>
-                        <div class="placeholder-text">Select an organization to view its resource mind map</div>
+            <!-- Overview Tab -->
+            <div class="tab-content active" id="tab-overview">
+                <div class="overview-grid">
+                    <div class="stat-card">
+                        <div class="stat-value">{report.total_organizations}</div>
+                        <div class="stat-label">Total Organizations</div>
+                    </div>
+                    <div class="stat-card success">
+                        <div class="stat-value">{len(report.independent_orgs)}</div>
+                        <div class="stat-label">Independent Organizations</div>
+                    </div>
+                    <div class="stat-card warning">
+                        <div class="stat-value">{len(report.dependent_orgs)}</div>
+                        <div class="stat-label">Organizations with Dependencies</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">{len(report.migration_phases)}</div>
+                        <div class="stat-label">Migration Phases</div>
                     </div>
                 </div>
-                <div class="tooltip" id="tooltip"></div>
+
+                <div class="overview-graph">
+                    <h3>Organization Dependency Graph</h3>
+                    <p style="color: #64748b; margin-bottom: 20px;">High-level view of cross-organization dependencies. Click any organization to view detailed mind map.</p>
+                    <svg id="overviewSvg" style="width: 100%; height: 500px;"></svg>
+                </div>
+            </div>
+
+            <!-- Migration Phases Tab -->
+            <div class="tab-content" id="tab-phases">
+                <h2 style="margin-bottom: 25px; color: #1e293b;">Migration Phases</h2>
+                <p style="color: #64748b; margin-bottom: 30px;">Click any organization to view its detailed resource mind map below.</p>
+                <div class="phases-grid" id="phasesGrid"></div>
+
+                <div id="phaseMindMap" style="margin-top: 40px;"></div>
+            </div>
+
+            <!-- Organizations Tab -->
+            <div class="tab-content" id="tab-organizations">
+                <div class="org-selector">
+                    <h2 style="margin-bottom: 15px; color: #1e293b;">Select Organization</h2>
+                    <p style="color: #64748b; margin-bottom: 20px;">Choose an organization to view its detailed resource mind map.</p>
+
+                    <div class="org-dropdown">
+                        <button class="org-dropdown-btn" onclick="toggleOrgDropdown()">
+                            <span id="selectedOrg">Select an organization...</span>
+                            <span>▼</span>
+                        </button>
+                        <div class="org-dropdown-menu" id="orgDropdownMenu">
+                            <div class="org-dropdown-search">
+                                <input type="text" placeholder="Search organizations..." onkeyup="filterOrgDropdown()" id="orgSearchInput">
+                            </div>
+                            <div id="orgDropdownContent"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="orgMindMap"></div>
             </div>
         </div>
+
+        <div class="tooltip" id="tooltip"></div>
     </div>
 
     <script>
@@ -533,93 +785,227 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
         const phasesData = {phases_json};
 
         let currentOrg = null;
+        let expandedTypes = {{}};
 
         // Initialize
         function init() {{
-            renderOrgList();
+            renderPhasesGrid();
+            renderOrgDropdown();
+            renderOverviewGraph();
         }}
 
-        function renderOrgList() {{
-            const orgList = document.getElementById('orgList');
-            orgList.innerHTML = '';
+        // Tab switching
+        function switchTab(tabName) {{
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
 
-            orgsData.forEach(org => {{
-                const item = document.createElement('div');
-                item.className = `org-item ${{org.has_dependencies ? 'dependent' : 'independent'}}`;
-                item.onclick = () => selectOrg(org.name);
+            event.target.classList.add('active');
+            document.getElementById(`tab-${{tabName}}`).classList.add('active');
+        }}
 
-                const name = document.createElement('div');
-                name.className = 'org-item-name';
-                name.textContent = org.name;
-                item.appendChild(name);
+        // Global search
+        function globalSearch() {{
+            const query = document.getElementById('globalSearch').value.toLowerCase();
+            if (!query) return;
 
-                const meta = document.createElement('div');
-                meta.className = 'org-item-meta';
-                meta.textContent = `${{org.total_resources}} resources`;
-                item.appendChild(meta);
+            const org = orgsData.find(o => o.name.toLowerCase().includes(query));
+            if (org) {{
+                switchTab('organizations');
+                selectOrgFromDropdown(org.name);
+            }}
+        }}
 
-                if (org.has_dependencies) {{
-                    const deps = document.createElement('div');
-                    deps.className = 'org-item-deps';
-                    deps.textContent = `⚠️ Requires: ${{org.required_before.join(', ')}}`;
-                    item.appendChild(deps);
-                }}
+        // Render migration phases grid
+        function renderPhasesGrid() {{
+            const grid = document.getElementById('phasesGrid');
+            grid.innerHTML = '';
 
-                orgList.appendChild(item);
+            phasesData.forEach(phase => {{
+                const card = document.createElement('div');
+                card.className = 'phase-card';
+
+                const header = document.createElement('div');
+                header.className = 'phase-header';
+                header.textContent = `Phase ${{phase.phase}}`;
+                card.appendChild(header);
+
+                const desc = document.createElement('div');
+                desc.className = 'phase-description';
+                desc.textContent = phase.description;
+                card.appendChild(desc);
+
+                const orgsDiv = document.createElement('div');
+                orgsDiv.className = 'phase-orgs';
+
+                phase.orgs.forEach(orgName => {{
+                    const org = orgsData.find(o => o.name === orgName);
+                    const item = document.createElement('div');
+                    item.className = `phase-org-item ${{org.has_dependencies ? 'has-deps' : ''}}`;
+                    item.onclick = () => {{
+                        showMindMapInPhaseTab(orgName);
+                    }};
+
+                    const name = document.createElement('div');
+                    name.className = 'phase-org-name';
+                    name.textContent = orgName;
+                    item.appendChild(name);
+
+                    const meta = document.createElement('div');
+                    meta.className = 'phase-org-meta';
+                    meta.textContent = `${{org.total_resources}} resources`;
+                    if (org.has_dependencies) {{
+                        meta.textContent += ` • Requires: ${{org.required_before.join(', ')}}`;
+                    }}
+                    item.appendChild(meta);
+
+                    orgsDiv.appendChild(item);
+                }});
+
+                card.appendChild(orgsDiv);
+                grid.appendChild(card);
             }});
         }}
 
-        function selectOrg(orgName) {{
+        function showMindMapInPhaseTab(orgName) {{
             currentOrg = orgsData.find(o => o.name === orgName);
+            const container = document.getElementById('phaseMindMap');
+            container.innerHTML = '';
 
-            // Update active state
-            document.querySelectorAll('.org-item').forEach((item, idx) => {{
-                if (orgsData[idx].name === orgName) {{
-                    item.classList.add('active');
-                }} else {{
-                    item.classList.remove('active');
-                }}
-            }});
-
-            // Render mind map
-            renderMindMap(currentOrg);
+            const mindmapDiv = createMindMapDiv(currentOrg);
+            container.appendChild(mindmapDiv);
         }}
 
-        function renderMindMap(org) {{
-            const canvas = document.getElementById('mindmapCanvas');
+        // Render org dropdown
+        function renderOrgDropdown() {{
+            const content = document.getElementById('orgDropdownContent');
+            content.innerHTML = '';
+
+            // Independent orgs
+            const indGroup = document.createElement('div');
+            indGroup.className = 'org-dropdown-group';
+            const indTitle = document.createElement('div');
+            indTitle.className = 'org-dropdown-group-title';
+            indTitle.textContent = `✅ Independent (${{orgsData.filter(o => !o.has_dependencies).length}})`;
+            indGroup.appendChild(indTitle);
+
+            orgsData.filter(o => !o.has_dependencies).forEach(org => {{
+                const item = createOrgDropdownItem(org, 'independent');
+                indGroup.appendChild(item);
+            }});
+            content.appendChild(indGroup);
+
+            // Dependent orgs
+            const depGroup = document.createElement('div');
+            depGroup.className = 'org-dropdown-group';
+            const depTitle = document.createElement('div');
+            depTitle.className = 'org-dropdown-group-title';
+            depTitle.textContent = `⚠️ With Dependencies (${{orgsData.filter(o => o.has_dependencies).length}})`;
+            depGroup.appendChild(depTitle);
+
+            orgsData.filter(o => o.has_dependencies).forEach(org => {{
+                const item = createOrgDropdownItem(org, 'dependent');
+                depGroup.appendChild(item);
+            }});
+            content.appendChild(depGroup);
+        }}
+
+        function createOrgDropdownItem(org, type) {{
+            const item = document.createElement('div');
+            item.className = `org-dropdown-item ${{type}}`;
+            item.onclick = () => selectOrgFromDropdown(org.name);
+
+            const html = `
+                <div style="font-weight: 600; color: #1e293b;">${{org.name}}</div>
+                <div style="font-size: 0.8em; color: #64748b; margin-top: 3px;">${{org.total_resources}} resources</div>
+            `;
+            item.innerHTML = html;
+            return item;
+        }}
+
+        function toggleOrgDropdown() {{
+            const menu = document.getElementById('orgDropdownMenu');
+            menu.classList.toggle('open');
+        }}
+
+        function filterOrgDropdown() {{
+            const query = document.getElementById('orgSearchInput').value.toLowerCase();
+            const items = document.querySelectorAll('.org-dropdown-item');
+
+            items.forEach(item => {{
+                const text = item.textContent.toLowerCase();
+                item.style.display = text.includes(query) ? 'block' : 'none';
+            }});
+        }}
+
+        function selectOrgFromDropdown(orgName) {{
+            currentOrg = orgsData.find(o => o.name === orgName);
+            document.getElementById('selectedOrg').textContent = orgName;
+            document.getElementById('orgDropdownMenu').classList.remove('open');
+
+            const container = document.getElementById('orgMindMap');
+            container.innerHTML = '';
+
+            const mindmapDiv = createMindMapDiv(currentOrg);
+            container.appendChild(mindmapDiv);
+        }}
+
+        // Create mind map div
+        function createMindMapDiv(org) {{
+            expandedTypes = {{}};
+            Object.keys(org.resource_tree).forEach(type => {{
+                expandedTypes[type] = true;
+            }});
+
+            const container = document.createElement('div');
+            container.className = 'mindmap-container';
+
+            const title = document.createElement('div');
+            title.className = 'mindmap-title';
+            title.textContent = `🧠 ${{org.name}} - Resource Mind Map`;
+            container.appendChild(title);
+
+            const controls = document.createElement('div');
+            controls.className = 'mindmap-controls';
+            controls.innerHTML = `
+                <button class="control-btn" onclick="expandAllTypes()">Expand All</button>
+                <button class="control-btn" onclick="collapseAllTypes()">Collapse All</button>
+                <button class="control-btn secondary" onclick="showOnlyDependencies()">Show Only Dependencies</button>
+                <button class="control-btn secondary" onclick="resetView()">Reset View</button>
+            `;
+            container.appendChild(controls);
+
+            const canvas = document.createElement('div');
+            canvas.className = 'mindmap-canvas';
+            canvas.id = 'currentMindmapCanvas';
+            container.appendChild(canvas);
+
+            renderMindMap(org, canvas);
+            return container;
+        }}
+
+        // Render mind map
+        function renderMindMap(org, canvas) {{
             canvas.innerHTML = '';
 
-            // Get migration phase for this org
-            let phaseNum = 0;
-            phasesData.forEach(phase => {{
-                if (phase.orgs.includes(org.name)) {{
-                    phaseNum = phase.phase;
-                }}
-            }});
-
-            // Create SVG
             const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-            svg.setAttribute('class', 'mindmap-svg animated');
-            svg.setAttribute('width', '100%');
-            svg.setAttribute('height', '100%');
+            svg.setAttribute('class', 'mindmap-svg');
+            svg.id = 'currentMindmapSvg';
 
             const width = 1600;
             const height = 1200;
             svg.setAttribute('viewBox', `0 0 ${{width}} ${{height}}`);
 
-            // Center point
             const centerX = width / 2;
             const centerY = height / 2;
 
             // Draw org node at center
             const orgGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-            orgGroup.setAttribute('class', 'org-node');
+            orgGroup.setAttribute('class', 'org-node node-group');
 
             const orgCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
             orgCircle.setAttribute('cx', centerX);
             orgCircle.setAttribute('cy', centerY);
             orgCircle.setAttribute('r', '80');
-            orgCircle.setAttribute('class', 'node-circle');
             orgGroup.appendChild(orgCircle);
 
             const orgText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -633,7 +1019,6 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             orgCount.setAttribute('x', centerX);
             orgCount.setAttribute('y', centerY + 10);
             orgCount.setAttribute('class', 'node-text-small');
-            orgCount.setAttribute('fill', 'white');
             orgCount.textContent = `${{org.total_resources}} resources`;
             orgGroup.appendChild(orgCount);
 
@@ -652,26 +1037,26 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                 // Draw link to center
                 const link = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 link.setAttribute('class', 'link');
+                link.setAttribute('data-type', typeName);
                 link.setAttribute('d', `M ${{centerX}} ${{centerY}} L ${{typeX}} ${{typeY}}`);
                 svg.appendChild(link);
 
                 // Draw type node
                 const typeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-                typeGroup.setAttribute('class', 'type-node');
+                typeGroup.setAttribute('class', 'type-node node-group');
+                typeGroup.setAttribute('data-type', typeName);
+                typeGroup.onclick = () => toggleTypeExpansion(typeName);
 
                 const typeCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
                 typeCircle.setAttribute('cx', typeX);
                 typeCircle.setAttribute('cy', typeY);
                 typeCircle.setAttribute('r', '45');
-                typeCircle.setAttribute('class', 'node-circle');
-                typeCircle.setAttribute('data-type', typeName);
                 typeGroup.appendChild(typeCircle);
 
                 const typeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
                 typeText.setAttribute('x', typeX);
                 typeText.setAttribute('y', typeY - 5);
                 typeText.setAttribute('class', 'node-text-small');
-                typeText.setAttribute('fill', 'white');
                 typeText.textContent = typeName.length > 12 ? typeName.substring(0, 10) + '...' : typeName;
                 typeGroup.appendChild(typeText);
 
@@ -679,7 +1064,6 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                 typeCountText.setAttribute('x', typeX);
                 typeCountText.setAttribute('y', typeY + 8);
                 typeCountText.setAttribute('class', 'node-text-small');
-                typeCountText.setAttribute('fill', 'white');
                 typeCountText.textContent = org.resource_tree[typeName].length;
                 typeGroup.appendChild(typeCountText);
 
@@ -699,19 +1083,22 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                     const resLink = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                     const linkClass = resource.cross_org_deps ? 'link-cross-org' : 'link';
                     resLink.setAttribute('class', linkClass);
+                    resLink.setAttribute('data-type', typeName);
+                    resLink.setAttribute('data-resource-id', resource.id);
                     resLink.setAttribute('d', `M ${{typeX}} ${{typeY}} L ${{resX}} ${{resY}}`);
                     svg.appendChild(resLink);
 
                     // Draw resource node
                     const resGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-                    const resClass = resource.cross_org_deps ? 'resource-node has-cross-org' : 'resource-node';
+                    const resClass = resource.cross_org_deps ? 'resource-node has-cross-org node-group' : 'resource-node node-group';
                     resGroup.setAttribute('class', resClass);
+                    resGroup.setAttribute('data-type', typeName);
+                    resGroup.setAttribute('data-resource-id', resource.id);
 
                     const resCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
                     resCircle.setAttribute('cx', resX);
                     resCircle.setAttribute('cy', resY);
                     resCircle.setAttribute('r', '25');
-                    resCircle.setAttribute('class', 'node-circle');
                     resCircle.onmouseover = (e) => showTooltip(e, resource, typeName);
                     resCircle.onmouseout = hideTooltip;
                     resGroup.appendChild(resCircle);
@@ -729,49 +1116,94 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                 }});
             }});
 
-            // Add phase indicator
-            const phaseDiv = document.createElement('div');
-            phaseDiv.className = 'phase-indicator animated';
-            phaseDiv.innerHTML = `Migration Phase: <span class="phase-number">${{phaseNum}}</span>`;
-            canvas.appendChild(phaseDiv);
-
-            // Add controls
-            const controlsDiv = document.createElement('div');
-            controlsDiv.className = 'controls animated';
-            controlsDiv.innerHTML = `
-                <button class="control-btn" onclick="expandAll()">Expand All</button>
-                <button class="control-btn" onclick="collapseAll()">Collapse All</button>
-                <button class="control-btn" onclick="showDependencies()">Show Dependencies</button>
-            `;
-            canvas.appendChild(controlsDiv);
-
-            // Add legend
-            const legendDiv = document.createElement('div');
-            legendDiv.className = 'legend animated';
-            legendDiv.innerHTML = `
-                <div class="legend-title">Mind Map Legend</div>
-                <div class="legend-item">
-                    <div class="legend-color org"></div>
-                    <span>Organization</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color type"></div>
-                    <span>Resource Type</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color resource"></div>
-                    <span>Resource</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color cross-org"></div>
-                    <span>Cross-Org Dependency</span>
-                </div>
-            `;
-            canvas.appendChild(legendDiv);
-
             canvas.appendChild(svg);
         }}
 
+        // Toggle type expansion
+        function toggleTypeExpansion(typeName) {{
+            expandedTypes[typeName] = !expandedTypes[typeName];
+            updateMindMapVisibility();
+        }}
+
+        function expandAllTypes() {{
+            Object.keys(expandedTypes).forEach(type => {{
+                expandedTypes[type] = true;
+            }});
+            updateMindMapVisibility();
+        }}
+
+        function collapseAllTypes() {{
+            Object.keys(expandedTypes).forEach(type => {{
+                expandedTypes[type] = false;
+            }});
+            updateMindMapVisibility();
+        }}
+
+        function showOnlyDependencies() {{
+            const svg = document.getElementById('currentMindmapSvg');
+            if (!svg) return;
+
+            svg.querySelectorAll('.resource-node').forEach(node => {{
+                if (!node.classList.contains('has-cross-org')) {{
+                    node.classList.add('hidden');
+                }}
+            }});
+
+            svg.querySelectorAll('.link').forEach(link => {{
+                if (!link.classList.contains('link-cross-org')) {{
+                    link.classList.add('hidden');
+                }}
+            }});
+        }}
+
+        function resetView() {{
+            expandAllTypes();
+            const svg = document.getElementById('currentMindmapSvg');
+            if (!svg) return;
+
+            svg.querySelectorAll('.hidden').forEach(el => {{
+                el.classList.remove('hidden');
+            }});
+        }}
+
+        function updateMindMapVisibility() {{
+            const svg = document.getElementById('currentMindmapSvg');
+            if (!svg) return;
+
+            Object.keys(expandedTypes).forEach(typeName => {{
+                const isExpanded = expandedTypes[typeName];
+
+                // Update type node appearance
+                const typeNode = svg.querySelector(`.type-node[data-type="${{typeName}}"]`);
+                if (typeNode) {{
+                    if (isExpanded) {{
+                        typeNode.classList.remove('collapsed');
+                    }} else {{
+                        typeNode.classList.add('collapsed');
+                    }}
+                }}
+
+                // Show/hide resources
+                svg.querySelectorAll(`.resource-node[data-type="${{typeName}}"]`).forEach(node => {{
+                    if (isExpanded) {{
+                        node.classList.remove('hidden');
+                    }} else {{
+                        node.classList.add('hidden');
+                    }}
+                }});
+
+                // Show/hide links
+                svg.querySelectorAll(`.link[data-type="${{typeName}}"]`).forEach(link => {{
+                    if (isExpanded) {{
+                        link.classList.remove('hidden');
+                    }} else {{
+                        link.classList.add('hidden');
+                    }}
+                }});
+            }});
+        }}
+
+        // Tooltip
         function showTooltip(event, resource, typeName) {{
             const tooltip = document.getElementById('tooltip');
 
@@ -780,12 +1212,13 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             html += `<div class="tooltip-row"><strong>ID:</strong> ${{resource.id}}</div>`;
 
             if (resource.cross_org_deps) {{
-                html += `<div class="tooltip-row" style="color: #fca5a5; margin-top: 8px;"><strong>⚠️ Cross-Org Dependencies:</strong></div>`;
+                html += `<div class="tooltip-deps">`;
+                html += `<div style="color: #fca5a5; font-weight: 600; margin-bottom: 5px;">⚠️ Cross-Org Dependencies:</div>`;
                 resource.cross_org_deps.forEach(dep => {{
-                    html += `<div class="tooltip-row" style="margin-left: 10px;">
-                        → ${{dep.resource_type}}: ${{dep.resource_name}} (from ${{dep.org}})
-                    </div>`;
+                    html += `<div class="tooltip-row">→ ${{dep.resource_type}}: <strong>${{dep.resource_name}}</strong></div>`;
+                    html += `<div class="tooltip-row" style="margin-left: 15px; font-size: 0.9em; color: #cbd5e1;">from ${{dep.org}}</div>`;
                 }});
+                html += `</div>`;
             }}
 
             tooltip.innerHTML = html;
@@ -798,34 +1231,109 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             document.getElementById('tooltip').style.display = 'none';
         }}
 
-        function expandAll() {{
-            alert('All resources are already expanded in the mind map!');
-        }}
+        // Overview graph
+        function renderOverviewGraph() {{
+            const svg = document.getElementById('overviewSvg');
+            if (!svg) return;
 
-        function collapseAll() {{
-            alert('Collapse feature - would hide individual resources, showing only type counts');
-        }}
+            const width = svg.clientWidth || 1000;
+            const height = 500;
 
-        function showDependencies() {{
-            if (!currentOrg || !currentOrg.has_dependencies) {{
-                alert('This organization has no cross-org dependencies!');
-                return;
-            }}
+            // Create arrow marker
+            const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+            const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+            marker.setAttribute('id', 'arrowhead');
+            marker.setAttribute('markerWidth', '10');
+            marker.setAttribute('markerHeight', '10');
+            marker.setAttribute('refX', '25');
+            marker.setAttribute('refY', '3');
+            marker.setAttribute('orient', 'auto');
+            const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+            polygon.setAttribute('points', '0 0, 6 3, 0 6');
+            polygon.setAttribute('fill', '#94a3af');
+            marker.appendChild(polygon);
+            defs.appendChild(marker);
+            svg.appendChild(defs);
 
-            let msg = `${{currentOrg.name}} depends on:\\n\\n`;
-            currentOrg.dependencies.forEach(dep => {{
-                msg += `📦 ${{dep.org}}:\\n`;
-                dep.resources.forEach(res => {{
-                    msg += `  • ${{res.type}}: ${{res.name}}\\n`;
-                }});
-                msg += '\\n';
+            // Layout nodes in circle
+            const nodePositions = {{}};
+            const centerX = width / 2;
+            const centerY = height / 2;
+            const radius = Math.min(width, height) * 0.35;
+
+            const independentOrgs = orgsData.filter(o => !o.has_dependencies);
+            const dependentOrgs = orgsData.filter(o => o.has_dependencies);
+
+            // Position independent orgs in outer circle
+            independentOrgs.forEach((org, i) => {{
+                const angle = (i / independentOrgs.length) * 2 * Math.PI;
+                nodePositions[org.name] = {{
+                    x: centerX + radius * Math.cos(angle),
+                    y: centerY + radius * Math.sin(angle)
+                }};
             }});
 
-            alert(msg);
+            // Position dependent orgs in inner circle
+            dependentOrgs.forEach((org, i) => {{
+                const angle = (i / Math.max(dependentOrgs.length, 1)) * 2 * Math.PI;
+                nodePositions[org.name] = {{
+                    x: centerX + (radius * 0.5) * Math.cos(angle),
+                    y: centerY + (radius * 0.5) * Math.sin(angle)
+                }};
+            }});
+
+            // Draw edges
+            edgesData.forEach(edge => {{
+                const from = nodePositions[edge.from];
+                const to = nodePositions[edge.to];
+                if (from && to) {{
+                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    path.setAttribute('class', 'overview-link');
+                    path.setAttribute('d', `M ${{from.x}} ${{from.y}} L ${{to.x}} ${{to.y}}`);
+                    svg.appendChild(path);
+                }}
+            }});
+
+            // Draw nodes
+            orgsData.forEach(org => {{
+                const pos = nodePositions[org.name];
+                if (!pos) return;
+
+                const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                g.setAttribute('class', `overview-node ${{org.has_dependencies ? 'dependent' : 'independent'}}`);
+                g.onclick = () => {{
+                    switchTab('organizations');
+                    setTimeout(() => selectOrgFromDropdown(org.name), 100);
+                }};
+
+                const nodeRadius = 20;
+                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circle.setAttribute('cx', pos.x);
+                circle.setAttribute('cy', pos.y);
+                circle.setAttribute('r', nodeRadius);
+                g.appendChild(circle);
+
+                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                text.setAttribute('x', pos.x);
+                text.setAttribute('y', pos.y + nodeRadius + 15);
+                text.setAttribute('class', 'node-text');
+                text.setAttribute('font-size', '11');
+                text.textContent = org.name.length > 15 ? org.name.substring(0, 13) + '...' : org.name;
+                g.appendChild(text);
+
+                svg.appendChild(g);
+            }});
         }}
 
         // Initialize on load
         window.addEventListener('load', init);
+
+        // Close dropdown when clicking outside
+        window.addEventListener('click', (e) => {{
+            if (!e.target.closest('.org-dropdown')) {{
+                document.getElementById('orgDropdownMenu').classList.remove('open');
+            }}
+        }});
     </script>
 </body>
 </html>'''
