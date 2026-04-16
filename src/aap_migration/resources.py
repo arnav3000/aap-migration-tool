@@ -189,7 +189,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="hosts",
         endpoint="hosts/",
         description="Hosts",
-        migration_order=120,  # After inventory_groups (115), before instances (121)
+        migration_order=120,  # After inventory_groups (115), before host_inventory_memberships (121)
         cleanup_order=40,
         has_exporter=True,
         has_importer=True,
@@ -197,11 +197,22 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         batch_size=200,
         use_bulk_api=True,
     ),
+    "host_inventory_memberships": ResourceTypeInfo(
+        name="host_inventory_memberships",
+        endpoint="",  # No single endpoint - constructed from multiple inventory queries
+        description="Host-Inventory Memberships (for hosts in multiple inventories)",
+        migration_order=121,  # After hosts (120), before instances (122)
+        cleanup_order=39,  # Before hosts (40)
+        has_exporter=True,  # HostInventoryMembershipExporter
+        has_importer=True,  # HostInventoryMembershipImporter
+        has_transformer=False,  # No transformation needed - direct mapping
+        batch_size=100,  # Batch size for adding hosts to inventories
+    ),
     "instances": ResourceTypeInfo(
         name="instances",
         endpoint="instances/",
         description="Instances (AAP Controller Nodes)",
-        migration_order=121,  # After hosts (120), before instance_groups (125)
+        migration_order=122,  # After host_inventory_memberships (121), before instance_groups (125)
         cleanup_order=88,  # After instance_groups (87) - delete dependents first
         has_exporter=True,
         has_importer=True,
