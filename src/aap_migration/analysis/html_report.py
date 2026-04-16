@@ -868,6 +868,10 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
 
         function showMindMapInPhaseTab(orgName) {{
             currentOrg = orgsData.find(o => o.name === orgName);
+
+            // Clear other mind maps to avoid duplicate IDs
+            document.getElementById('orgMindMap').innerHTML = '';
+
             const container = document.getElementById('phaseMindMap');
             container.innerHTML = '';
 
@@ -941,6 +945,9 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             currentOrg = orgsData.find(o => o.name === orgName);
             document.getElementById('selectedOrg').textContent = orgName;
             document.getElementById('orgDropdownMenu').classList.remove('open');
+
+            // Clear other mind maps to avoid duplicate IDs
+            document.getElementById('phaseMindMap').innerHTML = '';
 
             const container = document.getElementById('orgMindMap');
             container.innerHTML = '';
