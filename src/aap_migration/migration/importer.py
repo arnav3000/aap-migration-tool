@@ -3393,6 +3393,7 @@ class JobTemplateImporter(ResourceImporter):
         "project": "projects",
         "credential": "credentials",
         "execution_environment": "execution_environments",
+        "webhook_credential": "credentials",  # Webhook credential (PAT for GitHub/GitLab)
     }
 
     async def import_resource(
