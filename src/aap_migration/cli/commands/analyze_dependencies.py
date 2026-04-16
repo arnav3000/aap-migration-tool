@@ -8,6 +8,7 @@ import sys
 import click
 
 from aap_migration.analysis.dependency_analyzer import CrossOrgDependencyAnalyzer
+from aap_migration.analysis.html_report import generate_html_report
 from aap_migration.analysis.reports import (
     format_detailed_report,
     format_summary_report,
@@ -38,12 +39,28 @@ logger = get_logger(__name__)
     is_flag=True,
     help="Show detailed analysis for each organization (Format B).",
 )
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "html"], case_sensitive=False),
+    default="text",
+    help="Output format: text (default) or html.",
+)
+@click.option(
+    "--output",
+    "-out",
+    "output_file",
+    type=click.Path(),
+    help="Output file path (required for HTML format).",
+)
 @pass_context
 def analyze_dependencies_cmd(
     ctx: MigrationContext,
     organization: tuple[str, ...],
     analyze_all: bool,
     verbose: bool,
+    output_format: str,
+    output_file: str | None,
 ):
     """Analyze cross-organization dependencies for migration planning.
 
@@ -63,8 +80,11 @@ def analyze_dependencies_cmd(
 
         # Detailed view for single org
         aap-bridge analyze-dependencies -o "Default" --verbose
+
+        # Generate HTML report
+        aap-bridge analyze-dependencies --all --format html --output report.html
     """
-    asyncio.run(run_analysis(ctx, organization, analyze_all, verbose))
+    asyncio.run(run_analysis(ctx, organization, analyze_all, verbose, output_format, output_file))
 
 
 async def run_analysis(
@@ -72,6 +92,8 @@ async def run_analysis(
     organizations: tuple[str, ...],
     analyze_all: bool,
     verbose: bool,
+    output_format: str,
+    output_file: str | None,
 ):
     """Run dependency analysis."""
     try:
@@ -85,6 +107,10 @@ async def run_analysis(
             click.echo("Error: Cannot use --all with -o ORGANIZATION")
             sys.exit(1)
 
+        if output_format == "html" and not output_file:
+            click.echo("Error: --output is required when using --format html")
+            sys.exit(1)
+
         # Create analyzer
         analyzer = CrossOrgDependencyAnalyzer(ctx.source_client)
 
@@ -95,8 +121,15 @@ async def run_analysis(
 
             global_report = await analyzer.analyze_all_organizations()
 
-            # Print summary report
-            click.echo(format_summary_report(global_report))
+            if output_format == "html":
+                # Generate HTML report
+                html_content = generate_html_report(global_report)
+                with open(output_file, "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                click.echo(f"✓ HTML report generated: {output_file}")
+            else:
+                # Print summary report
+                click.echo(format_summary_report(global_report))
 
         elif len(organizations) == 1:
             # Single organization - show detailed report
@@ -106,8 +139,42 @@ async def run_analysis(
 
             org_report = await analyzer.analyze_organization(org_name)
 
-            # Print detailed report
-            click.echo(format_detailed_report(org_report))
+            if output_format == "html":
+                # Build a global report for this single org
+                from datetime import datetime
+                from aap_migration.analysis.dependency_graph import (
+                    group_into_phases,
+                    topological_sort,
+                )
+                from aap_migration.analysis.dependency_analyzer import (
+                    GlobalDependencyReport,
+                )
+
+                independent = [] if org_report.has_cross_org_deps else [org_name]
+                dependent = [org_name] if org_report.has_cross_org_deps else []
+                graph = {org_name: org_report.required_migrations_before}
+                migration_order = topological_sort(graph)
+                migration_phases = group_into_phases(graph, migration_order)
+
+                global_report = GlobalDependencyReport(
+                    analysis_date=datetime.now(),
+                    source_url=str(ctx.source_client.base_url),
+                    total_organizations=1,
+                    analyzed_organizations=[org_name],
+                    independent_orgs=independent,
+                    dependent_orgs=dependent,
+                    org_reports={org_name: org_report},
+                    migration_order=migration_order,
+                    migration_phases=migration_phases,
+                )
+
+                html_content = generate_html_report(global_report)
+                with open(output_file, "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                click.echo(f"✓ HTML report generated: {output_file}")
+            else:
+                # Print detailed report
+                click.echo(format_detailed_report(org_report))
 
         else:
             # Multiple organizations - show summary
@@ -154,19 +221,26 @@ async def run_analysis(
                 migration_phases=migration_phases,
             )
 
-            # Print summary
-            click.echo(format_summary_report(global_report))
+            if output_format == "html":
+                # Generate HTML report
+                html_content = generate_html_report(global_report)
+                with open(output_file, "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                click.echo(f"✓ HTML report generated: {output_file}")
+            else:
+                # Print summary
+                click.echo(format_summary_report(global_report))
 
-            # If verbose, also print detailed for each org
-            if verbose:
-                click.echo("")
-                click.echo("=" * 67)
-                click.echo("DETAILED ANALYSIS")
-                click.echo("=" * 67)
-                click.echo("")
-                for org_name in organizations:
-                    click.echo(format_detailed_report(org_reports[org_name]))
+                # If verbose, also print detailed for each org
+                if verbose:
                     click.echo("")
+                    click.echo("=" * 67)
+                    click.echo("DETAILED ANALYSIS")
+                    click.echo("=" * 67)
+                    click.echo("")
+                    for org_name in organizations:
+                        click.echo(format_detailed_report(org_reports[org_name]))
+                        click.echo("")
 
     except Exception as e:
         logger.error(
