@@ -1350,8 +1350,9 @@ class JobTemplateTransformer(DataTransformer):
         "project": "projects",
         "credential": "credentials",
         "execution_environment": "execution_environments",
+        "webhook_credential": "credentials",  # Webhook credential dependency
     }
-    # Organization and project are required; inventory/credential/EE are optional
+    # Organization and project are required; inventory/credential/EE/webhook are optional
     REQUIRED_DEPENDENCIES = {"organization", "project"}
 
     def _apply_specific_transformations(
@@ -1435,6 +1436,25 @@ class JobTemplateTransformer(DataTransformer):
         for field in boolean_fields:
             if field in data and not isinstance(data[field], bool):
                 data[field] = self._to_bool(data[field])
+
+        # Handle webhook credential - must be a PAT type credential
+        # If webhook_credential cannot be mapped, remove webhook fields to avoid import failure
+        if "webhook_credential" in data:
+            webhook_cred_id = data.get("webhook_credential")
+            if webhook_cred_id is None or webhook_cred_id == "":
+                # No webhook credential set, remove webhook fields
+                logger.warning(
+                    "job_template_webhook_credential_not_mapped",
+                    resource_type="job_templates",
+                    source_id=source_id,
+                    source_name=data.get("name"),
+                    message="Webhook credential not mapped, removing webhook configuration",
+                )
+                # Remove webhook-related fields
+                data.pop("webhook_credential", None)
+                data.pop("webhook_service", None)
+                data.pop("webhook_url", None)
+                data.pop("enable_webhook", None)
 
         return data
 

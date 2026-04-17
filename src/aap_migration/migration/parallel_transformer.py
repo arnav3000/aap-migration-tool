@@ -133,7 +133,7 @@ class ParallelTransformCoordinator:
                     active_resources.append(resource)
                 raw_resources = active_resources
 
-                # 1. Filter out inventories (pending_deletion and smart)
+                # 1. Filter out inventories (pending_deletion only)
                 if resource_type == "inventories":
                     filtered_resources = []
                     for resource in raw_resources:
@@ -144,14 +144,10 @@ class ParallelTransformCoordinator:
                                 source_id=resource.get("_source_id") or resource.get("id"),
                             )
                             stats["skipped_pending_deletion"] += 1
-                        elif resource.get("kind") == "smart":
-                            logger.debug(
-                                "skipping_smart_inventory",
-                                resource_type=resource_type,
-                                source_id=resource.get("_source_id") or resource.get("id"),
-                            )
-                            stats["skipped_smart_inventories"] += 1
                         else:
+                            # Include all inventories: regular, smart, and constructed
+                            # Smart inventories preserve host_filter
+                            # Constructed inventories preserve input_inventories
                             filtered_resources.append(resource)
                     raw_resources = filtered_resources
 

@@ -189,7 +189,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="hosts",
         endpoint="hosts/",
         description="Hosts",
-        migration_order=120,  # After inventory_groups (115), before instances (121)
+        migration_order=120,  # After inventory_groups (115), before host_inventory_memberships (121)
         cleanup_order=40,
         has_exporter=True,
         has_importer=True,
@@ -197,11 +197,22 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         batch_size=200,
         use_bulk_api=True,
     ),
+    "host_inventory_memberships": ResourceTypeInfo(
+        name="host_inventory_memberships",
+        endpoint="",  # No single endpoint - constructed from multiple inventory queries
+        description="Host-Inventory Memberships (for hosts in multiple inventories)",
+        migration_order=121,  # After hosts (120), before instances (122)
+        cleanup_order=39,  # Before hosts (40)
+        has_exporter=True,  # HostInventoryMembershipExporter
+        has_importer=True,  # HostInventoryMembershipImporter
+        has_transformer=False,  # No transformation needed - direct mapping
+        batch_size=100,  # Batch size for adding hosts to inventories
+    ),
     "instances": ResourceTypeInfo(
         name="instances",
         endpoint="instances/",
         description="Instances (AAP Controller Nodes)",
-        migration_order=121,  # After hosts (120), before instance_groups (125)
+        migration_order=122,  # After host_inventory_memberships (121), before instance_groups (125)
         cleanup_order=88,  # After instance_groups (87) - delete dependents first
         has_exporter=True,
         has_importer=True,
@@ -291,9 +302,9 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         description="Job Execution Records",
         migration_order=175,  # After schedules (170), jobs reference templates
         cleanup_order=5,  # Early cleanup (historical data)
-        has_exporter=True,
+        has_exporter=False,  # Historical data - not for migration
         has_importer=False,  # Export-only - historical data
-        has_transformer=True,  # Transform for reporting
+        has_transformer=False,  # No transform needed - not migrated
         batch_size=100,
     ),
 }
@@ -341,7 +352,7 @@ ENDPOINT_TO_RESOURCE_TYPE = {
 # Note: "jobs" was moved to RESOURCE_REGISTRY for export-only support
 RUNTIME_DATA_ENDPOINTS = {
     # Job execution data (historical logs, never migrated)
-    # Note: "jobs" is now in RESOURCE_REGISTRY with has_exporter=True, has_importer=False
+    # Note: "jobs" is in RESOURCE_REGISTRY with has_exporter=False (historical data only)
     "workflow_jobs",  # Workflow execution records (historical)
     "project_updates",  # Project sync job logs (historical)
     "inventory_updates",  # Inventory sync job logs (historical)
@@ -516,8 +527,8 @@ def get_exportable_types(use_discovered: bool = False) -> list[str]:
     """Get resource types that can be exported.
 
     Args:
-        use_discovered: If True and discovered endpoints exist, return ALL
-                       discovered types (not just those with exporters).
+        use_discovered: If True and discovered endpoints exist, use discovered
+                       types filtered by has_exporter=True.
                        If False, return only types from registry with has_exporter=True.
 
     Returns:
@@ -526,7 +537,14 @@ def get_exportable_types(use_discovered: bool = False) -> list[str]:
     if use_discovered:
         discovered = get_discovered_types()
         if discovered:
-            return discovered
+            # Normalize endpoint names ("inventory" → "inventories", "groups" → "inventory_groups")
+            normalized = [normalize_resource_type(name) for name in discovered]
+            # Filter by has_exporter=True
+            # This ensures types like "jobs" (has_exporter=False) are excluded
+            return [
+                name for name in normalized
+                if name in RESOURCE_REGISTRY and RESOURCE_REGISTRY[name].has_exporter
+            ]
 
     # Fall back to hardcoded registry
     return [name for name, info in RESOURCE_REGISTRY.items() if info.has_exporter]
