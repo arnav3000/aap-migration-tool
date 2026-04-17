@@ -2616,6 +2616,183 @@ class HostImporter(ResourceImporter):
         }
 
 
+class HostInventoryMembershipImporter(ResourceImporter):
+    """Importer for host-inventory membership relationships.
+
+    This importer restores host memberships in multiple inventories by adding
+    hosts to additional inventories beyond their primary inventory. Only
+    processes memberships for regular inventories.
+    """
+
+    DEPENDENCIES = {
+        "host_id": "hosts",
+        "inventory_id": "inventories",
+    }
+
+    async def import_resource(
+        self,
+        resource: dict[str, Any],
+        xformed: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Import a single host-inventory membership.
+
+        Args:
+            resource: Original membership data with host_id and inventory_id
+            xformed: Not used for memberships (no transformation needed)
+
+        Returns:
+            Result dictionary with status
+        """
+        source_host_id = resource.get("host_id")
+        source_inventory_id = resource.get("inventory_id")
+        host_name = resource.get("host_name", f"host_{source_host_id}")
+        inventory_name = resource.get("inventory_name", f"inventory_{source_inventory_id}")
+
+        # Generate a unique identifier for this membership
+        membership_id = f"{source_host_id}_{source_inventory_id}"
+
+        # Check if already imported
+        if self.state.is_migrated("host_inventory_memberships", membership_id):
+            logger.debug(
+                "membership_already_migrated",
+                host_id=source_host_id,
+                inventory_id=source_inventory_id,
+                message="Membership already migrated, skipping",
+            )
+            self.stats["skipped_count"] += 1
+            return {"status": "skipped", "reason": "already_migrated"}
+
+        # Map source IDs to target IDs
+        target_host_id = self.state.get_target_id("hosts", source_host_id)
+        target_inventory_id = self.state.get_target_id("inventories", source_inventory_id)
+
+        if not target_host_id:
+            logger.warning(
+                "membership_import_host_not_found",
+                source_host_id=source_host_id,
+                host_name=host_name,
+                message="Host not found in target, skipping membership",
+            )
+            self.stats["skipped_count"] += 1
+            return {"status": "skipped", "reason": "host_not_found"}
+
+        if not target_inventory_id:
+            logger.warning(
+                "membership_import_inventory_not_found",
+                source_inventory_id=source_inventory_id,
+                inventory_name=inventory_name,
+                message="Inventory not found in target, skipping membership",
+            )
+            self.stats["skipped_count"] += 1
+            return {"status": "skipped", "reason": "inventory_not_found"}
+
+        # Check if host is already in this inventory
+        try:
+            # Get host details to check current inventory
+            host_data = await self.client.get(f"hosts/{target_host_id}/")
+            primary_inventory_id = host_data.get("inventory")
+
+            # If this is the primary inventory, skip (already set during host import)
+            if primary_inventory_id == target_inventory_id:
+                logger.debug(
+                    "membership_is_primary",
+                    host_id=target_host_id,
+                    inventory_id=target_inventory_id,
+                    message="Host already in this inventory as primary, skipping",
+                )
+                self.state.create_source_mapping(
+                    "host_inventory_memberships",
+                    membership_id,
+                    source_name=f"{host_name} -> {inventory_name}",
+                )
+                self.state.mark_completed("host_inventory_memberships", membership_id)
+                self.stats["skipped_count"] += 1
+                return {"status": "skipped", "reason": "already_primary_inventory"}
+
+            # Check if host is already in this inventory (as additional membership)
+            existing_hosts = await self.client.get(
+                f"inventories/{target_inventory_id}/hosts/",
+                params={"id": target_host_id, "page_size": 1},
+            )
+
+            if existing_hosts.get("count", 0) > 0:
+                logger.debug(
+                    "membership_already_exists",
+                    host_id=target_host_id,
+                    inventory_id=target_inventory_id,
+                    message="Host already in this inventory, skipping",
+                )
+                self.state.create_source_mapping(
+                    "host_inventory_memberships",
+                    membership_id,
+                    source_name=f"{host_name} -> {inventory_name}",
+                )
+                self.state.mark_completed("host_inventory_memberships", membership_id)
+                self.stats["skipped_count"] += 1
+                return {"status": "skipped", "reason": "already_in_inventory"}
+
+            # Add host to inventory
+            logger.info(
+                "adding_host_to_inventory",
+                host_id=target_host_id,
+                host_name=host_name,
+                inventory_id=target_inventory_id,
+                inventory_name=inventory_name,
+            )
+
+            await self.client.post(
+                f"inventories/{target_inventory_id}/hosts/",
+                json_data={"id": target_host_id},
+            )
+
+            # Mark as successful
+            self.state.create_source_mapping(
+                "host_inventory_memberships",
+                membership_id,
+                source_name=f"{host_name} -> {inventory_name}",
+            )
+            self.state.mark_completed("host_inventory_memberships", membership_id)
+            self.stats["imported_count"] += 1
+
+            logger.info(
+                "membership_imported",
+                host_name=host_name,
+                inventory_name=inventory_name,
+                message=f"Added host '{host_name}' to inventory '{inventory_name}'",
+            )
+
+            return {"status": "created", "target_id": f"{target_host_id}_{target_inventory_id}"}
+
+        except APIError as e:
+            error_msg = str(e)
+            logger.error(
+                "membership_import_failed",
+                host_id=source_host_id,
+                inventory_id=source_inventory_id,
+                error=error_msg,
+            )
+
+            self.state.create_source_mapping(
+                "host_inventory_memberships",
+                membership_id,
+                source_name=f"{host_name} -> {inventory_name}",
+            )
+            self.state.mark_failed("host_inventory_memberships", membership_id, error_msg)
+            self.stats["error_count"] += 1
+
+            self.import_errors.append(
+                {
+                    "resource_type": "host_inventory_memberships",
+                    "source_id": membership_id,
+                    "name": f"{host_name} -> {inventory_name}",
+                    "error": error_msg,
+                    "error_type": type(e).__name__,
+                }
+            )
+
+            return {"status": "failed", "error": error_msg}
+
+
 class CredentialImporter(ResourceImporter):
     """Importer for credential resources.
 
@@ -3216,6 +3393,7 @@ class JobTemplateImporter(ResourceImporter):
         "project": "projects",
         "credential": "credentials",
         "execution_environment": "execution_environments",
+        "webhook_credential": "credentials",  # Webhook credential (PAT for GitHub/GitLab)
     }
 
     async def import_resource(
@@ -5561,6 +5739,7 @@ def create_importer(
         "inventory_sources": InventorySourceImporter,
         "inventory_groups": InventoryGroupImporter,
         "hosts": HostImporter,
+        "host_inventory_memberships": HostInventoryMembershipImporter,
         # Job templates and workflows
         "job_templates": JobTemplateImporter,
         "workflow_job_templates": WorkflowImporter,

@@ -995,6 +995,161 @@ class HostExporter(ResourceExporter):
                 yield host
 
 
+class HostInventoryMembershipExporter(ResourceExporter):
+    """Exporter for host-inventory membership relationships.
+
+    This exporter captures which hosts belong to which inventories, allowing
+    hosts that exist in multiple inventories to be properly reconstructed
+    during import. Only exports memberships for regular inventories (not smart
+    or constructed inventories, which auto-populate).
+    """
+
+    def __init__(
+        self,
+        client: AAPSourceClient,
+        state: MigrationState,
+        performance_config: PerformanceConfig,
+    ):
+        """Initialize host-inventory membership exporter."""
+        super().__init__(client, state, performance_config)
+        self.skip_dynamic_hosts = True  # Default: skip dynamic hosts
+
+    def set_skip_dynamic_hosts(self, skip: bool) -> None:
+        """Set whether to skip hosts from dynamic inventory sources.
+
+        Args:
+            skip: If True, only export memberships for static hosts
+        """
+        self.skip_dynamic_hosts = skip
+
+    async def get_count(self, endpoint: str, filters: dict[str, Any] | None = None) -> int:
+        """Override get_count for host_inventory_memberships.
+
+        Since host_inventory_memberships has no single API endpoint (endpoint=""),
+        and calculating actual count requires querying all inventories+hosts,
+        return sentinel value to indicate export should proceed.
+
+        The actual membership count will be determined during export phase.
+        This avoids duplicate API queries (count + export).
+
+        Args:
+            endpoint: API endpoint (empty string for this resource type)
+            filters: Optional filters (not used for memberships)
+
+        Returns:
+            Sentinel value 1 to indicate this resource should be exported
+        """
+        # Return non-zero to signal export phase should run
+        # Actual count will be logged during export completion
+        logger.debug(
+            "host_inventory_memberships_count_deferred",
+            message="Count deferred to export phase (no single endpoint)",
+        )
+        return 1
+
+    async def export(
+        self,
+        filters: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Export host-inventory memberships.
+
+        For each regular inventory, exports all (host_id, inventory_id) pairs.
+        This allows reconstruction of hosts that belong to multiple inventories.
+
+        Args:
+            filters: Optional query parameters for filtering
+
+        Yields:
+            Membership dictionaries with 'host_id' and 'inventory_id'
+        """
+        logger.info(
+            "exporting_host_inventory_memberships",
+            message="Starting export of host-inventory relationships",
+        )
+
+        # Step 1: Get all inventories
+        all_inventories = []
+        async for inventory in self.export_resources(
+            resource_type="inventories",
+            endpoint="inventories/",
+            page_size=200,
+        ):
+            all_inventories.append(inventory)
+
+        # Step 2: Filter to only regular inventories (skip smart/constructed)
+        regular_inventories = [
+            inv
+            for inv in all_inventories
+            if inv.get("kind") in ("", None, "regular")
+        ]
+
+        logger.info(
+            "found_regular_inventories",
+            total_inventories=len(all_inventories),
+            regular_inventories=len(regular_inventories),
+            message=f"Will export memberships for {len(regular_inventories)} regular inventories",
+        )
+
+        # Step 3: For each regular inventory, get all hosts
+        membership_filters: dict[str, Any] = {}
+        if self.skip_dynamic_hosts:
+            membership_filters["inventory_sources__isnull"] = "true"
+            logger.info(
+                "applying_dynamic_host_filter",
+                message="Filtering out hosts from dynamic inventory sources",
+            )
+
+        total_memberships = 0
+        seen_pairs = set()  # Track unique (host_id, inventory_id) pairs to avoid duplicates
+
+        for inventory in regular_inventories:
+            inventory_id = inventory["id"]
+            inventory_name = inventory.get("name", f"ID {inventory_id}")
+
+            # Get all hosts in this inventory
+            hosts_in_inventory = []
+            async for host in self.export_resources(
+                resource_type="hosts",
+                endpoint=f"inventories/{inventory_id}/hosts/",
+                page_size=self.performance_config.batch_sizes.get("hosts", 200),
+                filters=membership_filters,
+            ):
+                hosts_in_inventory.append(host)
+
+            logger.info(
+                "inventory_membership_export",
+                inventory_id=inventory_id,
+                inventory_name=inventory_name,
+                host_count=len(hosts_in_inventory),
+            )
+
+            # Yield membership records
+            for host in hosts_in_inventory:
+                host_id = host["id"]
+                pair = (host_id, inventory_id)
+
+                # Skip duplicates
+                if pair in seen_pairs:
+                    continue
+
+                seen_pairs.add(pair)
+                total_memberships += 1
+
+                yield {
+                    "host_id": host_id,
+                    "inventory_id": inventory_id,
+                    "host_name": host.get("name", ""),
+                    "inventory_name": inventory_name,
+                }
+
+        logger.info(
+            "host_inventory_memberships_export_complete",
+            total_memberships=total_memberships,
+            unique_hosts=len(set(h for h, _ in seen_pairs)),
+            message=f"Exported {total_memberships} host-inventory membership relationships",
+        )
+
+
 class CredentialExporter(ResourceExporter):
     """Exporter for credential resources."""
 
@@ -2203,6 +2358,7 @@ def create_exporter(
         "inventory_sources": InventorySourceExporter,
         "inventory_groups": InventoryGroupExporter,
         "hosts": HostExporter,
+        "host_inventory_memberships": HostInventoryMembershipExporter,
         "credentials": CredentialExporter,
         "credential_input_sources": CredentialInputSourceExporter,
         "projects": ProjectExporter,
