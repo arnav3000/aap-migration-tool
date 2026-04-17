@@ -223,6 +223,9 @@ docs/*.pdf
 archive/
 *.bak
 
+# Local-only design documents (not for public repo)
+docs/ORG_TOKEN_MIGRATION_ANALYSIS.md
+
 # AI Development Workflow (private - not tracked in public repos)
 .claude/
 .gemini/
