@@ -537,11 +537,12 @@ def get_exportable_types(use_discovered: bool = False) -> list[str]:
     if use_discovered:
         discovered = get_discovered_types()
         if discovered:
-            # Filter discovered types by has_exporter=True
+            # Normalize endpoint names ("inventory" → "inventories", "groups" → "inventory_groups")
+            normalized = [normalize_resource_type(name) for name in discovered]
+            # Filter by has_exporter=True
             # This ensures types like "jobs" (has_exporter=False) are excluded
-            # even when discovered by prep phase
             return [
-                name for name in discovered
+                name for name in normalized
                 if name in RESOURCE_REGISTRY and RESOURCE_REGISTRY[name].has_exporter
             ]
 
