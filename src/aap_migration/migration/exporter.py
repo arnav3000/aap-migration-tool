@@ -1022,6 +1022,31 @@ class HostInventoryMembershipExporter(ResourceExporter):
         """
         self.skip_dynamic_hosts = skip
 
+    async def get_count(self, endpoint: str, filters: dict[str, Any] | None = None) -> int:
+        """Override get_count for host_inventory_memberships.
+
+        Since host_inventory_memberships has no single API endpoint (endpoint=""),
+        and calculating actual count requires querying all inventories+hosts,
+        return sentinel value to indicate export should proceed.
+
+        The actual membership count will be determined during export phase.
+        This avoids duplicate API queries (count + export).
+
+        Args:
+            endpoint: API endpoint (empty string for this resource type)
+            filters: Optional filters (not used for memberships)
+
+        Returns:
+            Sentinel value 1 to indicate this resource should be exported
+        """
+        # Return non-zero to signal export phase should run
+        # Actual count will be logged during export completion
+        logger.debug(
+            "host_inventory_memberships_count_deferred",
+            message="Count deferred to export phase (no single endpoint)",
+        )
+        return 1
+
     async def export(
         self,
         filters: dict[str, Any] | None = None,
