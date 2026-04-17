@@ -513,26 +513,19 @@ def transform(
                                             source_name=resource.get("name"),
                                         )
                                         skipped_pending_deletion += 1
-                                    elif resource.get("kind") == "smart":
-                                        logger.info(
-                                            "skipping_smart_inventory",
-                                            resource_type="inventories",
-                                            source_id=resource.get("_source_id")
-                                            or resource.get("id"),
-                                            source_name=resource.get("name"),
-                                        )
-                                        skipped_smart_inventories += 1
                                     else:
+                                        # Include all inventories: regular, smart, and constructed
+                                        # Smart inventories preserve host_filter
+                                        # Constructed inventories preserve input_inventories
                                         filtered_resources.append(resource)
                                 raw_resources = filtered_resources
-                                if skipped_pending_deletion > 0 or skipped_smart_inventories > 0:
+                                if skipped_pending_deletion > 0:
                                     logger.debug(
                                         "filtered_inventories",
                                         resource_type=rtype,
                                         original=original_count,
                                         filtered=len(raw_resources),
                                         skipped_pending=skipped_pending_deletion,
-                                        skipped_smart=skipped_smart_inventories,
                                     )
 
                             # Filter out custom managed credential_types
