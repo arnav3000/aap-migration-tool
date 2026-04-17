@@ -447,6 +447,13 @@ aap-bridge migrate -r organizations --skip-prep
 aap-bridge migrate -r users --skip-prep
 aap-bridge migrate -r teams --skip-prep
 
+# NOTE: Users and Teams Migration
+# The above commands migrate ONLY local users and teams (created directly in AAP).
+# For users authenticated via LDAP or Active Directory:
+#   1. Migrate settings first (Phase 9 below) to configure LDAP/AD integration
+#   2. SKIP the users/teams migration step - LDAP/AD users will authenticate automatically
+#   3. Only migrate local admin/service accounts using the users command
+
 # Phase 2: Credentials (CRITICAL - must be 100% complete)
 aap-bridge migrate -r credential_types --skip-prep
 aap-bridge migrate -r credentials --skip-prep
@@ -467,11 +474,11 @@ aap-bridge migrate -r instance_groups --skip-prep
 aap-bridge migrate -r job_templates --skip-prep
 aap-bridge migrate -r workflow_job_templates --skip-prep
 
-# Phase 7: Schedules
-aap-bridge migrate -r schedules --skip-prep
-
-# Phase 8: Applications (OAuth applications)
+# Phase 7: Applications (OAuth applications)
 aap-bridge migrate -r applications --skip-prep
+
+# Phase 8: Schedules
+aap-bridge migrate -r schedules --skip-prep
 
 # Phase 9: Settings (Optional - review before applying)
 aap-bridge migrate -r settings --skip-prep
@@ -588,6 +595,46 @@ aap-bridge import -r organizations
 - Exported data: `exports/<resource_type>/`
 - Transformed data: `xformed/<resource_type>/`
 - State database: `migration_state.db`
+
+---
+
+#### NOTE: Re-Import Commands
+
+**Re-importing after failures or manual deletions:**
+
+```bash
+# Retry failed imports (automatic - no special flag needed)
+# Failed resources are automatically retried on re-run
+aap-bridge import --yes
+
+# Re-import specific resource type after manual deletion from target AAP
+aap-bridge import -r hosts --force-reimport --yes
+aap-bridge import -r inventories --force-reimport --yes
+aap-bridge import -r job_templates --force-reimport --yes
+
+# Re-import multiple resource types together
+aap-bridge import -r workflow_job_templates -r workflow_nodes --force-reimport --yes
+
+# Check what would be imported before running
+aap-bridge import --check-dependencies
+aap-bridge import --dry-run
+```
+
+**When to use which flag:**
+
+| Scenario | Command | Flag |
+|----------|---------|------|
+| Retry after API/network failures | `aap-bridge import --yes` | None (auto-retry) |
+| Re-import after manual deletion | `aap-bridge import -r <type> --force-reimport --yes` | `--force-reimport` |
+| Check before importing | `aap-bridge import --check-dependencies` | `--check-dependencies` |
+| Test without changes | `aap-bridge import --dry-run` | `--dry-run` |
+
+**Important:**
+- ✅ Failed resources (`status="failed"`) are **automatically retried** - no special flag needed
+- ✅ `--force-reimport` clears import progress for specified types only (not dependencies)
+- ✅ Use `--force-reimport` when resources were successfully imported but deleted from target AAP
+
+---
 
 #### Output Control
 
