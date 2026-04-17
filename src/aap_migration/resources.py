@@ -352,7 +352,7 @@ ENDPOINT_TO_RESOURCE_TYPE = {
 # Note: "jobs" was moved to RESOURCE_REGISTRY for export-only support
 RUNTIME_DATA_ENDPOINTS = {
     # Job execution data (historical logs, never migrated)
-    # Note: "jobs" is now in RESOURCE_REGISTRY with has_exporter=True, has_importer=False
+    # Note: "jobs" is in RESOURCE_REGISTRY with has_exporter=False (historical data only)
     "workflow_jobs",  # Workflow execution records (historical)
     "project_updates",  # Project sync job logs (historical)
     "inventory_updates",  # Inventory sync job logs (historical)
@@ -527,8 +527,8 @@ def get_exportable_types(use_discovered: bool = False) -> list[str]:
     """Get resource types that can be exported.
 
     Args:
-        use_discovered: If True and discovered endpoints exist, return ALL
-                       discovered types (not just those with exporters).
+        use_discovered: If True and discovered endpoints exist, use discovered
+                       types filtered by has_exporter=True.
                        If False, return only types from registry with has_exporter=True.
 
     Returns:
@@ -537,7 +537,13 @@ def get_exportable_types(use_discovered: bool = False) -> list[str]:
     if use_discovered:
         discovered = get_discovered_types()
         if discovered:
-            return discovered
+            # Filter discovered types by has_exporter=True
+            # This ensures types like "jobs" (has_exporter=False) are excluded
+            # even when discovered by prep phase
+            return [
+                name for name in discovered
+                if name in RESOURCE_REGISTRY and RESOURCE_REGISTRY[name].has_exporter
+            ]
 
     # Fall back to hardcoded registry
     return [name for name, info in RESOURCE_REGISTRY.items() if info.has_exporter]
