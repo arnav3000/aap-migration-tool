@@ -3708,6 +3708,66 @@ class WorkflowImporter(ResourceImporter):
             # Extract notification associations for separate import
             notifications = workflow.pop("notifications", None)
 
+            # SECURITY FIX: Validate all node dependencies BEFORE importing workflow
+            # If any dependencies are missing, fail the workflow immediately
+            if nodes:
+                missing_dependencies = []
+                for node in nodes:
+                    ujt_source_id = node.get("unified_job_template")
+                    if ujt_source_id:
+                        # Determine the type of unified_job_template (job vs workflow)
+                        ujt_type = node.get("summary_fields", {}).get("unified_job_template", {}).get("unified_job_type")
+
+                        # Map ujt_type to resource_type for lookup
+                        if ujt_type == "job":
+                            resource_type = "job_templates"
+                        elif ujt_type == "workflow_job":
+                            resource_type = "workflow_job_templates"
+                        else:
+                            # For other types (project, inventory_source), assume job_templates
+                            # These are rare and typically don't fail
+                            resource_type = "job_templates"
+
+                        # Check if this dependency was successfully imported
+                        target_id = self.state.get_mapped_id(resource_type, ujt_source_id)
+                        if not target_id:
+                            missing_dependencies.append((ujt_source_id, ujt_type or "unknown"))
+
+                if missing_dependencies:
+                    # Don't import this workflow - missing dependencies
+                    failed_count += 1
+
+                    # Format missing dependencies for error message
+                    missing_items = []
+                    for source_id_val, dep_type in missing_dependencies:
+                        missing_items.append(f"{dep_type} template ID {source_id_val}")
+
+                    error_msg = (
+                        f"Cannot import workflow: {len(missing_dependencies)} referenced template(s) "
+                        f"not successfully imported. Missing: {', '.join(missing_items)}. "
+                        f"Import all dependencies first, then retry workflow import."
+                    )
+
+                    self.state.mark_failed(
+                        resource_type="workflow_job_templates",
+                        source_id=source_id,
+                        error_message=error_msg,
+                    )
+
+                    logger.error(
+                        "workflow_dependency_check_failed",
+                        workflow_source_id=source_id,
+                        workflow_name=workflow.get("name"),
+                        missing_dependencies=missing_dependencies,
+                        error=error_msg,
+                    )
+
+                    # Update progress after failure
+                    if progress_callback:
+                        progress_callback(success_count, failed_count, skipped_count)
+
+                    continue  # Skip to next workflow
+
             try:
                 result = await self.import_resource(
                     resource_type="workflow_job_templates",
@@ -3815,55 +3875,21 @@ class WorkflowImporter(ResourceImporter):
 
                 # SECURITY FIX: If any nodes failed, mark parent workflows as failed
                 # This prevents reporting workflows as successful when they're incomplete
+                # Note: This is now a backup - main validation happens before workflow import
                 if nodes_failed > 0:
-                    # DEBUG: Log Fix #2 execution
-                    logger.info(
-                        "fix2_workflow_failure_tracking_started",
-                        nodes_failed=nodes_failed,
-                        error_count=len(node_importer.import_errors),
-                        pending_nodes_count=len(all_pending_nodes),
-                    )
-
                     # Group failed nodes by their parent workflow
                     failed_by_workflow = {}
                     for error_record in node_importer.import_errors:
                         # Find the node in all_pending_nodes to get its parent workflow
                         node_source_id = error_record.get("source_id")
-                        logger.debug(
-                            "fix2_searching_for_failed_node",
-                            node_source_id=node_source_id,
-                            error_type=error_record.get("error_type"),
-                        )
-
-                        found_match = False
                         for node in all_pending_nodes:
                             if node.get("_source_id") == node_source_id:
                                 source_workflow_id = node.get("_source_workflow_id")
-                                logger.info(
-                                    "fix2_found_failed_node_match",
-                                    node_source_id=node_source_id,
-                                    source_workflow_id=source_workflow_id,
-                                )
                                 if source_workflow_id:
                                     if source_workflow_id not in failed_by_workflow:
                                         failed_by_workflow[source_workflow_id] = []
                                     failed_by_workflow[source_workflow_id].append(error_record)
-                                    found_match = True
                                 break
-
-                        if not found_match:
-                            logger.warning(
-                                "fix2_failed_node_not_found_in_pending",
-                                node_source_id=node_source_id,
-                                pending_node_ids=[n.get("_source_id") for n in all_pending_nodes[:5]],
-                            )
-
-                    # DEBUG: Log grouping results
-                    logger.info(
-                        "fix2_failed_nodes_grouped",
-                        workflows_with_failures=len(failed_by_workflow),
-                        workflow_ids=list(failed_by_workflow.keys()),
-                    )
 
                     # Mark affected workflows as failed
                     workflows_marked_failed = 0
