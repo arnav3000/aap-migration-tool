@@ -3816,19 +3816,54 @@ class WorkflowImporter(ResourceImporter):
                 # SECURITY FIX: If any nodes failed, mark parent workflows as failed
                 # This prevents reporting workflows as successful when they're incomplete
                 if nodes_failed > 0:
+                    # DEBUG: Log Fix #2 execution
+                    logger.info(
+                        "fix2_workflow_failure_tracking_started",
+                        nodes_failed=nodes_failed,
+                        error_count=len(node_importer.import_errors),
+                        pending_nodes_count=len(all_pending_nodes),
+                    )
+
                     # Group failed nodes by their parent workflow
                     failed_by_workflow = {}
                     for error_record in node_importer.import_errors:
                         # Find the node in all_pending_nodes to get its parent workflow
                         node_source_id = error_record.get("source_id")
+                        logger.debug(
+                            "fix2_searching_for_failed_node",
+                            node_source_id=node_source_id,
+                            error_type=error_record.get("error_type"),
+                        )
+
+                        found_match = False
                         for node in all_pending_nodes:
                             if node.get("_source_id") == node_source_id:
                                 source_workflow_id = node.get("_source_workflow_id")
+                                logger.info(
+                                    "fix2_found_failed_node_match",
+                                    node_source_id=node_source_id,
+                                    source_workflow_id=source_workflow_id,
+                                )
                                 if source_workflow_id:
                                     if source_workflow_id not in failed_by_workflow:
                                         failed_by_workflow[source_workflow_id] = []
                                     failed_by_workflow[source_workflow_id].append(error_record)
+                                    found_match = True
                                 break
+
+                        if not found_match:
+                            logger.warning(
+                                "fix2_failed_node_not_found_in_pending",
+                                node_source_id=node_source_id,
+                                pending_node_ids=[n.get("_source_id") for n in all_pending_nodes[:5]],
+                            )
+
+                    # DEBUG: Log grouping results
+                    logger.info(
+                        "fix2_failed_nodes_grouped",
+                        workflows_with_failures=len(failed_by_workflow),
+                        workflow_ids=list(failed_by_workflow.keys()),
+                    )
 
                     # Mark affected workflows as failed
                     workflows_marked_failed = 0
