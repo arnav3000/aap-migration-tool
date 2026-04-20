@@ -14,6 +14,8 @@ from aap_migration.client.aap_target_client import AAPTargetClient
 from aap_migration.client.bulk_operations import BulkOperations
 from aap_migration.client.exceptions import APIError, ConflictError
 from aap_migration.config import PerformanceConfig
+from aap_migration.migration.database import get_session
+from aap_migration.migration.models import MigrationProgress
 from aap_migration.migration.state import MigrationState
 from aap_migration.utils.idempotency import compare_resources
 from aap_migration.utils.logging import get_logger
@@ -3692,6 +3694,46 @@ class WorkflowImporter(ResourceImporter):
         workflows_with_schedules = []  # Collect workflows that have schedules to create
         workflows_with_notifications = []  # Collect workflows that have notification associations
 
+        # Query failed dependencies once (efficient approach)
+        # This allows us to check if workflow nodes reference failed templates
+        failed_job_template_ids = set()
+        failed_workflow_template_ids = set()
+
+        try:
+            with get_session(self.state.database_url) as session:
+                # Get all failed job templates
+                failed_jobs = (
+                    session.query(MigrationProgress.source_id)
+                    .filter(
+                        MigrationProgress.resource_type == "job_templates",
+                        MigrationProgress.status == "failed",
+                    )
+                    .all()
+                )
+                failed_job_template_ids = {row.source_id for row in failed_jobs}
+
+                # Get all failed workflow templates
+                failed_workflows = (
+                    session.query(MigrationProgress.source_id)
+                    .filter(
+                        MigrationProgress.resource_type == "workflow_job_templates",
+                        MigrationProgress.status == "failed",
+                    )
+                    .all()
+                )
+                failed_workflow_template_ids = {row.source_id for row in failed_workflows}
+
+                logger.info(
+                    "Loaded failed dependencies for validation",
+                    failed_job_templates=len(failed_job_template_ids),
+                    failed_workflow_templates=len(failed_workflow_template_ids),
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to query failed dependencies, will skip validation",
+                error=str(e),
+            )
+
         # Phase 1: Import workflows and collect nodes/surveys/schedules/notifications
         for workflow in workflows:
             source_id = workflow.pop("_source_id", workflow.get("id"))
@@ -3708,9 +3750,18 @@ class WorkflowImporter(ResourceImporter):
             # Extract notification associations for separate import
             notifications = workflow.pop("notifications", None)
 
+            # Create progress record FIRST (required before we can mark as failed)
+            # This ensures database consistency
+            self.state.track_progress(
+                resource_type="workflow_job_templates",
+                source_id=source_id,
+                source_name=workflow.get("name"),
+                phase="import",
+            )
+
             # SECURITY FIX: Validate all node dependencies BEFORE importing workflow
-            # If any dependencies are missing, fail the workflow immediately
-            if nodes:
+            # Check if nodes reference any FAILED templates from earlier import phases
+            if nodes and (failed_job_template_ids or failed_workflow_template_ids):
                 missing_dependencies = []
                 for node in nodes:
                     ujt_source_id = node.get("unified_job_template")
@@ -3718,23 +3769,14 @@ class WorkflowImporter(ResourceImporter):
                         # Determine the type of unified_job_template (job vs workflow)
                         ujt_type = node.get("summary_fields", {}).get("unified_job_template", {}).get("unified_job_type")
 
-                        # Map ujt_type to resource_type for lookup
-                        if ujt_type == "job":
-                            resource_type = "job_templates"
-                        elif ujt_type == "workflow_job":
-                            resource_type = "workflow_job_templates"
-                        else:
-                            # For other types (project, inventory_source), assume job_templates
-                            # These are rare and typically don't fail
-                            resource_type = "job_templates"
-
-                        # Check if this dependency was successfully imported
-                        target_id = self.state.get_mapped_id(resource_type, ujt_source_id)
-                        if not target_id:
-                            missing_dependencies.append((ujt_source_id, ujt_type or "unknown"))
+                        # Check if this node references a FAILED template
+                        if ujt_type == "job" and ujt_source_id in failed_job_template_ids:
+                            missing_dependencies.append((ujt_source_id, ujt_type))
+                        elif ujt_type == "workflow_job" and ujt_source_id in failed_workflow_template_ids:
+                            missing_dependencies.append((ujt_source_id, ujt_type))
 
                 if missing_dependencies:
-                    # Don't import this workflow - missing dependencies
+                    # Don't import this workflow - has failed dependencies
                     failed_count += 1
 
                     # Format missing dependencies for error message
@@ -3744,10 +3786,11 @@ class WorkflowImporter(ResourceImporter):
 
                     error_msg = (
                         f"Cannot import workflow: {len(missing_dependencies)} referenced template(s) "
-                        f"not successfully imported. Missing: {', '.join(missing_items)}. "
-                        f"Import all dependencies first, then retry workflow import."
+                        f"failed to import in earlier phases. Missing: {', '.join(missing_items)}. "
+                        f"Fix the failed templates first, then retry workflow import."
                     )
 
+                    # Now we can mark as failed (record exists from track_progress above)
                     self.state.mark_failed(
                         resource_type="workflow_job_templates",
                         source_id=source_id,
