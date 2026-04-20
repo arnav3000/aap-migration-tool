@@ -396,6 +396,51 @@ def _generate_markdown_report(report_data: list[dict], migration_id: str) -> str
     lines.append("---")
     lines.append("")
 
+    # SECURITY FIX: Add workflow-specific correlation section
+    # Show relationship between workflow_job_templates and workflow_nodes
+    workflow_stats = next((s for s in report_data if s["resource_type"] == "workflow_job_templates"), None)
+    node_stats = next((s for s in report_data if s["resource_type"] == "workflow_nodes"), None)
+
+    if workflow_stats and node_stats:
+        lines.append("## Workflow Job Templates - Node Import Status")
+        lines.append("")
+        lines.append("Workflow job templates consist of multiple workflow nodes. This section shows the correlation:")
+        lines.append("")
+        lines.append(f"- **Workflows imported:** {workflow_stats['completed_count']}")
+        lines.append(f"- **Workflow nodes imported:** {node_stats['completed_count']}")
+        lines.append(f"- **Workflow nodes failed:** {node_stats['failed_count']}")
+        lines.append("")
+
+        # Warning if nodes failed
+        if node_stats['failed_count'] > 0:
+            lines.append("⚠️ **WARNING:** Some workflow nodes failed to import!")
+            lines.append("")
+            lines.append("**Impact:**")
+            lines.append("- Workflows may be incomplete or broken")
+            lines.append("- Workflows may fail when executed in target AAP")
+            lines.append("- Review failed workflow_nodes below for details")
+            lines.append("")
+            lines.append("**Recommendation:**")
+            lines.append("- Ensure all job templates are successfully imported")
+            lines.append("- Re-run workflow import after fixing job template issues")
+            lines.append("- Verify workflows in target AAP UI before executing")
+            lines.append("")
+
+        # Warning if workflows failed
+        if workflow_stats['failed_count'] > 0:
+            lines.append("⚠️ **WARNING:** Some workflows failed to import!")
+            lines.append("")
+            lines.append(f"- **Workflows failed:** {workflow_stats['failed_count']}")
+            lines.append("")
+            lines.append("**Common causes:**")
+            lines.append("- Missing job template dependencies (nodes couldn't be created)")
+            lines.append("- Missing organization or inventory references")
+            lines.append("- Invalid workflow configuration")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
     # Detailed sections for failures
     for stats in report_data:
         if stats["failed_count"] > 0 or stats["discrepancy"] != 0:
