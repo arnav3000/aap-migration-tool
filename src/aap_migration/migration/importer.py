@@ -3752,7 +3752,7 @@ class WorkflowImporter(ResourceImporter):
 
             # Create progress record FIRST (required before we can mark as failed)
             # This ensures database consistency
-            self.state.track_progress(
+            self.state.mark_in_progress(
                 resource_type="workflow_job_templates",
                 source_id=source_id,
                 source_name=workflow.get("name"),
