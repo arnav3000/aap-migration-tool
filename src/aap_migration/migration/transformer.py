@@ -1593,8 +1593,13 @@ class WorkflowTransformer(DataTransformer):
         """
         # Remove workflow nodes - they need to be handled separately
         if "nodes" in data:
-            # Store nodes separately for later processing
-            data["_workflow_nodes"] = data.pop("nodes")
+            nodes = data.pop("nodes")
+            # SECURITY FIX: Preserve source node IDs for failure tracking
+            # This allows Fix #2 in importer.py to correlate failed nodes back to workflows
+            for node in nodes:
+                if "id" in node:
+                    node["_source_id"] = node.pop("id")
+            data["_workflow_nodes"] = nodes
 
         # Ensure boolean fields are proper booleans
         boolean_fields = ["ask_variables_on_launch", "ask_inventory_on_launch", "survey_enabled"]
