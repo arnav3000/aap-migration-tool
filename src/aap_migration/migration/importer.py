@@ -3750,15 +3750,6 @@ class WorkflowImporter(ResourceImporter):
             # Extract notification associations for separate import
             notifications = workflow.pop("notifications", None)
 
-            # Create progress record FIRST (required before we can mark as failed)
-            # This ensures database consistency
-            self.state.mark_in_progress(
-                resource_type="workflow_job_templates",
-                source_id=source_id,
-                source_name=workflow.get("name"),
-                phase="import",
-            )
-
             # SECURITY FIX: Validate all node dependencies BEFORE importing workflow
             # Check if nodes reference any FAILED templates from earlier import phases
             if nodes and (failed_job_template_ids or failed_workflow_template_ids):
@@ -3774,6 +3765,13 @@ class WorkflowImporter(ResourceImporter):
                             missing_dependencies.append((ujt_source_id, ujt_type))
                         elif ujt_type == "workflow_job" and ujt_source_id in failed_workflow_template_ids:
                             missing_dependencies.append((ujt_source_id, ujt_type))
+                        elif ujt_type is None or ujt_type not in ["job", "workflow_job"]:
+                            # Unknown/missing type - check both sets to be safe
+                            # This handles data corruption or unexpected ujt_type values
+                            if ujt_source_id in failed_job_template_ids:
+                                missing_dependencies.append((ujt_source_id, "job (assumed)"))
+                            elif ujt_source_id in failed_workflow_template_ids:
+                                missing_dependencies.append((ujt_source_id, "workflow_job (assumed)"))
 
                 if missing_dependencies:
                     # Don't import this workflow - has failed dependencies
@@ -3790,7 +3788,16 @@ class WorkflowImporter(ResourceImporter):
                         f"Fix the failed templates first, then retry workflow import."
                     )
 
-                    # Now we can mark as failed (record exists from track_progress above)
+                    # Create progress record only when needed (before marking failed)
+                    # This avoids double-call with import_resource() for successful imports
+                    self.state.mark_in_progress(
+                        resource_type="workflow_job_templates",
+                        source_id=source_id,
+                        source_name=workflow.get("name"),
+                        phase="import",
+                    )
+
+                    # Now mark as failed (record exists from mark_in_progress above)
                     self.state.mark_failed(
                         resource_type="workflow_job_templates",
                         source_id=source_id,
