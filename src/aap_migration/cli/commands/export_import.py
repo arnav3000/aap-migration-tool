@@ -26,7 +26,7 @@ from aap_migration.cli.utils import (
 from aap_migration.migration.exporter import create_exporter
 from aap_migration.migration.importer import create_importer
 from aap_migration.migration.parallel_exporter import ParallelExportCoordinator
-from aap_migration.migration.state import MigrationState
+from aap_migration.migration.state import MigrationProgress, MigrationState
 from aap_migration.reporting.live_progress import MigrationProgressDisplay
 from aap_migration.resources import (
     MANUAL_MIGRATION_ENDPOINTS,
@@ -1755,13 +1755,51 @@ def import_cmd(
                             # TEMPORARY FIX: Skip batch precheck for automation resources to avoid hang
                             # TODO: Investigate why batch_precheck_resources blocks for these types
                             if rtype in ("job_templates", "workflow_job_templates", "schedules"):
-                                echo_warning(f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using direct import)")
+                                echo_warning(f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using database check)")
                                 logger.warning(
                                     "batch_precheck_skipped_temporary_fix",
                                     resource_type=rtype,
-                                    message="Skipping batch precheck due to known hang issue"
+                                    message="Skipping batch precheck due to known hang issue, using database check instead"
                                 )
-                                resources_to_import = transformed_resources
+
+                                # Database check to avoid re-importing already completed resources
+                                # This prevents "already exists" errors on re-runs while avoiding the API hang
+                                resources_to_import = []
+                                already_completed_count = 0
+
+                                with ctx.migration_state.get_session() as session:
+                                    for resource in transformed_resources:
+                                        source_id = resource.get("_source_id")
+
+                                        # Check if already successfully completed in this migration
+                                        existing = session.query(MigrationProgress).filter_by(
+                                            migration_id=ctx.migration_state.migration_id,
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            status="completed"
+                                        ).first()
+
+                                        if existing and existing.target_id:
+                                            # Already completed - skip to avoid re-import errors
+                                            logger.info(
+                                                "resource_already_completed_skip",
+                                                resource_type=rtype,
+                                                source_id=source_id,
+                                                target_id=existing.target_id,
+                                                source_name=resource.get("name")
+                                            )
+                                            already_completed_count += 1
+                                        else:
+                                            # Not completed or failed - add to import list
+                                            resources_to_import.append(resource)
+
+                                logger.info(
+                                    "database_check_result",
+                                    resource_type=rtype,
+                                    total=len(transformed_resources),
+                                    already_completed=already_completed_count,
+                                    to_import=len(resources_to_import)
+                                )
                             else:
                                 # Proactive batch pre-check: query target to find existing resources
                                 # This avoids "already exists" errors and shows accurate progress
