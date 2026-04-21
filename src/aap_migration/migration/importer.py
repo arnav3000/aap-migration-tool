@@ -1824,6 +1824,10 @@ class InventorySourceImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # SAFETY: Disable schedule by default to prevent automatic execution
+                    original_enabled = schedule_to_import.get("enabled", True)
+                    schedule_to_import["enabled"] = False
+
                     try:
                         result = await self.client.post(
                             f"inventory_sources/{target_inventory_source_id}/schedules/",
@@ -1835,6 +1839,8 @@ class InventorySourceImporter(ResourceImporter):
                             inventory_source_name=source_name,
                             schedule_name=schedule_name,
                             schedule_id=result.get("id"),
+                            original_enabled=original_enabled,
+                            imported_as_disabled=True,
                         )
                     except Exception as e:
                         logger.error(
@@ -3291,6 +3297,10 @@ class ProjectImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # SAFETY: Disable schedule by default to prevent automatic execution
+                    original_enabled = schedule_to_import.get("enabled", True)
+                    schedule_to_import["enabled"] = False
+
                     try:
                         result = await self.client.post(
                             f"projects/{target_project_id}/schedules/",
@@ -3302,6 +3312,8 @@ class ProjectImporter(ResourceImporter):
                             project_name=project_name,
                             schedule_name=schedule_name,
                             schedule_id=result.get("id"),
+                            original_enabled=original_enabled,
+                            imported_as_disabled=True,
                         )
                     except Exception as e:
                         logger.error(
@@ -3599,6 +3611,10 @@ class JobTemplateImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # SAFETY: Disable schedule by default to prevent automatic execution
+                    original_enabled = schedule_to_import.get("enabled", True)
+                    schedule_to_import["enabled"] = False
+
                     try:
                         result = await self.client.post(
                             f"job_templates/{template_id}/schedules/",
@@ -3610,6 +3626,8 @@ class JobTemplateImporter(ResourceImporter):
                             template_name=template_name,
                             schedule_name=schedule_name,
                             schedule_id=result.get("id"),
+                            original_enabled=original_enabled,
+                            imported_as_disabled=True,
                         )
                     except Exception as e:
                         logger.error(
@@ -4121,6 +4139,10 @@ class WorkflowImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # SAFETY: Disable schedule by default to prevent automatic execution
+                    original_enabled = schedule_to_import.get("enabled", True)
+                    schedule_to_import["enabled"] = False
+
                     try:
                         result = await self.client.post(
                             f"workflow_job_templates/{workflow_id}/schedules/",
@@ -4132,6 +4154,8 @@ class WorkflowImporter(ResourceImporter):
                             workflow_name=workflow_name,
                             schedule_name=schedule_name,
                             schedule_id=result.get("id"),
+                            original_enabled=original_enabled,
+                            imported_as_disabled=True,
                         )
                     except Exception as e:
                         logger.error(
