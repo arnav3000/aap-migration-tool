@@ -1246,25 +1246,101 @@ def import_cmd(
         identifier_field = getattr(importer, "IDENTIFIER_FIELD", "name")
 
         # Extract identifiers from resources
+        # Track duplicates to report them in migration report
         resource_identifiers = []
         resource_by_identifier = {}
+        duplicates_skipped = []  # Track duplicates for reporting
 
         for resource in resources:
             identifier = resource.get(identifier_field)
             source_id = resource.get("_source_id")
             if identifier and source_id:
-                resource_identifiers.append(identifier)
-
                 # Use composite key for organization-scoped resources to avoid duplicates
                 if resource_type in ORGANIZATION_SCOPED_RESOURCES:
                     org = resource.get("organization")
-                    # Use (name, org) as key for org-scoped resources
-                    dict_key = (identifier, org) if org is not None else identifier
+                    # For credentials, include credential_type in uniqueness check
+                    # AAP constraint: (name, organization, credential_type) must be unique
+                    if resource_type == "credentials":
+                        cred_type = resource.get("credential_type")
+                        dict_key = (identifier, org, cred_type)
+                    else:
+                        # Other org-scoped resources: (name, org) is unique
+                        dict_key = (identifier, org) if org is not None else identifier
                 else:
                     # Use name only for globally unique resources
                     dict_key = identifier
 
+                # Check if this key already exists (duplicate name in same org)
+                if dict_key in resource_by_identifier:
+                    # DUPLICATE DETECTED: Mark as skipped in database
+                    existing_source_id = resource_by_identifier[dict_key]["source_id"]
+
+                    # Determine which one to keep (keep the first one)
+                    # Mark the current (duplicate) as skipped
+                    org_str = f"organization {org}" if org else "no organization"
+
+                    # Build reason message - for credentials include credential_type
+                    if resource_type == "credentials":
+                        cred_type = resource.get("credential_type")
+                        reason = (
+                            f"Duplicate credential: name '{identifier}', {org_str}, credential_type {cred_type}. "
+                            f"Another credential with source_id={existing_source_id} has the same name, organization, and credential_type. "
+                            f"Source AAP has true duplicate credentials (same name, org, and type). "
+                            f"Only the first occurrence (source_id={existing_source_id}) will be imported. "
+                            f"Please delete or rename this duplicate credential in source AAP."
+                        )
+                    else:
+                        reason = (
+                            f"Duplicate {resource_type} name '{identifier}' in {org_str}. "
+                            f"Another {resource_type[:-1] if resource_type.endswith('s') else resource_type} with source_id={existing_source_id} has the same name. "
+                            f"Source AAP has multiple {resource_type} with identical names in the same organization. "
+                            f"Only the first occurrence (source_id={existing_source_id}) will be imported. "
+                            f"Please rename this {resource_type[:-1] if resource_type.endswith('s') else resource_type} in source AAP and re-export, or manually create it in target AAP."
+                        )
+
+                    # Create progress record first, then mark as skipped
+                    state.mark_in_progress(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        source_name=identifier,
+                        phase="import",
+                    )
+                    state.mark_skipped(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        reason=reason,
+                    )
+
+                    duplicates_skipped.append({
+                        "source_id": source_id,
+                        "name": identifier,
+                        "organization": org,
+                        "kept_source_id": existing_source_id,
+                    })
+
+                    logger.warning(
+                        "duplicate_resource_skipped",
+                        resource_type=resource_type,
+                        skipped_source_id=source_id,
+                        kept_source_id=existing_source_id,
+                        name=identifier,
+                        organization=org,
+                        reason="Duplicate name in same organization",
+                    )
+                    # Skip this duplicate, keep the first one
+                    continue
+
+                # Not a duplicate - add to tracking lists
+                resource_identifiers.append(identifier)
                 resource_by_identifier[dict_key] = {"source_id": source_id, "data": resource}
+
+        if duplicates_skipped:
+            logger.warning(
+                "duplicates_detected_and_skipped",
+                resource_type=resource_type,
+                total_duplicates=len(duplicates_skipped),
+                message=f"Skipped {len(duplicates_skipped)} duplicate {resource_type}. Check migration report for details.",
+            )
 
         if not resource_identifiers:
             logger.warning(
@@ -1329,14 +1405,19 @@ def import_cmd(
 
                 # Index by identifier for fast lookup
                 # For organization-scoped resources, use composite key (name, organization)
+                # For credentials, also include credential_type to match AAP's uniqueness constraint
                 for existing_resource in existing_batch:
                     if resource_type in ORGANIZATION_SCOPED_RESOURCES:
-                        # Use (name, organization) as composite key
                         name = existing_resource.get("name")
                         org = existing_resource.get("organization")
                         if name is not None:
-                            # Handle null organization (some credentials can have null org)
-                            key = (name, org) if org is not None else name
+                            # For credentials: (name, org, credential_type)
+                            if resource_type == "credentials":
+                                cred_type = existing_resource.get("credential_type")
+                                key = (name, org, cred_type)
+                            else:
+                                # Other resources: (name, org)
+                                key = (name, org) if org is not None else name
                             existing_by_identifier[key] = existing_resource
                     else:
                         # Use name only for globally unique resources
@@ -1363,10 +1444,10 @@ def import_cmd(
             resource_data = resource_info["data"]
 
             # Build lookup key based on resource scope
-            # For org-scoped resources, dict_key is already (name, org) tuple
+            # For org-scoped resources, dict_key is (name, org) or (name, org, cred_type) tuple
             # For globally unique resources, dict_key is just the name
             if resource_type in ORGANIZATION_SCOPED_RESOURCES:
-                # dict_key is already (name, org) or name
+                # dict_key is already (name, org) or (name, org, cred_type) or name
                 lookup_key = dict_key
                 # Extract identifier (name) for logging
                 identifier = dict_key[0] if isinstance(dict_key, tuple) else dict_key
