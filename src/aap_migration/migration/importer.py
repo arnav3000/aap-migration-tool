@@ -3779,13 +3779,23 @@ class WorkflowImporter(ResourceImporter):
                     # Don't import this workflow - has failed dependencies
                     failed_count += 1
 
+                    # Deduplicate and count missing dependencies
+                    # Key: (source_id, type, name), Value: count of references
+                    dep_counts = {}
+                    for source_id_val, dep_type, dep_name in missing_dependencies:
+                        key = (source_id_val, dep_type, dep_name)
+                        dep_counts[key] = dep_counts.get(key, 0) + 1
+
                     # Format missing dependencies for error message
                     missing_items = []
-                    for source_id_val, dep_type, dep_name in missing_dependencies:
-                        missing_items.append(f"'{dep_name}' ({dep_type} template, ID: {source_id_val})")
+                    for (source_id_val, dep_type, dep_name), count in dep_counts.items():
+                        if count > 1:
+                            missing_items.append(f"'{dep_name}' ({dep_type} template, ID: {source_id_val}) [referenced by {count} nodes]")
+                        else:
+                            missing_items.append(f"'{dep_name}' ({dep_type} template, ID: {source_id_val})")
 
                     error_msg = (
-                        f"Cannot import workflow: {len(missing_dependencies)} referenced template(s) "
+                        f"Cannot import workflow: {len(dep_counts)} unique template(s) "
                         f"failed to import in earlier phases. Missing: {', '.join(missing_items)}. "
                         f"Fix the failed templates first, then retry workflow import."
                     )
