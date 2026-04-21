@@ -23,6 +23,7 @@ from aap_migration.cli.utils import (
     format_count,
     step_progress,
 )
+from aap_migration.migration.database import get_session
 from aap_migration.migration.exporter import create_exporter
 from aap_migration.migration.importer import create_importer
 from aap_migration.migration.parallel_exporter import ParallelExportCoordinator
@@ -1767,7 +1768,7 @@ def import_cmd(
                                 resources_to_import = []
                                 already_completed_count = 0
 
-                                with ctx.migration_state.get_session() as session:
+                                with get_session(ctx.migration_state.database_url) as session:
                                     for resource in transformed_resources:
                                         source_id = resource.get("_source_id")
 
