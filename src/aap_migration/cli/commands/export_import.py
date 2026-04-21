@@ -1772,26 +1772,27 @@ def import_cmd(
                                     for resource in transformed_resources:
                                         source_id = resource.get("_source_id")
 
-                                        # Check if already successfully completed in this migration
+                                        # Check if already successfully completed or intentionally skipped
+                                        # (resource_type, source_id) is unique in the database
                                         existing = session.query(MigrationProgress).filter_by(
-                                            migration_id=ctx.migration_state.migration_id,
                                             resource_type=rtype,
-                                            source_id=source_id,
-                                            status="completed"
+                                            source_id=source_id
                                         ).first()
 
-                                        if existing and existing.target_id:
-                                            # Already completed - skip to avoid re-import errors
+                                        # Skip if already completed or skipped (duplicates)
+                                        if existing and existing.status in ("completed", "skipped"):
+                                            # Already processed - skip to avoid re-import errors
                                             logger.info(
-                                                "resource_already_completed_skip",
+                                                "resource_already_processed_skip",
                                                 resource_type=rtype,
                                                 source_id=source_id,
+                                                status=existing.status,
                                                 target_id=existing.target_id,
                                                 source_name=resource.get("name")
                                             )
                                             already_completed_count += 1
                                         else:
-                                            # Not completed or failed - add to import list
+                                            # Not completed/skipped (pending, failed, or no record) - add to import list
                                             resources_to_import.append(resource)
 
                                 logger.info(
