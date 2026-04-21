@@ -3757,21 +3757,23 @@ class WorkflowImporter(ResourceImporter):
                 for node in nodes:
                     ujt_source_id = node.get("unified_job_template")
                     if ujt_source_id:
-                        # Determine the type of unified_job_template (job vs workflow)
-                        ujt_type = node.get("summary_fields", {}).get("unified_job_template", {}).get("unified_job_type")
+                        # Determine the type and name of unified_job_template
+                        ujt_summary = node.get("summary_fields", {}).get("unified_job_template", {})
+                        ujt_type = ujt_summary.get("unified_job_type")
+                        ujt_name = ujt_summary.get("name") or "Unknown"
 
                         # Check if this node references a FAILED template
                         if ujt_type == "job" and ujt_source_id in failed_job_template_ids:
-                            missing_dependencies.append((ujt_source_id, ujt_type))
+                            missing_dependencies.append((ujt_source_id, ujt_type, ujt_name))
                         elif ujt_type == "workflow_job" and ujt_source_id in failed_workflow_template_ids:
-                            missing_dependencies.append((ujt_source_id, ujt_type))
+                            missing_dependencies.append((ujt_source_id, ujt_type, ujt_name))
                         elif ujt_type is None or ujt_type not in ["job", "workflow_job"]:
                             # Unknown/missing type - check both sets to be safe
                             # This handles data corruption or unexpected ujt_type values
                             if ujt_source_id in failed_job_template_ids:
-                                missing_dependencies.append((ujt_source_id, "job (assumed)"))
+                                missing_dependencies.append((ujt_source_id, "job (assumed)", ujt_name))
                             elif ujt_source_id in failed_workflow_template_ids:
-                                missing_dependencies.append((ujt_source_id, "workflow_job (assumed)"))
+                                missing_dependencies.append((ujt_source_id, "workflow_job (assumed)", ujt_name))
 
                 if missing_dependencies:
                     # Don't import this workflow - has failed dependencies
@@ -3779,8 +3781,8 @@ class WorkflowImporter(ResourceImporter):
 
                     # Format missing dependencies for error message
                     missing_items = []
-                    for source_id_val, dep_type in missing_dependencies:
-                        missing_items.append(f"{dep_type} template ID {source_id_val}")
+                    for source_id_val, dep_type, dep_name in missing_dependencies:
+                        missing_items.append(f"'{dep_name}' ({dep_type} template, ID: {source_id_val})")
 
                     error_msg = (
                         f"Cannot import workflow: {len(missing_dependencies)} referenced template(s) "
