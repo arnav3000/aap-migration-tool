@@ -1939,6 +1939,22 @@ class ScheduleImporter(ResourceImporter):
                     message="Missing _ujt_resource_type for schedule",
                 )
 
+        # SAFETY: Disable all migrated schedules by default
+        # Prevents automatic execution in target AAP until manually verified and enabled
+        # Schedules could trigger jobs, workflows, or project syncs immediately after import
+        original_enabled = resolved.get("enabled", True)
+        resolved["enabled"] = False
+
+        if original_enabled:
+            logger.info(
+                "schedule_disabled_for_safety",
+                source_id=data.get("_source_id"),
+                source_name=data.get("name"),
+                original_state="enabled",
+                new_state="disabled",
+                message="Schedule disabled on import for safety - enable manually in target AAP after verification",
+            )
+
         return resolved
 
     async def import_schedules(
