@@ -676,8 +676,10 @@ class MigrationState:
                                 f"(type={resource_type}, source_id={source_id})"
                             )
                     else:
-                        # Update progress
-                        progress.status = "completed"
+                        # Update progress - don't overwrite "skipped" status
+                        # If a resource was already marked as skipped (duplicate), preserve that status
+                        if progress.status != "skipped":
+                            progress.status = "completed"
                         progress.target_id = target_id
                         progress.completed_at = datetime.now(UTC)
 
