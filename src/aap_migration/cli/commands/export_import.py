@@ -1477,10 +1477,12 @@ def import_cmd(
                     source_name=identifier,
                     target_name=existing.get(identifier_field),
                 )
-                # Mark as completed to prevent orphaned ID mapping
-                state.mark_completed(
+                # FIX: Mark as skipped (not completed) - resource already exists in target
+                # This matches console "Skipped: X" output and prevents report mismatch
+                state.mark_skipped(
                     resource_type=resource_type,
                     source_id=source_id,
+                    reason=f"Pre-existing in target (found in batch precheck)",
                     target_id=existing["id"],
                     target_name=existing.get(identifier_field),
                     source_name=identifier,
@@ -1766,6 +1768,9 @@ def import_cmd(
                                 # Database check to avoid re-importing already completed resources
                                 # This prevents "already exists" errors on re-runs while avoiding the API hang
                                 # CRITICAL FIX: Also verify target_id still exists in target AAP
+
+                                # Step 1: Query database for completed/skipped resources (sync)
+                                resources_needing_validation = []
                                 resources_to_import = []
                                 already_completed_count = 0
 
@@ -1774,67 +1779,78 @@ def import_cmd(
                                         source_id = resource.get("_source_id")
 
                                         # Check if already successfully completed or intentionally skipped
-                                        # (resource_type, source_id) is unique in the database
                                         existing = session.query(MigrationProgress).filter_by(
                                             resource_type=rtype,
                                             source_id=source_id
                                         ).first()
 
-                                        # Skip if already completed or skipped (duplicates)
-                                        if existing and existing.status in ("completed", "skipped"):
-                                            # Verify target still exists in AAP before trusting database
-                                            should_skip = False
-                                            if existing.target_id:
-                                                try:
-                                                    # Quick existence check (will raise if not found)
-                                                    endpoint = get_endpoint(rtype)
-                                                    await ctx.target_client.get(f"{endpoint}{existing.target_id}/")
-                                                    should_skip = True  # Target exists, safe to skip
-                                                    logger.info(
-                                                        "resource_already_processed_skip",
-                                                        resource_type=rtype,
-                                                        source_id=source_id,
-                                                        status=existing.status,
-                                                        target_id=existing.target_id,
-                                                        source_name=resource.get("name"),
-                                                        verified="target_exists"
-                                                    )
-                                                except Exception as e:
-                                                    # Target deleted from AAP - need to re-import
-                                                    logger.warning(
-                                                        "target_deleted_re_importing",
-                                                        resource_type=rtype,
-                                                        source_id=source_id,
-                                                        target_id=existing.target_id,
-                                                        error=str(e),
-                                                        action="clearing_status_and_reimporting"
-                                                    )
-                                                    # Mark as pending and clear target_id to allow re-import
-                                                    existing.status = "pending"
-                                                    existing.target_id = None
-                                                    session.commit()
-                                                    should_skip = False
-                                            else:
-                                                # No target_id recorded, but marked completed/skipped
-                                                # This shouldn't happen, but count as already processed
-                                                should_skip = True
-                                                logger.info(
-                                                    "resource_already_processed_skip",
-                                                    resource_type=rtype,
-                                                    source_id=source_id,
-                                                    status=existing.status,
-                                                    target_id=None,
-                                                    source_name=resource.get("name"),
-                                                    verified="no_target_id"
-                                                )
-
-                                            if should_skip:
-                                                already_completed_count += 1
-                                            else:
-                                                resources_to_import.append(resource)
+                                        # If completed/skipped, need to validate target still exists
+                                        if existing and existing.status in ("completed", "skipped") and existing.target_id:
+                                            resources_needing_validation.append({
+                                                "resource": resource,
+                                                "source_id": source_id,
+                                                "target_id": existing.target_id,
+                                                "status": existing.status,
+                                            })
+                                        elif existing and existing.status in ("completed", "skipped"):
+                                            # No target_id but marked completed/skipped (shouldn't happen)
+                                            # Skip anyway to be safe
+                                            already_completed_count += 1
+                                            logger.info(
+                                                "resource_already_processed_skip",
+                                                resource_type=rtype,
+                                                source_id=source_id,
+                                                status=existing.status,
+                                                target_id=None,
+                                                verified="no_target_id"
+                                            )
                                         else:
-                                            # Not completed/skipped (pending, failed, or no record) - add to import list
+                                            # Not completed/skipped (pending, failed, or no record)
                                             resources_to_import.append(resource)
+
+                                # Step 2: Validate target resources exist (async, outside session)
+                                endpoint = get_endpoint(rtype)
+                                for item in resources_needing_validation:
+                                    target_id = item["target_id"]
+                                    source_id = item["source_id"]
+                                    resource = item["resource"]
+
+                                    try:
+                                        # Quick existence check (will raise if not found)
+                                        await ctx.target_client.get(f"{endpoint}{target_id}/")
+                                        # Target exists - safe to skip
+                                        already_completed_count += 1
+                                        logger.info(
+                                            "resource_already_processed_skip",
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            target_id=target_id,
+                                            status=item["status"],
+                                            verified="target_exists"
+                                        )
+                                    except Exception as e:
+                                        # Target deleted from AAP - need to re-import
+                                        logger.warning(
+                                            "target_deleted_re_importing",
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            target_id=target_id,
+                                            error=str(e),
+                                            action="clearing_status_and_reimporting"
+                                        )
+                                        # Add to import list
+                                        resources_to_import.append(resource)
+
+                                        # Clear database status (new session)
+                                        with get_session(ctx.migration_state.database_url) as session:
+                                            existing = session.query(MigrationProgress).filter_by(
+                                                resource_type=rtype,
+                                                source_id=source_id
+                                            ).first()
+                                            if existing:
+                                                existing.status = "pending"
+                                                existing.target_id = None
+                                                session.commit()
 
                                 logger.info(
                                     "database_check_result",
