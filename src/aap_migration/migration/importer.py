@@ -3516,6 +3516,7 @@ class JobTemplateImporter(ResourceImporter):
         failed_count = 0
         skipped_count = 0
         templates_with_schedules = []  # Collect templates that have schedules to create
+        templates_with_notifications = []  # Collect templates that have notification associations
 
         for template in templates:
             source_id = template.pop("_source_id", template.get("id"))
@@ -3525,6 +3526,9 @@ class JobTemplateImporter(ResourceImporter):
 
             # Extract schedules for separate import
             schedules = template.pop("schedules", None)
+
+            # Extract notification associations for separate import
+            notifications = template.pop("notifications", None)
 
             # Clean up EE markers
             if template.get("_needs_execution_environment"):
@@ -3562,6 +3566,14 @@ class JobTemplateImporter(ResourceImporter):
                             "template_id": target_id,
                             "template_name": result.get("name", "unknown"),
                             "schedules": schedules,
+                        })
+
+                    # Store notification associations for later import
+                    if notifications:
+                        templates_with_notifications.append({
+                            "template_id": target_id,
+                            "template_name": result.get("name", "unknown"),
+                            "notifications": notifications,
                         })
 
                     results.append(result)
@@ -3638,6 +3650,55 @@ class JobTemplateImporter(ResourceImporter):
                             schedule_name=schedule_name,
                             error=str(e),
                         )
+
+        # Associate notification templates
+        if templates_with_notifications:
+            logger.info(
+                "associating_job_template_notifications",
+                total_templates_with_notifications=len(templates_with_notifications),
+            )
+
+            for notif_data in templates_with_notifications:
+                template_id = notif_data["template_id"]
+                template_name = notif_data["template_name"]
+                notifications = notif_data["notifications"]
+
+                for notif_type, source_notif_ids in notifications.items():
+                    for source_notif_id in source_notif_ids:
+                        # Map notification template ID from source to target
+                        target_notif_id = self.state.get_target_id("notification_templates", source_notif_id)
+
+                        if not target_notif_id:
+                            logger.warning(
+                                "notification_template_not_migrated",
+                                template_id=template_id,
+                                template_name=template_name,
+                                source_notif_id=source_notif_id,
+                                notif_type=notif_type,
+                            )
+                            continue
+
+                        try:
+                            await self.client.post(
+                                f"job_templates/{template_id}/{notif_type}/",
+                                json_data={"id": target_notif_id},
+                            )
+                            logger.info(
+                                "job_template_notification_associated",
+                                template_id=template_id,
+                                template_name=template_name,
+                                notification_id=target_notif_id,
+                                notif_type=notif_type,
+                            )
+                        except Exception as e:
+                            logger.error(
+                                "job_template_notification_association_failed",
+                                template_id=template_id,
+                                template_name=template_name,
+                                notification_id=target_notif_id,
+                                notif_type=notif_type,
+                                error=str(e),
+                            )
 
         return results
 
