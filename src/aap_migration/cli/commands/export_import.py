@@ -1745,6 +1745,8 @@ def import_cmd(
                             "job_templates": "import_job_templates",
                             "workflow_job_templates": "import_workflow_job_templates",
                             "schedules": "import_schedules",
+                            # Notifications
+                            "notification_templates": "import_notification_templates",
                             # OAuth and Configuration
                             "applications": "import_applications",
                             "settings": "import_settings",
