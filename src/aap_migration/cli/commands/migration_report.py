@@ -308,9 +308,16 @@ def _analyze_resource_type(
             )
 
             for record in progress_records:
-                if record.status == "completed":
+                # FIX: Count "imported" only if status="completed" AND phase="import"
+                # This prevents counting resources from previous runs or transform phase
+                # Database structure:
+                #   - status="completed" + phase="import" = successfully imported to target AAP
+                #   - status="skipped" + phase="import" = skipped during import (duplicate)
+                #   - status="failed" + phase="import" = failed during import
+                if record.status == "completed" and record.phase == "import":
                     stats["completed_count"] += 1
-                elif record.status == "failed":
+
+                if record.status == "failed":
                     stats["failed_count"] += 1
                     failure_info = {
                         "source_id": record.source_id,

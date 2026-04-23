@@ -215,12 +215,13 @@ class ResourceImporter:
                             target_id=existing["id"],
                             name=resource_name,
                             organization_id=organization_id,
-                            action="updating_mapping_instead_of_creating_duplicate",
+                            action="marking_as_skipped_duplicate",
                         )
-                        # Update mapping to prevent future attempts
-                        self.state.mark_completed(
+                        # Mark as skipped with target_id (duplicate detection)
+                        self.state.mark_skipped(
                             resource_type=resource_type,
                             source_id=source_id,
+                            reason=f"Duplicate exists in target (name: {resource_name}, target_id: {existing['id']})",
                             target_id=existing["id"],
                             target_name=existing.get("name"),
                             source_name=resource_name,
@@ -3960,7 +3961,8 @@ class WorkflowImporter(ResourceImporter):
 
                 nodes_imported = len(imported_nodes)
                 nodes_expected = len(all_pending_nodes)
-                nodes_failed = node_importer.stats["error_count"]
+                # FIX: Use import_errors list instead of stats counter (which was never incremented)
+                nodes_failed = len(node_importer.import_errors)
 
                 logger.info(
                     "workflow_nodes_imported",

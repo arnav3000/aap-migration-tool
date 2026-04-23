@@ -1765,6 +1765,7 @@ def import_cmd(
 
                                 # Database check to avoid re-importing already completed resources
                                 # This prevents "already exists" errors on re-runs while avoiding the API hang
+                                # CRITICAL FIX: Also verify target_id still exists in target AAP
                                 resources_to_import = []
                                 already_completed_count = 0
 
@@ -1781,16 +1782,56 @@ def import_cmd(
 
                                         # Skip if already completed or skipped (duplicates)
                                         if existing and existing.status in ("completed", "skipped"):
-                                            # Already processed - skip to avoid re-import errors
-                                            logger.info(
-                                                "resource_already_processed_skip",
-                                                resource_type=rtype,
-                                                source_id=source_id,
-                                                status=existing.status,
-                                                target_id=existing.target_id,
-                                                source_name=resource.get("name")
-                                            )
-                                            already_completed_count += 1
+                                            # Verify target still exists in AAP before trusting database
+                                            should_skip = False
+                                            if existing.target_id:
+                                                try:
+                                                    # Quick existence check (will raise if not found)
+                                                    endpoint = get_endpoint(rtype)
+                                                    await ctx.target_client.get(f"{endpoint}{existing.target_id}/")
+                                                    should_skip = True  # Target exists, safe to skip
+                                                    logger.info(
+                                                        "resource_already_processed_skip",
+                                                        resource_type=rtype,
+                                                        source_id=source_id,
+                                                        status=existing.status,
+                                                        target_id=existing.target_id,
+                                                        source_name=resource.get("name"),
+                                                        verified="target_exists"
+                                                    )
+                                                except Exception as e:
+                                                    # Target deleted from AAP - need to re-import
+                                                    logger.warning(
+                                                        "target_deleted_re_importing",
+                                                        resource_type=rtype,
+                                                        source_id=source_id,
+                                                        target_id=existing.target_id,
+                                                        error=str(e),
+                                                        action="clearing_status_and_reimporting"
+                                                    )
+                                                    # Mark as pending and clear target_id to allow re-import
+                                                    existing.status = "pending"
+                                                    existing.target_id = None
+                                                    session.commit()
+                                                    should_skip = False
+                                            else:
+                                                # No target_id recorded, but marked completed/skipped
+                                                # This shouldn't happen, but count as already processed
+                                                should_skip = True
+                                                logger.info(
+                                                    "resource_already_processed_skip",
+                                                    resource_type=rtype,
+                                                    source_id=source_id,
+                                                    status=existing.status,
+                                                    target_id=None,
+                                                    source_name=resource.get("name"),
+                                                    verified="no_target_id"
+                                                )
+
+                                            if should_skip:
+                                                already_completed_count += 1
+                                            else:
+                                                resources_to_import.append(resource)
                                         else:
                                             # Not completed/skipped (pending, failed, or no record) - add to import list
                                             resources_to_import.append(resource)

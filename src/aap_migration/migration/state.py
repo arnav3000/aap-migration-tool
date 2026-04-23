@@ -680,6 +680,7 @@ class MigrationState:
                         # If a resource was already marked as skipped (duplicate), preserve that status
                         if progress.status != "skipped":
                             progress.status = "completed"
+                        progress.phase = "import"  # Mark phase as import when target_id is set
                         progress.target_id = target_id
                         progress.completed_at = datetime.now(UTC)
 
@@ -794,6 +795,9 @@ class MigrationState:
         resource_type: str,
         source_id: int,
         reason: str,
+        target_id: int | None = None,
+        target_name: str | None = None,
+        source_name: str | None = None,
     ) -> None:
         """
         Mark a resource as skipped (will not be migrated).
@@ -802,6 +806,9 @@ class MigrationState:
             resource_type: Type of resource
             source_id: Source system resource ID
             reason: Reason for skipping
+            target_id: Optional target ID if resource exists in target (duplicate detection)
+            target_name: Optional name in target system
+            source_name: Optional name in source system
 
         Raises:
             StateError: If operation fails
@@ -823,8 +830,17 @@ class MigrationState:
 
                     # Update progress
                     progress.status = "skipped"
+                    progress.phase = "import"  # Skipped during import phase
                     progress.error_message = f"Skipped: {reason}"
                     progress.completed_at = datetime.now(UTC)
+
+                    # Record target_id if duplicate was found (optional)
+                    if target_id is not None:
+                        progress.target_id = target_id
+                    if target_name is not None:
+                        progress.target_name = target_name
+                    if source_name is not None:
+                        progress.source_name = source_name
 
                     session.commit()
 
@@ -833,6 +849,7 @@ class MigrationState:
                         resource_type=resource_type,
                         source_id=source_id,
                         reason=reason,
+                        target_id=target_id,
                     )
 
             except Exception as e:
