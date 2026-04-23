@@ -3761,6 +3761,7 @@ class WorkflowImporter(ResourceImporter):
     DEPENDENCIES = {
         "organization": "organizations",
         "inventory": "inventories",
+        "webhook_credential": "credentials",
     }
 
     async def import_workflows(
