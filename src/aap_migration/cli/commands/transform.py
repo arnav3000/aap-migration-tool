@@ -638,6 +638,26 @@ def transform(
                                     )
                                     skipped_from_transformer += 1
 
+                                    # Track transform skip in database for reporting
+                                    source_name = resource.get("name", "Unknown")
+                                    reason = f"Missing dependency: {e.missing_dependency}"
+
+                                    try:
+                                        ctx.migration_state.mark_transform_skipped(
+                                            resource_type=e.resource_type,
+                                            source_id=e.source_id,
+                                            source_name=source_name,
+                                            reason=reason,
+                                        )
+                                    except Exception as db_error:
+                                        # Log but don't fail transform if database tracking fails
+                                        logger.warning(
+                                            "failed_to_track_transform_skip",
+                                            resource_type=e.resource_type,
+                                            source_id=e.source_id,
+                                            error=str(db_error),
+                                        )
+
                                 except Exception as e:
                                     logger.warning(
                                         "transformation_failed",

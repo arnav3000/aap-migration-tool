@@ -226,6 +226,11 @@ def _analyze_resource_type(
         "failed_resources": [],
         "skipped_resources": [],
         "missing_resources": [],
+        # Phase-specific tracking
+        "export_failed": [],
+        "transform_skipped": [],
+        "import_failed": [],
+        "import_skipped": [],
     }
 
     # Count exported resources (handle both flat and directory structure)
@@ -307,23 +312,39 @@ def _analyze_resource_type(
                     stats["completed_count"] += 1
                 elif record.status == "failed":
                     stats["failed_count"] += 1
-                    stats["failed_resources"].append({
+                    failure_info = {
                         "source_id": record.source_id,
                         "source_name": record.source_name,
                         "error": record.error_message,
                         "phase": record.phase,
-                    })
+                    }
+                    stats["failed_resources"].append(failure_info)
+
+                    # Separate by phase for detailed reporting
+                    if record.phase == "export":
+                        stats["export_failed"].append(failure_info)
+                    elif record.phase == "import":
+                        stats["import_failed"].append(failure_info)
+
                 elif record.status == "in_progress":
                     stats["in_progress_count"] += 1
                 elif record.status == "pending":
                     stats["pending_count"] += 1
                 elif record.status == "skipped":
                     stats["skipped_count"] += 1
-                    stats["skipped_resources"].append({
+                    skip_info = {
                         "source_id": record.source_id,
                         "source_name": record.source_name,
                         "reason": record.error_message,
-                    })
+                        "phase": record.phase,
+                    }
+                    stats["skipped_resources"].append(skip_info)
+
+                    # Separate by phase for detailed reporting
+                    if record.phase == "transform":
+                        stats["transform_skipped"].append(skip_info)
+                    elif record.phase == "import":
+                        stats["import_skipped"].append(skip_info)
 
     except Exception as e:
         logger.warning(f"Failed to query database for {resource_type}: {e}")
@@ -452,6 +473,78 @@ def _generate_markdown_report(report_data: list[dict], migration_id: str) -> str
         lines.append("---")
         lines.append("")
 
+    # Phase-specific sections (Export, Transform issues)
+    export_issues_found = any(len(s.get("export_failed", [])) > 0 for s in report_data)
+    transform_issues_found = any(len(s.get("transform_skipped", [])) > 0 for s in report_data)
+
+    if export_issues_found:
+        lines.append("## Export Phase Issues")
+        lines.append("")
+        lines.append("The following resources failed to export from source AAP:")
+        lines.append("")
+
+        for stats in report_data:
+            if len(stats.get("export_failed", [])) > 0:
+                lines.append(f"### {stats['resource_type']} ({len(stats['export_failed'])} failed)")
+                lines.append("")
+                lines.append("| Source ID | Name | Error |")
+                lines.append("|-----------|------|-------|")
+
+                for failed in stats["export_failed"]:
+                    source_id = failed["source_id"]
+                    name = failed["source_name"] or "N/A"
+                    error = failed["error"] or "Unknown error"
+                    error = error.replace("|", "\\|")
+                    lines.append(f"| {source_id} | {name} | {error} |")
+
+                lines.append("")
+
+        lines.append("**Impact:**")
+        lines.append("- These resources are missing from exports/ directory")
+        lines.append("- Cannot be transformed or imported")
+        lines.append("")
+        lines.append("**Recommended Actions:**")
+        lines.append("- Verify source AAP connectivity and permissions")
+        lines.append("- Check source AAP logs for API errors")
+        lines.append("- Re-run export for affected resource types")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    if transform_issues_found:
+        lines.append("## Transform Phase Issues")
+        lines.append("")
+        lines.append("The following resources were skipped during transformation due to missing dependencies:")
+        lines.append("")
+
+        for stats in report_data:
+            if len(stats.get("transform_skipped", [])) > 0:
+                lines.append(f"### {stats['resource_type']} ({len(stats['transform_skipped'])} skipped)")
+                lines.append("")
+                lines.append("| Source ID | Name | Reason |")
+                lines.append("|-----------|------|--------|")
+
+                for skipped in stats["transform_skipped"]:
+                    source_id = skipped["source_id"]
+                    name = skipped["source_name"] or "N/A"
+                    reason = skipped.get("reason", "No reason provided")
+                    reason = reason.replace("|", "\\|")
+                    lines.append(f"| {source_id} | {name} | {reason} |")
+
+                lines.append("")
+
+        lines.append("**Impact:**")
+        lines.append("- These resources are in exports/ but not in xformed/ directory")
+        lines.append("- Cannot be imported because dependencies are missing")
+        lines.append("")
+        lines.append("**Recommended Actions:**")
+        lines.append("- Export and transform the missing dependencies first")
+        lines.append("- Example: if a schedule references missing job_template:42, export job_templates")
+        lines.append("- Re-run transform after dependencies are available")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
     # Detailed sections for failures, skipped, and discrepancies
     for stats in report_data:
         if stats["failed_count"] > 0 or stats["skipped_count"] > 0 or stats["discrepancy"] != 0:
@@ -501,9 +594,31 @@ def _generate_markdown_report(report_data: list[dict], migration_id: str) -> str
             if stats["discrepancy"] > 0:
                 lines.append(f"### Missing Resources (Discrepancy: {stats['discrepancy']})")
                 lines.append("")
-                lines.append(f"**Transformed:** {stats['transformed_count']}  ")
-                lines.append(f"**Imported:** {stats['completed_count']}  ")
-                lines.append(f"**Missing:** {stats['discrepancy']}")
+                lines.append("**Pipeline Summary:**")
+                lines.append(f"- **Exported:** {stats['exported_count']}")
+                lines.append(f"- **Transformed:** {stats['transformed_count']}")
+                lines.append(f"- **Imported:** {stats['completed_count']}")
+                lines.append(f"- **Discrepancy:** {stats['discrepancy']}")
+                lines.append("")
+
+                # Calculate gaps at each phase
+                export_transform_gap = stats['exported_count'] - stats['transformed_count']
+                transform_import_gap = stats['transformed_count'] - stats['completed_count']
+
+                lines.append("**Gap Analysis:**")
+                if export_transform_gap > 0:
+                    lines.append(f"- Export → Transform: **{export_transform_gap}** resources lost (check Transform Phase Issues above)")
+                elif export_transform_gap < 0:
+                    lines.append(f"- Export → Transform: {abs(export_transform_gap)} additional resources (possibly seeded)")
+                else:
+                    lines.append(f"- Export → Transform: ✅ No gap")
+
+                if transform_import_gap > 0:
+                    lines.append(f"- Transform → Import: **{transform_import_gap}** resources lost (check Failed/Skipped sections below)")
+                elif transform_import_gap < 0:
+                    lines.append(f"- Transform → Import: {abs(transform_import_gap)} additional resources (data inconsistency)")
+                else:
+                    lines.append(f"- Transform → Import: ✅ No gap")
                 lines.append("")
 
                 # Show list of specific missing resources
@@ -523,11 +638,11 @@ def _generate_markdown_report(report_data: list[dict], migration_id: str) -> str
                     lines.append("**These resources were transformed but not found in the database as completed.**")
                     lines.append("")
 
-                lines.append("**Possible causes:**")
-                lines.append("- Resources failed validation during import (check Failed Resources section)")
-                lines.append("- Resources were skipped due to conflicts (already existed in target)")
-                lines.append("- Resources failed dependency resolution")
-                lines.append("- Check `logs/migration.log` for detailed error messages")
+                lines.append("**Recommended Actions:**")
+                lines.append("1. Check Export Phase Issues section for export failures")
+                lines.append("2. Check Transform Phase Issues section for transform skips")
+                lines.append("3. Check Failed/Skipped sections for import issues")
+                lines.append("4. Review `logs/migration.log` for detailed error messages")
                 lines.append("")
 
             lines.append("---")

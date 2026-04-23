@@ -453,6 +453,30 @@ class ResourceExporter:
                 resource=resource,
             )
             self.stats["skipped_count"] += 1
+
+            # Track export failure in database for reporting
+            # For resources without ID, use hash of name as pseudo-ID for tracking
+            # This is rare (malformed API responses) but allows tracking in reports
+            source_id = resource.get("id") or -1
+            source_name = resource.get("name", "Unknown")
+
+            # Only track if we have a meaningful identifier
+            if source_id != -1:
+                try:
+                    self.state.mark_export_failed(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        source_name=source_name,
+                        error_message="Resource missing required 'id' field",
+                    )
+                except Exception as e:
+                    # Log but don't fail export if database tracking fails
+                    logger.warning(
+                        "failed_to_track_export_failure",
+                        resource_type=resource_type,
+                        error=str(e),
+                    )
+
             return None
 
         # CRITICAL: Do NOT skip resources based on ID mappings in database
