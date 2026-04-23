@@ -823,24 +823,44 @@ class MigrationState:
                     )
 
                     if progress is None:
-                        raise StateError(
-                            f"Cannot mark as skipped: Resource not found "
-                            f"(type={resource_type}, source_id={source_id})"
-                        )
+                        # FIX: Create record on-the-fly (like mark_completed does)
+                        # This handles batch_precheck calling mark_skipped before mark_in_progress
+                        if source_name:
+                            progress = MigrationProgress(
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=source_name,
+                                status="skipped",
+                                phase="import",
+                                error_message=f"Skipped: {reason}",
+                                started_at=datetime.now(UTC),
+                                completed_at=datetime.now(UTC),
+                            )
+                            # Set target_id if provided (duplicate detection case)
+                            if target_id is not None:
+                                progress.target_id = target_id
+                            if target_name is not None:
+                                progress.target_name = target_name
+                            session.add(progress)
+                        else:
+                            raise StateError(
+                                f"Cannot mark as skipped: Resource not found and source_name not provided "
+                                f"(type={resource_type}, source_id={source_id})"
+                            )
+                    else:
+                        # Update existing record
+                        progress.status = "skipped"
+                        progress.phase = "import"  # Skipped during import phase
+                        progress.error_message = f"Skipped: {reason}"
+                        progress.completed_at = datetime.now(UTC)
 
-                    # Update progress
-                    progress.status = "skipped"
-                    progress.phase = "import"  # Skipped during import phase
-                    progress.error_message = f"Skipped: {reason}"
-                    progress.completed_at = datetime.now(UTC)
-
-                    # Record target_id if duplicate was found (optional)
-                    if target_id is not None:
-                        progress.target_id = target_id
-                    if target_name is not None:
-                        progress.target_name = target_name
-                    if source_name is not None:
-                        progress.source_name = source_name
+                        # Record target_id if duplicate was found (optional)
+                        if target_id is not None:
+                            progress.target_id = target_id
+                        if target_name is not None:
+                            progress.target_name = target_name
+                        if source_name is not None:
+                            progress.source_name = source_name
 
                     session.commit()
 
