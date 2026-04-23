@@ -320,12 +320,14 @@ class ResourceImporter:
                     )
                     return None
             else:
-                # Not an "already exists" error - mark failed then re-raise
+                # Not an "already exists" error - enrich error message with source context
+                enriched_error = self._enrich_api_error_message(e, resource_type, data)
+
                 self.stats["error_count"] += 1
                 self.state.mark_failed(
                     resource_type=resource_type,
                     source_id=source_id,
-                    error_message=f"API error ({type(e).__name__}): {str(e)}",
+                    error_message=enriched_error,
                 )
                 raise
 
@@ -356,6 +358,110 @@ class ResourceImporter:
             )
 
             return None
+
+    def _enrich_api_error_message(
+        self, error: APIError, resource_type: str, data: dict[str, Any]
+    ) -> str:
+        """Enrich API error message with source dependency context.
+
+        When an API error occurs due to missing/invalid dependencies, this method
+        enhances the error message to show source resource names and IDs instead
+        of just target IDs, making it easier for users to understand what failed.
+
+        Args:
+            error: The APIError exception
+            resource_type: Type of resource being imported
+            data: Resource data with source information
+
+        Returns:
+            Enhanced error message with source context
+        """
+        base_error = f"API error ({type(error).__name__}): {str(error)}"
+
+        # Only enrich if we have a response dict with field-level errors
+        if not error.response or not isinstance(error.response, dict):
+            return base_error
+
+        # Get dependencies for this resource type
+        dependencies = self._get_dependencies(resource_type)
+        if not dependencies:
+            return base_error
+
+        # Parse error response to find dependency-related failures
+        enriched_parts = []
+        for field, field_errors in error.response.items():
+            # Check if this field is a dependency
+            if field not in dependencies:
+                continue
+
+            # Convert field_errors to list if it's not already
+            error_list = field_errors if isinstance(field_errors, list) else [field_errors]
+
+            # Look for "Invalid pk" or "does not exist" errors (dependency failures)
+            for field_error in error_list:
+                error_str = str(field_error)
+                if "invalid pk" in error_str.lower() or "does not exist" in error_str.lower():
+                    # Extract source dependency info from original data
+                    dep_source_id = data.get(field)
+                    dep_resource_type = dependencies[field]
+
+                    if dep_source_id:
+                        # Try to get the source dependency name from database
+                        dep_name = self._get_dependency_name(dep_resource_type, dep_source_id)
+
+                        if dep_name:
+                            enriched_parts.append(
+                                f"{field}: {dep_resource_type.rstrip('s').replace('_', ' ').title()} "
+                                f"'{dep_name}' (source ID: {dep_source_id}) does not exist in target AAP"
+                            )
+                        else:
+                            enriched_parts.append(
+                                f"{field}: {dep_resource_type.rstrip('s').replace('_', ' ').title()} "
+                                f"with source ID {dep_source_id} does not exist in target AAP"
+                            )
+                        continue
+
+            # If we didn't enrich this field, include the original error
+            if not any(field in part for part in enriched_parts):
+                enriched_parts.append(f"{field}: {field_errors}")
+
+        # If we enriched any dependency errors, use the enriched message
+        if enriched_parts:
+            return f"API error: {'; '.join(enriched_parts)}"
+
+        return base_error
+
+    def _get_dependency_name(self, resource_type: str, source_id: int) -> str | None:
+        """Get the source name of a dependency resource from the database.
+
+        Args:
+            resource_type: Type of dependency resource
+            source_id: Source ID of the dependency
+
+        Returns:
+            Source resource name or None if not found
+        """
+        try:
+            session = get_session(self.state.db_path)
+            progress = (
+                session.query(MigrationProgress)
+                .filter_by(resource_type=resource_type, source_id=source_id)
+                .first()
+            )
+            session.close()
+
+            if progress and progress.source_name:
+                return progress.source_name
+
+        except Exception as e:
+            logger.debug(
+                "dependency_name_lookup_failed",
+                resource_type=resource_type,
+                source_id=source_id,
+                error=str(e),
+            )
+
+        return None
 
     async def _resolve_dependencies(
         self, resource_type: str, data: dict[str, Any]
