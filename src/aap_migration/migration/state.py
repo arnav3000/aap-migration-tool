@@ -849,7 +849,10 @@ class MigrationState:
                             )
                     else:
                         # Update existing record
-                        progress.status = "skipped"
+                        # IMPORTANT: Preserve "completed" status (don't overwrite to "skipped")
+                        # This ensures reports show what was actually imported, not just last run status
+                        if progress.status != "completed":
+                            progress.status = "skipped"
                         progress.phase = "import"  # Skipped during import phase
                         progress.error_message = f"Skipped: {reason}"
                         progress.completed_at = datetime.now(UTC)

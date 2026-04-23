@@ -1819,6 +1819,15 @@ def import_cmd(
                                         # Quick existence check (will raise if not found)
                                         await ctx.target_client.get(f"{endpoint}{target_id}/")
                                         # Target exists - safe to skip
+                                        # Mark as skipped in database for accurate reporting
+                                        ctx.migration_state.mark_skipped(
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            reason=f"Pre-existing in target (validated via database check)",
+                                            target_id=target_id,
+                                            target_name=resource.get("name"),
+                                            source_name=resource.get("name"),
+                                        )
                                         already_completed_count += 1
                                         logger.info(
                                             "resource_already_processed_skip",
@@ -1903,11 +1912,12 @@ def import_cmd(
                                 )
 
                                 # Final progress update
+                                # Include both skipped_in_import (found by importer) and skipped_count (found by batch_precheck)
                                 progress.update_phase(
                                     phase_id,
                                     completed=imported_count + failed_count + skipped_in_import,
                                     failed=failed_count,
-                                    skipped=skipped_in_import,
+                                    skipped=skipped_in_import + skipped_count,
                                 )
 
                                 # Aggregate this phase's skips into total_skipped
