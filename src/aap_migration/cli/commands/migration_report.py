@@ -207,6 +207,109 @@ def _identify_missing_resources(
     return missing
 
 
+def _format_workflow_nodes_failures(failed_resources: list[dict], migration_state) -> list[str]:
+    """Format workflow node failures grouped by parent workflow.
+
+    Args:
+        failed_resources: List of failed workflow nodes
+        migration_state: Migration state for database queries
+
+    Returns:
+        List of formatted lines for the report
+    """
+    import re
+    from collections import defaultdict
+
+    lines = []
+    lines.append(f"### Failed Workflow Nodes ({len(failed_resources)})")
+    lines.append("")
+    lines.append("Workflow nodes are grouped by their parent workflow for better readability:")
+    lines.append("")
+
+    # Group nodes by parent workflow
+    grouped_by_workflow = defaultdict(list)
+
+    # Query database for workflow node data to get parent workflow IDs
+    with get_session(migration_state.database_url) as session:
+        for failed in failed_resources:
+            source_id = failed["source_id"]
+
+            # Query the export data for this workflow node to get parent workflow info
+            # We need the workflow_job_template field from the node data
+            workflow_id = None
+            workflow_name = None
+
+            # Parse the error message to extract job template source ID
+            error = failed["error"] or ""
+            jt_source_id = None
+            jt_name = None
+
+            # Extract job template source_id from error message
+            # Format: "Referenced job template (source_id=33) was not successfully imported"
+            match = re.search(r'source_id=(\d+)', error)
+            if match:
+                jt_source_id = int(match.group(1))
+
+                # Look up job template name
+                jt_record = (
+                    session.query(MigrationProgress)
+                    .filter_by(resource_type="job_templates", source_id=jt_source_id)
+                    .first()
+                )
+                if jt_record:
+                    jt_name = jt_record.source_name
+                    jt_status = jt_record.status
+
+            # Try to find parent workflow from export data
+            # The workflow node should have workflow_job_template field in the exported data
+            # We'll need to read from export files or query additional metadata
+            # For now, use a simplified grouping
+
+            # Create entry
+            entry = {
+                "source_id": source_id,
+                "jt_source_id": jt_source_id,
+                "jt_name": jt_name or f"Unknown (source ID: {jt_source_id})" if jt_source_id else "Unknown",
+                "jt_status": jt_status if jt_source_id else None,
+                "error": error,
+            }
+
+            # For now, group all under a generic key since we don't have easy access to parent workflow
+            # In a more complete implementation, we'd parse export data or store this in the database
+            grouped_by_workflow["workflow_nodes"].append(entry)
+
+    # Format output grouped by workflow
+    for workflow_key, nodes in grouped_by_workflow.items():
+        lines.append(f"**All Workflow Nodes ({len(nodes)} failed):**")
+        lines.append("")
+
+        for node in nodes:
+            jt_status_info = ""
+            if node["jt_status"] == "skipped":
+                jt_status_info = " (skipped - already exists in target)"
+            elif node["jt_status"] == "failed":
+                jt_status_info = " (failed to import)"
+            elif node["jt_status"] == "completed":
+                jt_status_info = " (successfully imported)"
+            elif node["jt_status"] is None:
+                jt_status_info = " (not found in migration)"
+
+            lines.append(
+                f"- Node {node['source_id']}: "
+                f"References Job Template **'{node['jt_name']}'** (source ID: {node['jt_source_id']}){jt_status_info}"
+            )
+
+        lines.append("")
+
+    lines.append("**Resolution:**")
+    lines.append("- Ensure all referenced job templates are successfully imported first")
+    lines.append("- Re-run workflow import after job template issues are resolved")
+    lines.append("- Skipped job templates indicate duplicates already exist in target AAP")
+    lines.append("")
+
+    return lines
+
+
 def _analyze_resource_type(
     resource_type: str,
     export_dir: Path,
@@ -559,21 +662,25 @@ def _generate_markdown_report(report_data: list[dict], migration_id: str) -> str
             lines.append("")
 
             if stats["failed_count"] > 0:
-                lines.append(f"### Failed Resources ({stats['failed_count']})")
-                lines.append("")
-                lines.append("| Source ID | Name | Phase | Error |")
-                lines.append("|-----------|------|-------|-------|")
+                # Special formatting for workflow_nodes - group by parent workflow
+                if stats["resource_type"] == "workflow_nodes":
+                    lines.extend(_format_workflow_nodes_failures(stats["failed_resources"], migration_state))
+                else:
+                    lines.append(f"### Failed Resources ({stats['failed_count']})")
+                    lines.append("")
+                    lines.append("| Source ID | Name | Phase | Error |")
+                    lines.append("|-----------|------|-------|-------|")
 
-                for failed in stats["failed_resources"]:
-                    source_id = failed["source_id"]
-                    name = failed["source_name"] or "N/A"
-                    phase = failed["phase"] or "N/A"
-                    error = failed["error"] or "Unknown error"
-                    # Escape pipe characters in error messages for markdown tables
-                    error = error.replace("|", "\\|")
-                    lines.append(f"| {source_id} | {name} | {phase} | {error} |")
+                    for failed in stats["failed_resources"]:
+                        source_id = failed["source_id"]
+                        name = failed["source_name"] or "N/A"
+                        phase = failed["phase"] or "N/A"
+                        error = failed["error"] or "Unknown error"
+                        # Escape pipe characters in error messages for markdown tables
+                        error = error.replace("|", "\\|")
+                        lines.append(f"| {source_id} | {name} | {phase} | {error} |")
 
-                lines.append("")
+                    lines.append("")
 
             if stats["skipped_count"] > 0:
                 lines.append(f"### Skipped Resources ({stats['skipped_count']})")

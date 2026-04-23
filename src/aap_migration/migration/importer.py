@@ -382,47 +382,50 @@ class ResourceImporter:
         if not error.response or not isinstance(error.response, dict):
             return base_error
 
-        # Get dependencies for this resource type
+        # Get dependencies for this resource type (may be empty for some importers)
         dependencies = self._get_dependencies(resource_type)
-        if not dependencies:
-            return base_error
 
         # Parse error response to find dependency-related failures
         enriched_parts = []
         for field, field_errors in error.response.items():
-            # Check if this field is a dependency
-            if field not in dependencies:
-                continue
-
             # Convert field_errors to list if it's not already
             error_list = field_errors if isinstance(field_errors, list) else [field_errors]
 
             # Look for "Invalid pk" or "does not exist" errors (dependency failures)
+            field_enriched = False
             for field_error in error_list:
                 error_str = str(field_error)
                 if "invalid pk" in error_str.lower() or "does not exist" in error_str.lower():
                     # Extract source dependency info from original data
                     dep_source_id = data.get(field)
-                    dep_resource_type = dependencies[field]
 
                     if dep_source_id:
+                        # Try to infer resource type from field name or use dependencies dict
+                        dep_resource_type = dependencies.get(field) if dependencies else None
+
+                        # If not in dependencies, try to infer from field name
+                        if not dep_resource_type:
+                            # Common field patterns: inventory, project, organization, credential, etc.
+                            dep_resource_type = self._infer_resource_type_from_field(field)
+
                         # Try to get the source dependency name from database
-                        dep_name = self._get_dependency_name(dep_resource_type, dep_source_id)
+                        dep_name = self._get_dependency_name(dep_resource_type, dep_source_id) if dep_resource_type else None
 
                         if dep_name:
                             enriched_parts.append(
                                 f"{field}: {dep_resource_type.rstrip('s').replace('_', ' ').title()} "
                                 f"'{dep_name}' (source ID: {dep_source_id}) does not exist in target AAP"
                             )
-                        else:
+                            field_enriched = True
+                        elif dep_resource_type:
                             enriched_parts.append(
                                 f"{field}: {dep_resource_type.rstrip('s').replace('_', ' ').title()} "
                                 f"with source ID {dep_source_id} does not exist in target AAP"
                             )
-                        continue
+                            field_enriched = True
 
             # If we didn't enrich this field, include the original error
-            if not any(field in part for part in enriched_parts):
+            if not field_enriched:
                 enriched_parts.append(f"{field}: {field_errors}")
 
         # If we enriched any dependency errors, use the enriched message
@@ -430,6 +433,31 @@ class ResourceImporter:
             return f"API error: {'; '.join(enriched_parts)}"
 
         return base_error
+
+    def _infer_resource_type_from_field(self, field_name: str) -> str | None:
+        """Infer resource type from field name.
+
+        Args:
+            field_name: Field name from API error
+
+        Returns:
+            Inferred resource type or None
+        """
+        # Map common field names to resource types
+        field_to_resource_type = {
+            "inventory": "inventories",
+            "project": "projects",
+            "organization": "organizations",
+            "credential": "credentials",
+            "webhook_credential": "credentials",
+            "execution_environment": "execution_environments",
+            "instance_group": "instance_groups",
+            "job_template": "job_templates",
+            "workflow_job_template": "workflow_job_templates",
+            "unified_job_template": "job_templates",  # Could be job or workflow, assume job
+        }
+
+        return field_to_resource_type.get(field_name)
 
     def _get_dependency_name(self, resource_type: str, source_id: int) -> str | None:
         """Get the source name of a dependency resource from the database.
