@@ -329,7 +329,7 @@ class ResourceImporter:
                     source_id=source_id,
                     error_message=enriched_error,
                 )
-                raise
+                return None
 
         except Exception as e:
             logger.error(
