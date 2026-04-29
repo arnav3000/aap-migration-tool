@@ -1575,8 +1575,9 @@ class WorkflowTransformer(DataTransformer):
     DEPENDENCIES = {
         "organization": "organizations",
         "inventory": "inventories",
+        "webhook_credential": "credentials",  # Webhook credential dependency
     }
-    # Organization is required; inventory is optional
+    # Organization is required; inventory and webhook_credential are optional
     REQUIRED_DEPENDENCIES = {"organization"}
 
     def _apply_specific_transformations(
@@ -1593,8 +1594,13 @@ class WorkflowTransformer(DataTransformer):
         """
         # Remove workflow nodes - they need to be handled separately
         if "nodes" in data:
-            # Store nodes separately for later processing
-            data["_workflow_nodes"] = data.pop("nodes")
+            nodes = data.pop("nodes")
+            # SECURITY FIX: Preserve source node IDs for failure tracking
+            # This allows Fix #2 in importer.py to correlate failed nodes back to workflows
+            for node in nodes:
+                if "id" in node:
+                    node["_source_id"] = node.pop("id")
+            data["_workflow_nodes"] = nodes
 
         # Ensure boolean fields are proper booleans
         boolean_fields = ["ask_variables_on_launch", "ask_inventory_on_launch", "survey_enabled"]
@@ -1602,6 +1608,26 @@ class WorkflowTransformer(DataTransformer):
         for field in boolean_fields:
             if field in data and not isinstance(data[field], bool):
                 data[field] = self._to_bool(data[field])
+
+        # Handle webhook credential - must be a PAT type credential
+        # If webhook_credential cannot be mapped, remove webhook fields to avoid import failure
+        source_id = data.get("_source_id")
+        if "webhook_credential" in data:
+            webhook_cred_id = data.get("webhook_credential")
+            if webhook_cred_id is None or webhook_cred_id == "":
+                # No webhook credential set, remove webhook fields
+                logger.warning(
+                    "workflow_webhook_credential_not_mapped",
+                    resource_type="workflow_job_templates",
+                    source_id=source_id,
+                    source_name=data.get("name"),
+                    message="Webhook credential not mapped, removing webhook configuration",
+                )
+                # Remove webhook-related fields
+                data.pop("webhook_credential", None)
+                data.pop("webhook_service", None)
+                data.pop("webhook_url", None)
+                data.pop("enable_webhook", None)
 
         return data
 

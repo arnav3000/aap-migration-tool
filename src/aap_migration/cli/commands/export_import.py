@@ -23,10 +23,11 @@ from aap_migration.cli.utils import (
     format_count,
     step_progress,
 )
+from aap_migration.migration.database import get_session
 from aap_migration.migration.exporter import create_exporter
 from aap_migration.migration.importer import create_importer
 from aap_migration.migration.parallel_exporter import ParallelExportCoordinator
-from aap_migration.migration.state import MigrationState
+from aap_migration.migration.state import MigrationProgress, MigrationState
 from aap_migration.reporting.live_progress import MigrationProgressDisplay
 from aap_migration.resources import (
     MANUAL_MIGRATION_ENDPOINTS,
@@ -1246,25 +1247,101 @@ def import_cmd(
         identifier_field = getattr(importer, "IDENTIFIER_FIELD", "name")
 
         # Extract identifiers from resources
+        # Track duplicates to report them in migration report
         resource_identifiers = []
         resource_by_identifier = {}
+        duplicates_skipped = []  # Track duplicates for reporting
 
         for resource in resources:
             identifier = resource.get(identifier_field)
             source_id = resource.get("_source_id")
             if identifier and source_id:
-                resource_identifiers.append(identifier)
-
                 # Use composite key for organization-scoped resources to avoid duplicates
                 if resource_type in ORGANIZATION_SCOPED_RESOURCES:
                     org = resource.get("organization")
-                    # Use (name, org) as key for org-scoped resources
-                    dict_key = (identifier, org) if org is not None else identifier
+                    # For credentials, include credential_type in uniqueness check
+                    # AAP constraint: (name, organization, credential_type) must be unique
+                    if resource_type == "credentials":
+                        cred_type = resource.get("credential_type")
+                        dict_key = (identifier, org, cred_type)
+                    else:
+                        # Other org-scoped resources: (name, org) is unique
+                        dict_key = (identifier, org) if org is not None else identifier
                 else:
                     # Use name only for globally unique resources
                     dict_key = identifier
 
+                # Check if this key already exists (duplicate name in same org)
+                if dict_key in resource_by_identifier:
+                    # DUPLICATE DETECTED: Mark as skipped in database
+                    existing_source_id = resource_by_identifier[dict_key]["source_id"]
+
+                    # Determine which one to keep (keep the first one)
+                    # Mark the current (duplicate) as skipped
+                    org_str = f"organization {org}" if org else "no organization"
+
+                    # Build reason message - for credentials include credential_type
+                    if resource_type == "credentials":
+                        cred_type = resource.get("credential_type")
+                        reason = (
+                            f"Duplicate credential: name '{identifier}', {org_str}, credential_type {cred_type}. "
+                            f"Another credential with source_id={existing_source_id} has the same name, organization, and credential_type. "
+                            f"Source AAP has true duplicate credentials (same name, org, and type). "
+                            f"Only the first occurrence (source_id={existing_source_id}) will be imported. "
+                            f"Please delete or rename this duplicate credential in source AAP."
+                        )
+                    else:
+                        reason = (
+                            f"Duplicate {resource_type} name '{identifier}' in {org_str}. "
+                            f"Another {resource_type[:-1] if resource_type.endswith('s') else resource_type} with source_id={existing_source_id} has the same name. "
+                            f"Source AAP has multiple {resource_type} with identical names in the same organization. "
+                            f"Only the first occurrence (source_id={existing_source_id}) will be imported. "
+                            f"Please rename this {resource_type[:-1] if resource_type.endswith('s') else resource_type} in source AAP and re-export, or manually create it in target AAP."
+                        )
+
+                    # Create progress record first, then mark as skipped
+                    state.mark_in_progress(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        source_name=identifier,
+                        phase="import",
+                    )
+                    state.mark_skipped(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        reason=reason,
+                    )
+
+                    duplicates_skipped.append({
+                        "source_id": source_id,
+                        "name": identifier,
+                        "organization": org,
+                        "kept_source_id": existing_source_id,
+                    })
+
+                    logger.warning(
+                        "duplicate_resource_skipped",
+                        resource_type=resource_type,
+                        skipped_source_id=source_id,
+                        kept_source_id=existing_source_id,
+                        name=identifier,
+                        organization=org,
+                        reason="Duplicate name in same organization",
+                    )
+                    # Skip this duplicate, keep the first one
+                    continue
+
+                # Not a duplicate - add to tracking lists
+                resource_identifiers.append(identifier)
                 resource_by_identifier[dict_key] = {"source_id": source_id, "data": resource}
+
+        if duplicates_skipped:
+            logger.warning(
+                "duplicates_detected_and_skipped",
+                resource_type=resource_type,
+                total_duplicates=len(duplicates_skipped),
+                message=f"Skipped {len(duplicates_skipped)} duplicate {resource_type}. Check migration report for details.",
+            )
 
         if not resource_identifiers:
             logger.warning(
@@ -1329,14 +1406,19 @@ def import_cmd(
 
                 # Index by identifier for fast lookup
                 # For organization-scoped resources, use composite key (name, organization)
+                # For credentials, also include credential_type to match AAP's uniqueness constraint
                 for existing_resource in existing_batch:
                     if resource_type in ORGANIZATION_SCOPED_RESOURCES:
-                        # Use (name, organization) as composite key
                         name = existing_resource.get("name")
                         org = existing_resource.get("organization")
                         if name is not None:
-                            # Handle null organization (some credentials can have null org)
-                            key = (name, org) if org is not None else name
+                            # For credentials: (name, org, credential_type)
+                            if resource_type == "credentials":
+                                cred_type = existing_resource.get("credential_type")
+                                key = (name, org, cred_type)
+                            else:
+                                # Other resources: (name, org)
+                                key = (name, org) if org is not None else name
                             existing_by_identifier[key] = existing_resource
                     else:
                         # Use name only for globally unique resources
@@ -1363,10 +1445,10 @@ def import_cmd(
             resource_data = resource_info["data"]
 
             # Build lookup key based on resource scope
-            # For org-scoped resources, dict_key is already (name, org) tuple
+            # For org-scoped resources, dict_key is (name, org) or (name, org, cred_type) tuple
             # For globally unique resources, dict_key is just the name
             if resource_type in ORGANIZATION_SCOPED_RESOURCES:
-                # dict_key is already (name, org) or name
+                # dict_key is already (name, org) or (name, org, cred_type) or name
                 lookup_key = dict_key
                 # Extract identifier (name) for logging
                 identifier = dict_key[0] if isinstance(dict_key, tuple) else dict_key
@@ -1395,10 +1477,12 @@ def import_cmd(
                     source_name=identifier,
                     target_name=existing.get(identifier_field),
                 )
-                # Mark as completed to prevent orphaned ID mapping
-                state.mark_completed(
+                # FIX: Mark as skipped (not completed) - resource already exists in target
+                # This matches console "Skipped: X" output and prevents report mismatch
+                state.mark_skipped(
                     resource_type=resource_type,
                     source_id=source_id,
+                    reason=f"Pre-existing in target (found in batch precheck)",
                     target_id=existing["id"],
                     target_name=existing.get(identifier_field),
                     source_name=identifier,
@@ -1661,6 +1745,8 @@ def import_cmd(
                             "job_templates": "import_job_templates",
                             "workflow_job_templates": "import_workflow_job_templates",
                             "schedules": "import_schedules",
+                            # Notifications
+                            "notification_templates": "import_notification_templates",
                             # OAuth and Configuration
                             "applications": "import_applications",
                             "settings": "import_settings",
@@ -1674,13 +1760,116 @@ def import_cmd(
                             # TEMPORARY FIX: Skip batch precheck for automation resources to avoid hang
                             # TODO: Investigate why batch_precheck_resources blocks for these types
                             if rtype in ("job_templates", "workflow_job_templates", "schedules"):
-                                echo_warning(f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using direct import)")
+                                echo_warning(f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using database check)")
                                 logger.warning(
                                     "batch_precheck_skipped_temporary_fix",
                                     resource_type=rtype,
-                                    message="Skipping batch precheck due to known hang issue"
+                                    message="Skipping batch precheck due to known hang issue, using database check instead"
                                 )
-                                resources_to_import = transformed_resources
+
+                                # Database check to avoid re-importing already completed resources
+                                # This prevents "already exists" errors on re-runs while avoiding the API hang
+                                # CRITICAL FIX: Also verify target_id still exists in target AAP
+
+                                # Step 1: Query database for completed/skipped resources (sync)
+                                resources_needing_validation = []
+                                resources_to_import = []
+                                already_completed_count = 0
+
+                                with get_session(ctx.migration_state.database_url) as session:
+                                    for resource in transformed_resources:
+                                        source_id = resource.get("_source_id")
+
+                                        # Check if already successfully completed or intentionally skipped
+                                        existing = session.query(MigrationProgress).filter_by(
+                                            resource_type=rtype,
+                                            source_id=source_id
+                                        ).first()
+
+                                        # If completed/skipped, need to validate target still exists
+                                        if existing and existing.status in ("completed", "skipped") and existing.target_id:
+                                            resources_needing_validation.append({
+                                                "resource": resource,
+                                                "source_id": source_id,
+                                                "target_id": existing.target_id,
+                                                "status": existing.status,
+                                            })
+                                        elif existing and existing.status in ("completed", "skipped"):
+                                            # No target_id but marked completed/skipped (shouldn't happen)
+                                            # Skip anyway to be safe
+                                            already_completed_count += 1
+                                            logger.info(
+                                                "resource_already_processed_skip",
+                                                resource_type=rtype,
+                                                source_id=source_id,
+                                                status=existing.status,
+                                                target_id=None,
+                                                verified="no_target_id"
+                                            )
+                                        else:
+                                            # Not completed/skipped (pending, failed, or no record)
+                                            resources_to_import.append(resource)
+
+                                # Step 2: Validate target resources exist (async, outside session)
+                                endpoint = get_endpoint(rtype)
+                                for item in resources_needing_validation:
+                                    target_id = item["target_id"]
+                                    source_id = item["source_id"]
+                                    resource = item["resource"]
+
+                                    try:
+                                        # Quick existence check (will raise if not found)
+                                        await ctx.target_client.get(f"{endpoint}{target_id}/")
+                                        # Target exists - safe to skip
+                                        # Mark as skipped in database for accurate reporting
+                                        ctx.migration_state.mark_skipped(
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            reason=f"Pre-existing in target (validated via database check)",
+                                            target_id=target_id,
+                                            target_name=resource.get("name"),
+                                            source_name=resource.get("name"),
+                                        )
+                                        already_completed_count += 1
+                                        logger.info(
+                                            "resource_already_processed_skip",
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            target_id=target_id,
+                                            status=item["status"],
+                                            verified="target_exists"
+                                        )
+                                    except Exception as e:
+                                        # Target deleted from AAP - need to re-import
+                                        logger.warning(
+                                            "target_deleted_re_importing",
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            target_id=target_id,
+                                            error=str(e),
+                                            action="clearing_status_and_reimporting"
+                                        )
+                                        # Add to import list
+                                        resources_to_import.append(resource)
+
+                                        # Clear database status (new session)
+                                        with get_session(ctx.migration_state.database_url) as session:
+                                            existing = session.query(MigrationProgress).filter_by(
+                                                resource_type=rtype,
+                                                source_id=source_id
+                                            ).first()
+                                            if existing:
+                                                existing.status = "pending"
+                                                existing.target_id = None
+                                                session.commit()
+
+                                logger.info(
+                                    "database_check_result",
+                                    resource_type=rtype,
+                                    total=len(transformed_resources),
+                                    already_completed=already_completed_count,
+                                    to_import=len(resources_to_import)
+                                )
                             else:
                                 # Proactive batch pre-check: query target to find existing resources
                                 # This avoids "already exists" errors and shows accurate progress
@@ -1725,11 +1914,12 @@ def import_cmd(
                                 )
 
                                 # Final progress update
+                                # Include both skipped_in_import (found by importer) and skipped_count (found by batch_precheck)
                                 progress.update_phase(
                                     phase_id,
                                     completed=imported_count + failed_count + skipped_in_import,
                                     failed=failed_count,
-                                    skipped=skipped_in_import,
+                                    skipped=skipped_in_import + skipped_count,
                                 )
 
                                 # Aggregate this phase's skips into total_skipped

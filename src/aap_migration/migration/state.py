@@ -676,8 +676,11 @@ class MigrationState:
                                 f"(type={resource_type}, source_id={source_id})"
                             )
                     else:
-                        # Update progress
-                        progress.status = "completed"
+                        # Update progress - don't overwrite "skipped" status
+                        # If a resource was already marked as skipped (duplicate), preserve that status
+                        if progress.status != "skipped":
+                            progress.status = "completed"
+                        progress.phase = "import"  # Mark phase as import when target_id is set
                         progress.target_id = target_id
                         progress.completed_at = datetime.now(UTC)
 
@@ -792,6 +795,9 @@ class MigrationState:
         resource_type: str,
         source_id: int,
         reason: str,
+        target_id: int | None = None,
+        target_name: str | None = None,
+        source_name: str | None = None,
     ) -> None:
         """
         Mark a resource as skipped (will not be migrated).
@@ -800,6 +806,9 @@ class MigrationState:
             resource_type: Type of resource
             source_id: Source system resource ID
             reason: Reason for skipping
+            target_id: Optional target ID if resource exists in target (duplicate detection)
+            target_name: Optional name in target system
+            source_name: Optional name in source system
 
         Raises:
             StateError: If operation fails
@@ -814,15 +823,47 @@ class MigrationState:
                     )
 
                     if progress is None:
-                        raise StateError(
-                            f"Cannot mark as skipped: Resource not found "
-                            f"(type={resource_type}, source_id={source_id})"
-                        )
+                        # FIX: Create record on-the-fly (like mark_completed does)
+                        # This handles batch_precheck calling mark_skipped before mark_in_progress
+                        if source_name:
+                            progress = MigrationProgress(
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=source_name,
+                                status="skipped",
+                                phase="import",
+                                error_message=f"Skipped: {reason}",
+                                started_at=datetime.now(UTC),
+                                completed_at=datetime.now(UTC),
+                            )
+                            # Set target_id if provided (duplicate detection case)
+                            if target_id is not None:
+                                progress.target_id = target_id
+                            if target_name is not None:
+                                progress.target_name = target_name
+                            session.add(progress)
+                        else:
+                            raise StateError(
+                                f"Cannot mark as skipped: Resource not found and source_name not provided "
+                                f"(type={resource_type}, source_id={source_id})"
+                            )
+                    else:
+                        # Update existing record
+                        # IMPORTANT: Preserve "completed" status (don't overwrite to "skipped")
+                        # This ensures reports show what was actually imported, not just last run status
+                        if progress.status != "completed":
+                            progress.status = "skipped"
+                        progress.phase = "import"  # Skipped during import phase
+                        progress.error_message = f"Skipped: {reason}"
+                        progress.completed_at = datetime.now(UTC)
 
-                    # Update progress
-                    progress.status = "skipped"
-                    progress.error_message = f"Skipped: {reason}"
-                    progress.completed_at = datetime.now(UTC)
+                        # Record target_id if duplicate was found (optional)
+                        if target_id is not None:
+                            progress.target_id = target_id
+                        if target_name is not None:
+                            progress.target_name = target_name
+                        if source_name is not None:
+                            progress.source_name = source_name
 
                     session.commit()
 
@@ -831,6 +872,7 @@ class MigrationState:
                         resource_type=resource_type,
                         source_id=source_id,
                         reason=reason,
+                        target_id=target_id,
                     )
 
             except Exception as e:
@@ -841,6 +883,146 @@ class MigrationState:
                     error=str(e),
                 )
                 raise StateError(f"Failed to mark resource as skipped: {e}") from e
+
+    def mark_export_failed(
+        self,
+        resource_type: str,
+        source_id: int,
+        source_name: str,
+        error_message: str,
+    ) -> None:
+        """
+        Mark a resource as failed during export phase.
+
+        Creates or updates MigrationProgress record with phase='export' and status='failed'.
+        Used when a resource cannot be exported from source AAP.
+
+        Args:
+            resource_type: Type of resource
+            source_id: Source system resource ID
+            source_name: Name of resource in source system
+            error_message: Error message describing why export failed
+
+        Raises:
+            StateError: If operation fails
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    progress = (
+                        session.query(MigrationProgress)
+                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .first()
+                    )
+
+                    if progress is None:
+                        # Create new record for export failure
+                        progress = MigrationProgress(
+                            resource_type=resource_type,
+                            source_id=source_id,
+                            source_name=source_name,
+                            status="failed",
+                            phase="export",
+                            error_message=error_message,
+                            started_at=datetime.now(UTC),
+                            completed_at=datetime.now(UTC),
+                        )
+                        session.add(progress)
+                    else:
+                        # Update existing record (shouldn't normally happen, but handle it)
+                        progress.status = "failed"
+                        progress.phase = "export"
+                        progress.error_message = error_message
+                        progress.completed_at = datetime.now(UTC)
+
+                    session.commit()
+
+                    logger.warning(
+                        "Marked resource as export_failed",
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        source_name=source_name,
+                        error_message=error_message,
+                    )
+
+            except Exception as e:
+                logger.error(
+                    "Failed to mark resource as export_failed",
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    error=str(e),
+                )
+                raise StateError(f"Failed to mark resource as export_failed: {e}") from e
+
+    def mark_transform_skipped(
+        self,
+        resource_type: str,
+        source_id: int,
+        source_name: str,
+        reason: str,
+    ) -> None:
+        """
+        Mark a resource as skipped during transform phase.
+
+        Creates or updates MigrationProgress record with phase='transform' and status='skipped'.
+        Used when a resource cannot be transformed due to missing dependencies.
+
+        Args:
+            resource_type: Type of resource
+            source_id: Source system resource ID
+            source_name: Name of resource in source system
+            reason: Reason for skipping (e.g., "Missing dependency: inventories:123")
+
+        Raises:
+            StateError: If operation fails
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    progress = (
+                        session.query(MigrationProgress)
+                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .first()
+                    )
+
+                    if progress is None:
+                        # Create new record for transform skip
+                        progress = MigrationProgress(
+                            resource_type=resource_type,
+                            source_id=source_id,
+                            source_name=source_name,
+                            status="skipped",
+                            phase="transform",
+                            error_message=f"Transform skipped: {reason}",
+                            started_at=datetime.now(UTC),
+                            completed_at=datetime.now(UTC),
+                        )
+                        session.add(progress)
+                    else:
+                        # Update existing record
+                        progress.status = "skipped"
+                        progress.phase = "transform"
+                        progress.error_message = f"Transform skipped: {reason}"
+                        progress.completed_at = datetime.now(UTC)
+
+                    session.commit()
+
+                    logger.info(
+                        "Marked resource as transform_skipped",
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        source_name=source_name,
+                        reason=reason,
+                    )
+
+            except Exception as e:
+                logger.error(
+                    "Failed to mark resource as transform_skipped",
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    error=str(e),
+                )
+                raise StateError(f"Failed to mark resource as transform_skipped: {e}") from e
 
     def save_id_mapping(
         self,

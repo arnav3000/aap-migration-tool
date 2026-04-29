@@ -483,6 +483,9 @@ aap-bridge migrate -r schedules --skip-prep
 # Phase 9: Settings (Optional - review before applying)
 aap-bridge migrate -r settings --skip-prep
 
+# Phase 10: Notification Templates (Optional - review before applying)
+aap-bridge migrate -r notification_templates --skip-prep
+
 # IMPORTANT: After settings migration, verify LDAP authentication
 # In AAP 2.6, LDAP settings may be managed by Platform Gateway.
 # Test LDAP login and manually enter AUTH_LDAP_BIND_PASSWORD if needed.

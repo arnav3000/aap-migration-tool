@@ -14,6 +14,8 @@ from aap_migration.client.aap_target_client import AAPTargetClient
 from aap_migration.client.bulk_operations import BulkOperations
 from aap_migration.client.exceptions import APIError, ConflictError
 from aap_migration.config import PerformanceConfig
+from aap_migration.migration.database import get_session
+from aap_migration.migration.models import MigrationProgress
 from aap_migration.migration.state import MigrationState
 from aap_migration.utils.idempotency import compare_resources
 from aap_migration.utils.logging import get_logger
@@ -213,12 +215,13 @@ class ResourceImporter:
                             target_id=existing["id"],
                             name=resource_name,
                             organization_id=organization_id,
-                            action="updating_mapping_instead_of_creating_duplicate",
+                            action="marking_as_skipped_duplicate",
                         )
-                        # Update mapping to prevent future attempts
-                        self.state.mark_completed(
+                        # Mark as skipped with target_id (duplicate detection)
+                        self.state.mark_skipped(
                             resource_type=resource_type,
                             source_id=source_id,
+                            reason=f"Duplicate exists in target (name: {resource_name}, target_id: {existing['id']})",
                             target_id=existing["id"],
                             target_name=existing.get("name"),
                             source_name=resource_name,
@@ -317,14 +320,16 @@ class ResourceImporter:
                     )
                     return None
             else:
-                # Not an "already exists" error - mark failed then re-raise
+                # Not an "already exists" error - enrich error message with source context
+                enriched_error = self._enrich_api_error_message(e, resource_type, data)
+
                 self.stats["error_count"] += 1
                 self.state.mark_failed(
                     resource_type=resource_type,
                     source_id=source_id,
-                    error_message=f"API error ({type(e).__name__}): {str(e)}",
+                    error_message=enriched_error,
                 )
-                raise
+                return None
 
         except Exception as e:
             logger.error(
@@ -353,6 +358,138 @@ class ResourceImporter:
             )
 
             return None
+
+    def _enrich_api_error_message(
+        self, error: APIError, resource_type: str, data: dict[str, Any]
+    ) -> str:
+        """Enrich API error message with source dependency context.
+
+        When an API error occurs due to missing/invalid dependencies, this method
+        enhances the error message to show source resource names and IDs instead
+        of just target IDs, making it easier for users to understand what failed.
+
+        Args:
+            error: The APIError exception
+            resource_type: Type of resource being imported
+            data: Resource data with source information
+
+        Returns:
+            Enhanced error message with source context
+        """
+        base_error = f"API error ({type(error).__name__}): {str(error)}"
+
+        # Only enrich if we have a response dict with field-level errors
+        if not error.response or not isinstance(error.response, dict):
+            return base_error
+
+        # Get dependencies for this resource type (may be empty for some importers)
+        dependencies = self._get_dependencies(resource_type)
+
+        # Parse error response to find dependency-related failures
+        enriched_parts = []
+        for field, field_errors in error.response.items():
+            # Convert field_errors to list if it's not already
+            error_list = field_errors if isinstance(field_errors, list) else [field_errors]
+
+            # Look for "Invalid pk" or "does not exist" errors (dependency failures)
+            field_enriched = False
+            for field_error in error_list:
+                error_str = str(field_error)
+                if "invalid pk" in error_str.lower() or "does not exist" in error_str.lower():
+                    # Extract source dependency info from original data
+                    dep_source_id = data.get(field)
+
+                    if dep_source_id:
+                        # Try to infer resource type from field name or use dependencies dict
+                        dep_resource_type = dependencies.get(field) if dependencies else None
+
+                        # If not in dependencies, try to infer from field name
+                        if not dep_resource_type:
+                            # Common field patterns: inventory, project, organization, credential, etc.
+                            dep_resource_type = self._infer_resource_type_from_field(field)
+
+                        # Try to get the source dependency name from database
+                        dep_name = self._get_dependency_name(dep_resource_type, dep_source_id) if dep_resource_type else None
+
+                        if dep_name:
+                            enriched_parts.append(
+                                f"{field}: {dep_resource_type.rstrip('s').replace('_', ' ').title()} "
+                                f"'{dep_name}' (source ID: {dep_source_id}) does not exist in target AAP"
+                            )
+                            field_enriched = True
+                        elif dep_resource_type:
+                            enriched_parts.append(
+                                f"{field}: {dep_resource_type.rstrip('s').replace('_', ' ').title()} "
+                                f"with source ID {dep_source_id} does not exist in target AAP"
+                            )
+                            field_enriched = True
+
+            # If we didn't enrich this field, include the original error
+            if not field_enriched:
+                enriched_parts.append(f"{field}: {field_errors}")
+
+        # If we enriched any dependency errors, use the enriched message
+        if enriched_parts:
+            return f"API error: {'; '.join(enriched_parts)}"
+
+        return base_error
+
+    def _infer_resource_type_from_field(self, field_name: str) -> str | None:
+        """Infer resource type from field name.
+
+        Args:
+            field_name: Field name from API error
+
+        Returns:
+            Inferred resource type or None
+        """
+        # Map common field names to resource types
+        field_to_resource_type = {
+            "inventory": "inventories",
+            "project": "projects",
+            "organization": "organizations",
+            "credential": "credentials",
+            "webhook_credential": "credentials",
+            "execution_environment": "execution_environments",
+            "instance_group": "instance_groups",
+            "job_template": "job_templates",
+            "workflow_job_template": "workflow_job_templates",
+            "unified_job_template": "job_templates",  # Could be job or workflow, assume job
+        }
+
+        return field_to_resource_type.get(field_name)
+
+    def _get_dependency_name(self, resource_type: str, source_id: int) -> str | None:
+        """Get the source name of a dependency resource from the database.
+
+        Args:
+            resource_type: Type of dependency resource
+            source_id: Source ID of the dependency
+
+        Returns:
+            Source resource name or None if not found
+        """
+        try:
+            session = get_session(self.state.db_path)
+            progress = (
+                session.query(MigrationProgress)
+                .filter_by(resource_type=resource_type, source_id=source_id)
+                .first()
+            )
+            session.close()
+
+            if progress and progress.source_name:
+                return progress.source_name
+
+        except Exception as e:
+            logger.debug(
+                "dependency_name_lookup_failed",
+                resource_type=resource_type,
+                source_id=source_id,
+                error=str(e),
+            )
+
+        return None
 
     async def _resolve_dependencies(
         self, resource_type: str, data: dict[str, Any]
@@ -1822,6 +1959,10 @@ class InventorySourceImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # SAFETY: Disable schedule by default to prevent automatic execution
+                    original_enabled = schedule_to_import.get("enabled", True)
+                    schedule_to_import["enabled"] = False
+
                     try:
                         result = await self.client.post(
                             f"inventory_sources/{target_inventory_source_id}/schedules/",
@@ -1833,6 +1974,8 @@ class InventorySourceImporter(ResourceImporter):
                             inventory_source_name=source_name,
                             schedule_name=schedule_name,
                             schedule_id=result.get("id"),
+                            original_enabled=original_enabled,
+                            imported_as_disabled=True,
                         )
                     except Exception as e:
                         logger.error(
@@ -1937,6 +2080,22 @@ class ScheduleImporter(ResourceImporter):
                     message="Missing _ujt_resource_type for schedule",
                 )
 
+        # SAFETY: Disable all migrated schedules by default
+        # Prevents automatic execution in target AAP until manually verified and enabled
+        # Schedules could trigger jobs, workflows, or project syncs immediately after import
+        original_enabled = resolved.get("enabled", True)
+        resolved["enabled"] = False
+
+        if original_enabled:
+            logger.info(
+                "schedule_disabled_for_safety",
+                source_id=data.get("_source_id"),
+                source_name=data.get("name"),
+                original_state="enabled",
+                new_state="disabled",
+                message="Schedule disabled on import for safety - enable manually in target AAP after verification",
+            )
+
         return resolved
 
     async def import_schedules(
@@ -2034,13 +2193,41 @@ class WorkflowNodeImporter(ResourceImporter):
                 if target_id:
                     resolved["unified_job_template"] = target_id
                 else:
-                    logger.warning(
-                        "workflow_node_ujt_not_found",
+                    # SECURITY FIX: Fail import if referenced job template is missing
+                    # Creating a node without its job template creates a broken/incomplete workflow
+                    error_msg = (
+                        f"Cannot import workflow node: Referenced job template "
+                        f"(source_id={ujt_source_id}) was not successfully imported. "
+                        f"Ensure all job templates are imported before importing workflows."
+                    )
+
+                    logger.error(
+                        "workflow_node_dependency_missing",
                         source_id=source_id,
                         ujt_source_id=ujt_source_id,
+                        node_name=data.get("identifier", "unknown"),
+                        error=error_msg,
                     )
-                    # Remove the field if we can't resolve it
-                    resolved.pop("unified_job_template")
+
+                    # Mark as failed in database
+                    self.stats["error_count"] += 1
+                    self.state.mark_failed(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        error_message=error_msg,
+                    )
+
+                    # Track for reporting
+                    self.import_errors.append({
+                        "resource_type": resource_type,
+                        "source_id": source_id,
+                        "name": data.get("identifier", "unknown"),
+                        "error": error_msg,
+                        "error_type": "DependencyError",
+                    })
+
+                    # Return None to stop processing this broken node
+                    return None
 
             # Keep workflow_job_template in data (it's required for POST even though it's in the URL)
             # Just remove the source workflow ID tracking field
@@ -3245,6 +3432,10 @@ class ProjectImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # SAFETY: Disable schedule by default to prevent automatic execution
+                    original_enabled = schedule_to_import.get("enabled", True)
+                    schedule_to_import["enabled"] = False
+
                     try:
                         result = await self.client.post(
                             f"projects/{target_project_id}/schedules/",
@@ -3256,6 +3447,8 @@ class ProjectImporter(ResourceImporter):
                             project_name=project_name,
                             schedule_name=schedule_name,
                             schedule_id=result.get("id"),
+                            original_enabled=original_enabled,
+                            imported_as_disabled=True,
                         )
                     except Exception as e:
                         logger.error(
@@ -3457,6 +3650,7 @@ class JobTemplateImporter(ResourceImporter):
         failed_count = 0
         skipped_count = 0
         templates_with_schedules = []  # Collect templates that have schedules to create
+        templates_with_notifications = []  # Collect templates that have notification associations
 
         for template in templates:
             source_id = template.pop("_source_id", template.get("id"))
@@ -3466,6 +3660,9 @@ class JobTemplateImporter(ResourceImporter):
 
             # Extract schedules for separate import
             schedules = template.pop("schedules", None)
+
+            # Extract notification associations for separate import
+            notifications = template.pop("notifications", None)
 
             # Clean up EE markers
             if template.get("_needs_execution_environment"):
@@ -3503,6 +3700,14 @@ class JobTemplateImporter(ResourceImporter):
                             "template_id": target_id,
                             "template_name": result.get("name", "unknown"),
                             "schedules": schedules,
+                        })
+
+                    # Store notification associations for later import
+                    if notifications:
+                        templates_with_notifications.append({
+                            "template_id": target_id,
+                            "template_name": result.get("name", "unknown"),
+                            "notifications": notifications,
                         })
 
                     results.append(result)
@@ -3553,6 +3758,10 @@ class JobTemplateImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # SAFETY: Disable schedule by default to prevent automatic execution
+                    original_enabled = schedule_to_import.get("enabled", True)
+                    schedule_to_import["enabled"] = False
+
                     try:
                         result = await self.client.post(
                             f"job_templates/{template_id}/schedules/",
@@ -3564,6 +3773,8 @@ class JobTemplateImporter(ResourceImporter):
                             template_name=template_name,
                             schedule_name=schedule_name,
                             schedule_id=result.get("id"),
+                            original_enabled=original_enabled,
+                            imported_as_disabled=True,
                         )
                     except Exception as e:
                         logger.error(
@@ -3573,6 +3784,55 @@ class JobTemplateImporter(ResourceImporter):
                             schedule_name=schedule_name,
                             error=str(e),
                         )
+
+        # Associate notification templates
+        if templates_with_notifications:
+            logger.info(
+                "associating_job_template_notifications",
+                total_templates_with_notifications=len(templates_with_notifications),
+            )
+
+            for notif_data in templates_with_notifications:
+                template_id = notif_data["template_id"]
+                template_name = notif_data["template_name"]
+                notifications = notif_data["notifications"]
+
+                for notif_type, source_notif_ids in notifications.items():
+                    for source_notif_id in source_notif_ids:
+                        # Map notification template ID from source to target
+                        target_notif_id = self.state.get_target_id("notification_templates", source_notif_id)
+
+                        if not target_notif_id:
+                            logger.warning(
+                                "notification_template_not_migrated",
+                                template_id=template_id,
+                                template_name=template_name,
+                                source_notif_id=source_notif_id,
+                                notif_type=notif_type,
+                            )
+                            continue
+
+                        try:
+                            await self.client.post(
+                                f"job_templates/{template_id}/{notif_type}/",
+                                json_data={"id": target_notif_id},
+                            )
+                            logger.info(
+                                "job_template_notification_associated",
+                                template_id=template_id,
+                                template_name=template_name,
+                                notification_id=target_notif_id,
+                                notif_type=notif_type,
+                            )
+                        except Exception as e:
+                            logger.error(
+                                "job_template_notification_association_failed",
+                                template_id=template_id,
+                                template_name=template_name,
+                                notification_id=target_notif_id,
+                                notif_type=notif_type,
+                                error=str(e),
+                            )
 
         return results
 
@@ -3635,6 +3895,7 @@ class WorkflowImporter(ResourceImporter):
     DEPENDENCIES = {
         "organization": "organizations",
         "inventory": "inventories",
+        "webhook_credential": "credentials",
     }
 
     async def import_workflows(
@@ -3664,6 +3925,46 @@ class WorkflowImporter(ResourceImporter):
         workflows_with_schedules = []  # Collect workflows that have schedules to create
         workflows_with_notifications = []  # Collect workflows that have notification associations
 
+        # Query failed dependencies once (efficient approach)
+        # This allows us to check if workflow nodes reference failed templates
+        failed_job_template_ids = set()
+        failed_workflow_template_ids = set()
+
+        try:
+            with get_session(self.state.database_url) as session:
+                # Get all failed job templates
+                failed_jobs = (
+                    session.query(MigrationProgress.source_id)
+                    .filter(
+                        MigrationProgress.resource_type == "job_templates",
+                        MigrationProgress.status == "failed",
+                    )
+                    .all()
+                )
+                failed_job_template_ids = {row.source_id for row in failed_jobs}
+
+                # Get all failed workflow templates
+                failed_workflows = (
+                    session.query(MigrationProgress.source_id)
+                    .filter(
+                        MigrationProgress.resource_type == "workflow_job_templates",
+                        MigrationProgress.status == "failed",
+                    )
+                    .all()
+                )
+                failed_workflow_template_ids = {row.source_id for row in failed_workflows}
+
+                logger.info(
+                    "Loaded failed dependencies for validation",
+                    failed_job_templates=len(failed_job_template_ids),
+                    failed_workflow_templates=len(failed_workflow_template_ids),
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to query failed dependencies, will skip validation",
+                error=str(e),
+            )
+
         # Phase 1: Import workflows and collect nodes/surveys/schedules/notifications
         for workflow in workflows:
             source_id = workflow.pop("_source_id", workflow.get("id"))
@@ -3679,6 +3980,86 @@ class WorkflowImporter(ResourceImporter):
 
             # Extract notification associations for separate import
             notifications = workflow.pop("notifications", None)
+
+            # SECURITY FIX: Validate all node dependencies BEFORE importing workflow
+            # Check if nodes reference any FAILED templates from earlier import phases
+            if nodes and (failed_job_template_ids or failed_workflow_template_ids):
+                missing_dependencies = []
+                for node in nodes:
+                    ujt_source_id = node.get("unified_job_template")
+                    if ujt_source_id:
+                        # Determine the type and name of unified_job_template
+                        ujt_summary = node.get("summary_fields", {}).get("unified_job_template", {})
+                        ujt_type = ujt_summary.get("unified_job_type")
+                        ujt_name = ujt_summary.get("name") or "Unknown"
+
+                        # Check if this node references a FAILED template
+                        if ujt_type == "job" and ujt_source_id in failed_job_template_ids:
+                            missing_dependencies.append((ujt_source_id, ujt_type, ujt_name))
+                        elif ujt_type == "workflow_job" and ujt_source_id in failed_workflow_template_ids:
+                            missing_dependencies.append((ujt_source_id, ujt_type, ujt_name))
+                        elif ujt_type is None or ujt_type not in ["job", "workflow_job"]:
+                            # Unknown/missing type - check both sets to be safe
+                            # This handles data corruption or unexpected ujt_type values
+                            if ujt_source_id in failed_job_template_ids:
+                                missing_dependencies.append((ujt_source_id, "job (assumed)", ujt_name))
+                            elif ujt_source_id in failed_workflow_template_ids:
+                                missing_dependencies.append((ujt_source_id, "workflow_job (assumed)", ujt_name))
+
+                if missing_dependencies:
+                    # Don't import this workflow - has failed dependencies
+                    failed_count += 1
+
+                    # Deduplicate and count missing dependencies
+                    # Key: (source_id, type, name), Value: count of references
+                    dep_counts = {}
+                    for source_id_val, dep_type, dep_name in missing_dependencies:
+                        key = (source_id_val, dep_type, dep_name)
+                        dep_counts[key] = dep_counts.get(key, 0) + 1
+
+                    # Format missing dependencies for error message
+                    missing_items = []
+                    for (source_id_val, dep_type, dep_name), count in dep_counts.items():
+                        if count > 1:
+                            missing_items.append(f"'{dep_name}' ({dep_type} template, ID: {source_id_val}) [referenced by {count} nodes]")
+                        else:
+                            missing_items.append(f"'{dep_name}' ({dep_type} template, ID: {source_id_val})")
+
+                    error_msg = (
+                        f"Cannot import workflow: {len(dep_counts)} unique template(s) "
+                        f"failed to import in earlier phases. Missing: {', '.join(missing_items)}. "
+                        f"Fix the failed templates first, then retry workflow import."
+                    )
+
+                    # Create progress record only when needed (before marking failed)
+                    # This avoids double-call with import_resource() for successful imports
+                    self.state.mark_in_progress(
+                        resource_type="workflow_job_templates",
+                        source_id=source_id,
+                        source_name=workflow.get("name"),
+                        phase="import",
+                    )
+
+                    # Now mark as failed (record exists from mark_in_progress above)
+                    self.state.mark_failed(
+                        resource_type="workflow_job_templates",
+                        source_id=source_id,
+                        error_message=error_msg,
+                    )
+
+                    logger.error(
+                        "workflow_dependency_check_failed",
+                        workflow_source_id=source_id,
+                        workflow_name=workflow.get("name"),
+                        missing_dependencies=missing_dependencies,
+                        error=error_msg,
+                    )
+
+                    # Update progress after failure
+                    if progress_callback:
+                        progress_callback(success_count, failed_count, skipped_count)
+
+                    continue  # Skip to next workflow
 
             try:
                 result = await self.import_resource(
@@ -3773,11 +4154,80 @@ class WorkflowImporter(ResourceImporter):
                     all_pending_nodes,
                     progress_callback=None,  # Could add separate progress for nodes
                 )
+
+                nodes_imported = len(imported_nodes)
+                nodes_expected = len(all_pending_nodes)
+                # FIX: Use import_errors list instead of stats counter (which was never incremented)
+                nodes_failed = len(node_importer.import_errors)
+
                 logger.info(
                     "workflow_nodes_imported",
-                    imported_count=len(imported_nodes),
-                    total_nodes=len(all_pending_nodes),
+                    imported_count=nodes_imported,
+                    failed_count=nodes_failed,
+                    total_nodes=nodes_expected,
                 )
+
+                # SECURITY FIX: If any nodes failed, mark parent workflows as failed
+                # This prevents reporting workflows as successful when they're incomplete
+                # Note: This is now a backup - main validation happens before workflow import
+                if nodes_failed > 0:
+                    # Group failed nodes by their parent workflow
+                    failed_by_workflow = {}
+                    for error_record in node_importer.import_errors:
+                        # Find the node in all_pending_nodes to get its parent workflow
+                        node_source_id = error_record.get("source_id")
+                        for node in all_pending_nodes:
+                            if node.get("_source_id") == node_source_id:
+                                source_workflow_id = node.get("_source_workflow_id")
+                                if source_workflow_id:
+                                    if source_workflow_id not in failed_by_workflow:
+                                        failed_by_workflow[source_workflow_id] = []
+                                    failed_by_workflow[source_workflow_id].append(error_record)
+                                break
+
+                    # Mark affected workflows as failed
+                    workflows_marked_failed = 0
+                    for source_workflow_id, failed_nodes in failed_by_workflow.items():
+                        # Find the workflow result to get its name
+                        workflow_name = "unknown"
+                        for workflow in results:
+                            if workflow.get("_source_id") == source_workflow_id:
+                                workflow_name = workflow.get("name", "unknown")
+                                break
+
+                        error_msg = (
+                            f"Workflow imported but {len(failed_nodes)} of its workflow nodes "
+                            f"failed to import. Workflow is incomplete and may not function correctly. "
+                            f"Failed nodes: {', '.join([n.get('name', 'unknown') for n in failed_nodes])}"
+                        )
+
+                        # Mark workflow as failed in database
+                        self.state.mark_failed(
+                            resource_type="workflow_job_templates",
+                            source_id=source_workflow_id,
+                            error_message=error_msg,
+                        )
+
+                        logger.error(
+                            "workflow_marked_failed_due_to_node_failures",
+                            workflow_name=workflow_name,
+                            source_workflow_id=source_workflow_id,
+                            failed_nodes=len(failed_nodes),
+                            error=error_msg,
+                        )
+
+                        workflows_marked_failed += 1
+
+                    # Adjust success/failure counts
+                    if workflows_marked_failed > 0:
+                        success_count -= workflows_marked_failed
+                        failed_count += workflows_marked_failed
+
+                        logger.warning(
+                            "workflows_marked_failed_due_to_nodes",
+                            count=workflows_marked_failed,
+                            total_workflows=len(results),
+                        )
 
                 # Phase 3: Create edges (connections) between nodes
                 if imported_nodes:
@@ -3790,11 +4240,48 @@ class WorkflowImporter(ResourceImporter):
                     logger.warning("no_imported_nodes_for_edge_creation")
 
             except Exception as e:
+                # SECURITY FIX: If node import completely fails, mark all workflows as failed
                 logger.error(
                     "workflow_nodes_import_failed",
                     total_nodes=len(all_pending_nodes),
                     error=str(e),
                 )
+
+                # Mark all workflows that had nodes as failed
+                workflows_with_nodes = set()
+                for node in all_pending_nodes:
+                    source_workflow_id = node.get("_source_workflow_id")
+                    if source_workflow_id:
+                        workflows_with_nodes.add(source_workflow_id)
+
+                for source_workflow_id in workflows_with_nodes:
+                    # Find workflow name
+                    workflow_name = "unknown"
+                    for workflow in results:
+                        if workflow.get("_source_id") == source_workflow_id:
+                            workflow_name = workflow.get("name", "unknown")
+                            break
+
+                    error_msg = f"Workflow node import failed with exception: {str(e)}"
+
+                    self.state.mark_failed(
+                        resource_type="workflow_job_templates",
+                        source_id=source_workflow_id,
+                        error_message=error_msg,
+                    )
+
+                    logger.error(
+                        "workflow_marked_failed_due_to_exception",
+                        workflow_name=workflow_name,
+                        source_workflow_id=source_workflow_id,
+                        error=error_msg,
+                    )
+
+                # Adjust counts
+                workflows_failed = len(workflows_with_nodes)
+                if workflows_failed > 0:
+                    success_count -= workflows_failed
+                    failed_count += workflows_failed
 
         # Phase 4: Import survey specs
         if workflows_with_surveys:
@@ -3850,6 +4337,10 @@ class WorkflowImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # SAFETY: Disable schedule by default to prevent automatic execution
+                    original_enabled = schedule_to_import.get("enabled", True)
+                    schedule_to_import["enabled"] = False
+
                     try:
                         result = await self.client.post(
                             f"workflow_job_templates/{workflow_id}/schedules/",
@@ -3861,6 +4352,8 @@ class WorkflowImporter(ResourceImporter):
                             workflow_name=workflow_name,
                             schedule_name=schedule_name,
                             schedule_id=result.get("id"),
+                            original_enabled=original_enabled,
+                            imported_as_disabled=True,
                         )
                     except Exception as e:
                         logger.error(

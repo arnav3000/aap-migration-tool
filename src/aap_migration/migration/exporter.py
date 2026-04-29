@@ -453,6 +453,30 @@ class ResourceExporter:
                 resource=resource,
             )
             self.stats["skipped_count"] += 1
+
+            # Track export failure in database for reporting
+            # For resources without ID, use hash of name as pseudo-ID for tracking
+            # This is rare (malformed API responses) but allows tracking in reports
+            source_id = resource.get("id") or -1
+            source_name = resource.get("name", "Unknown")
+
+            # Only track if we have a meaningful identifier
+            if source_id != -1:
+                try:
+                    self.state.mark_export_failed(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        source_name=source_name,
+                        error_message="Resource missing required 'id' field",
+                    )
+                except Exception as e:
+                    # Log but don't fail export if database tracking fails
+                    logger.warning(
+                        "failed_to_track_export_failure",
+                        resource_type=resource_type,
+                        error=str(e),
+                    )
+
             return None
 
         # CRITICAL: Do NOT skip resources based on ID mappings in database
@@ -1538,6 +1562,36 @@ class JobTemplateExporter(ResourceExporter):
                     error=str(e),
                 )
 
+            # Fetch notification template associations
+            notification_types = ["started", "success", "error"]
+            notifications = {}
+            for notif_type in notification_types:
+                try:
+                    notif_response = await self.client.get(
+                        f"job_templates/{template['id']}/notification_templates_{notif_type}/"
+                    )
+                    notif_templates = notif_response.get("results", [])
+                    if notif_templates:
+                        # Store just the IDs for association
+                        notifications[f"notification_templates_{notif_type}"] = [
+                            nt["id"] for nt in notif_templates
+                        ]
+                except Exception as e:
+                    logger.warning(
+                        f"failed_to_fetch_job_template_notifications_{notif_type}",
+                        job_template_id=template["id"],
+                        error=str(e),
+                    )
+
+            if notifications:
+                template["notifications"] = notifications
+                total_notifs = sum(len(v) for v in notifications.values())
+                logger.debug(
+                    "job_template_notifications_fetched",
+                    job_template_id=template["id"],
+                    notification_count=total_notifs,
+                )
+
             yield template
 
     async def export_parallel(
@@ -1606,6 +1660,36 @@ class JobTemplateExporter(ResourceExporter):
                     "failed_to_fetch_job_template_schedules",
                     job_template_id=template["id"],
                     error=str(e),
+                )
+
+            # Fetch notification template associations
+            notification_types = ["started", "success", "error"]
+            notifications = {}
+            for notif_type in notification_types:
+                try:
+                    notif_response = await self.client.get(
+                        f"job_templates/{template['id']}/notification_templates_{notif_type}/"
+                    )
+                    notif_templates = notif_response.get("results", [])
+                    if notif_templates:
+                        # Store just the IDs for association
+                        notifications[f"notification_templates_{notif_type}"] = [
+                            nt["id"] for nt in notif_templates
+                        ]
+                except Exception as e:
+                    logger.warning(
+                        f"failed_to_fetch_job_template_notifications_{notif_type}",
+                        job_template_id=template["id"],
+                        error=str(e),
+                    )
+
+            if notifications:
+                template["notifications"] = notifications
+                total_notifs = sum(len(v) for v in notifications.values())
+                logger.debug(
+                    "job_template_notifications_fetched",
+                    job_template_id=template["id"],
+                    notification_count=total_notifs,
                 )
 
             yield template
