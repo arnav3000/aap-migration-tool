@@ -113,7 +113,7 @@ def generate_migration_report(
             report_data.append(stats)
 
         # Generate markdown report
-        report_content = _generate_markdown_report(report_data, ctx.migration_state.migration_id)
+        report_content = _generate_markdown_report(report_data, ctx.migration_state)
 
         # Write report to file
         output_path.write_text(report_content)
@@ -475,13 +475,13 @@ def _analyze_resource_type(
     return stats
 
 
-def _generate_markdown_report(report_data: list[dict], migration_id: str) -> str:
+def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
     """Generate markdown-formatted migration report."""
     lines = [
         "# AAP Migration Report",
         "",
         f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
-        f"**Migration ID:** {migration_id}",
+        f"**Migration ID:** {migration_state.migration_id}",
         "",
         "---",
         "",
