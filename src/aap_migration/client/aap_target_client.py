@@ -572,7 +572,8 @@ class AAPTargetClient(BaseAPIClient):
                 from urllib.parse import urlparse
 
                 parsed = urlparse(next_url)
-                endpoint = parsed.path.replace("/api/controller/v2/", "")
+                # Handle both AAP 2.6 (/api/controller/v2/) and AAP 2.4 (/api/v2/) paths
+                endpoint = parsed.path.replace("/api/controller/v2/", "").replace("/api/v2/", "")
                 params = {}  # Next URL already has query params
             else:
                 endpoint = None

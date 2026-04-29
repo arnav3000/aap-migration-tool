@@ -470,7 +470,7 @@ class ResourceImporter:
             Source resource name or None if not found
         """
         try:
-            session = get_session(self.state.db_path)
+            session = get_session(self.state.database_url)
             progress = (
                 session.query(MigrationProgress)
                 .filter_by(resource_type=resource_type, source_id=source_id)
@@ -490,6 +490,54 @@ class ResourceImporter:
             )
 
         return None
+
+    def _add_notification_warnings(
+        self, resource_type: str, warnings_by_source_id: dict[int, list[str]]
+    ) -> None:
+        """Add notification association warnings to resource records in database.
+
+        Updates the error_message field for completed resources to include warnings
+        about incomplete notification associations. These warnings appear in migration reports.
+
+        Args:
+            resource_type: Type of resource (job_templates, workflow_job_templates)
+            warnings_by_source_id: Dict mapping source_id -> list of warning messages
+        """
+        try:
+            from aap_migration.migration.database import get_session
+
+            with get_session(self.state.database_url) as session:
+                for source_id, warnings in warnings_by_source_id.items():
+                    progress = (
+                        session.query(MigrationProgress)
+                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .first()
+                    )
+
+                    if progress and progress.status == "completed":
+                        # Append warnings to existing error_message
+                        warning_text = "WARNING: " + "; ".join(warnings)
+                        if progress.error_message:
+                            progress.error_message = f"{progress.error_message}\n{warning_text}"
+                        else:
+                            progress.error_message = warning_text
+
+                        logger.info(
+                            "notification_warning_added_to_report",
+                            resource_type=resource_type,
+                            source_id=source_id,
+                            source_name=progress.source_name,
+                            warning_count=len(warnings),
+                        )
+
+                session.commit()
+
+        except Exception as e:
+            logger.error(
+                "failed_to_add_notification_warnings",
+                resource_type=resource_type,
+                error=str(e),
+            )
 
     async def _resolve_dependencies(
         self, resource_type: str, data: dict[str, Any]
@@ -1937,7 +1985,7 @@ class InventorySourceImporter(ResourceImporter):
                 schedules = schedule_data["schedules"]
 
                 # Get the target inventory source ID from the state mapping
-                target_inventory_source_id = self.state.get_target_id("inventory_sources", source_inventory_source_id)
+                target_inventory_source_id = self.state.get_mapped_id("inventory_sources", source_inventory_source_id)
                 if not target_inventory_source_id:
                     logger.warning(
                         "inventory_source_not_found_for_schedule",
@@ -2850,8 +2898,8 @@ class HostInventoryMembershipImporter(ResourceImporter):
             return {"status": "skipped", "reason": "already_migrated"}
 
         # Map source IDs to target IDs
-        target_host_id = self.state.get_target_id("hosts", source_host_id)
-        target_inventory_id = self.state.get_target_id("inventories", source_inventory_id)
+        target_host_id = self.state.get_mapped_id("hosts", source_host_id)
+        target_inventory_id = self.state.get_mapped_id("inventories", source_inventory_id)
 
         if not target_host_id:
             logger.warning(
@@ -3410,7 +3458,7 @@ class ProjectImporter(ResourceImporter):
                 schedules = schedule_data["schedules"]
 
                 # Get the target project ID from the state mapping
-                target_project_id = self.state.get_target_id("projects", source_project_id)
+                target_project_id = self.state.get_mapped_id("projects", source_project_id)
                 if not target_project_id:
                     logger.warning(
                         "project_not_found_for_schedule",
@@ -3705,6 +3753,7 @@ class JobTemplateImporter(ResourceImporter):
                     # Store notification associations for later import
                     if notifications:
                         templates_with_notifications.append({
+                            "source_template_id": source_id,
                             "template_id": target_id,
                             "template_name": result.get("name", "unknown"),
                             "notifications": notifications,
@@ -3792,17 +3841,22 @@ class JobTemplateImporter(ResourceImporter):
                 total_templates_with_notifications=len(templates_with_notifications),
             )
 
+            # Track notification association warnings for migration report
+            notification_warnings = {}  # template_id -> list of warning messages
+
             for notif_data in templates_with_notifications:
                 template_id = notif_data["template_id"]
                 template_name = notif_data["template_name"]
+                source_template_id = notif_data.get("source_template_id")
                 notifications = notif_data["notifications"]
 
                 for notif_type, source_notif_ids in notifications.items():
                     for source_notif_id in source_notif_ids:
                         # Map notification template ID from source to target
-                        target_notif_id = self.state.get_target_id("notification_templates", source_notif_id)
+                        target_notif_id = self.state.get_mapped_id("notification_templates", source_notif_id)
 
                         if not target_notif_id:
+                            warning_msg = f"Notification template (source ID: {source_notif_id}) not migrated - {notif_type} notification not associated"
                             logger.warning(
                                 "notification_template_not_migrated",
                                 template_id=template_id,
@@ -3810,6 +3864,11 @@ class JobTemplateImporter(ResourceImporter):
                                 source_notif_id=source_notif_id,
                                 notif_type=notif_type,
                             )
+                            # Track warning for this template
+                            if source_template_id:
+                                if source_template_id not in notification_warnings:
+                                    notification_warnings[source_template_id] = []
+                                notification_warnings[source_template_id].append(warning_msg)
                             continue
 
                         try:
@@ -3825,6 +3884,7 @@ class JobTemplateImporter(ResourceImporter):
                                 notif_type=notif_type,
                             )
                         except Exception as e:
+                            warning_msg = f"Failed to associate {notif_type} notification: {str(e)}"
                             logger.error(
                                 "job_template_notification_association_failed",
                                 template_id=template_id,
@@ -3833,6 +3893,15 @@ class JobTemplateImporter(ResourceImporter):
                                 notif_type=notif_type,
                                 error=str(e),
                             )
+                            # Track warning for this template
+                            if source_template_id:
+                                if source_template_id not in notification_warnings:
+                                    notification_warnings[source_template_id] = []
+                                notification_warnings[source_template_id].append(warning_msg)
+
+            # Update database with warnings for templates with incomplete notification associations
+            if notification_warnings:
+                self._add_notification_warnings("job_templates", notification_warnings)
 
         return results
 
@@ -4119,6 +4188,7 @@ class WorkflowImporter(ResourceImporter):
                 # Store notification associations for later import
                 if notifications:
                     workflows_with_notifications.append({
+                        "source_workflow_id": source_id,
                         "workflow_id": result["id"],
                         "workflow_name": result.get("name", "unknown"),
                         "notifications": notifications,
@@ -4371,17 +4441,22 @@ class WorkflowImporter(ResourceImporter):
                 total_workflows_with_notifications=len(workflows_with_notifications),
             )
 
+            # Track notification association warnings for migration report
+            notification_warnings = {}  # workflow_id -> list of warning messages
+
             for notif_data in workflows_with_notifications:
                 workflow_id = notif_data["workflow_id"]
                 workflow_name = notif_data["workflow_name"]
+                source_workflow_id = notif_data.get("source_workflow_id")
                 notifications = notif_data["notifications"]
 
                 for notif_type, source_notif_ids in notifications.items():
                     for source_notif_id in source_notif_ids:
                         # Map notification template ID from source to target
-                        target_notif_id = self.state.get_target_id("notification_templates", source_notif_id)
+                        target_notif_id = self.state.get_mapped_id("notification_templates", source_notif_id)
 
                         if not target_notif_id:
+                            warning_msg = f"Notification template (source ID: {source_notif_id}) not migrated - {notif_type} notification not associated"
                             logger.warning(
                                 "notification_template_not_migrated",
                                 workflow_id=workflow_id,
@@ -4389,6 +4464,11 @@ class WorkflowImporter(ResourceImporter):
                                 source_notif_id=source_notif_id,
                                 notif_type=notif_type,
                             )
+                            # Track warning for this workflow
+                            if source_workflow_id:
+                                if source_workflow_id not in notification_warnings:
+                                    notification_warnings[source_workflow_id] = []
+                                notification_warnings[source_workflow_id].append(warning_msg)
                             continue
 
                         try:
@@ -4404,6 +4484,7 @@ class WorkflowImporter(ResourceImporter):
                                 notif_type=notif_type,
                             )
                         except Exception as e:
+                            warning_msg = f"Failed to associate {notif_type} notification: {str(e)}"
                             logger.error(
                                 "workflow_notification_association_failed",
                                 workflow_id=workflow_id,
@@ -4412,6 +4493,15 @@ class WorkflowImporter(ResourceImporter):
                                 notif_type=notif_type,
                                 error=str(e),
                             )
+                            # Track warning for this workflow
+                            if source_workflow_id:
+                                if source_workflow_id not in notification_warnings:
+                                    notification_warnings[source_workflow_id] = []
+                                notification_warnings[source_workflow_id].append(warning_msg)
+
+            # Update database with warnings for workflows with incomplete notification associations
+            if notification_warnings:
+                self._add_notification_warnings("workflow_job_templates", notification_warnings)
 
         return results
 
@@ -4676,7 +4766,7 @@ class SystemJobTemplateImporter(ResourceImporter):
                 schedules = schedule_data["schedules"]
 
                 # Get the target system job template ID from the state mapping
-                target_template_id = self.state.get_target_id("system_job_templates", source_template_id)
+                target_template_id = self.state.get_mapped_id("system_job_templates", source_template_id)
                 if not target_template_id:
                     logger.warning(
                         "system_job_template_not_found_for_schedule",

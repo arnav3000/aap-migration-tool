@@ -705,6 +705,49 @@ def _generate_markdown_report(report_data: list[dict], migration_id: str) -> str
                 lines.append("- Typically requires renaming duplicates in source AAP or manual creation in target AAP")
                 lines.append("")
 
+            # Add warnings section for successfully imported resources with warnings
+            if stats["completed_count"] > 0:
+                with get_session(migration_state.database_url) as session:
+                    resources_with_warnings = (
+                        session.query(MigrationProgress)
+                        .filter(
+                            MigrationProgress.resource_type == stats["resource_type"],
+                            MigrationProgress.status == "completed",
+                            MigrationProgress.error_message.isnot(None),
+                            MigrationProgress.error_message.like("WARNING:%"),
+                        )
+                        .all()
+                    )
+
+                if resources_with_warnings:
+                    lines.append(f"### Warnings ({len(resources_with_warnings)})")
+                    lines.append("")
+                    lines.append("These resources were successfully imported but have warnings (e.g., incomplete notification associations):")
+                    lines.append("")
+                    lines.append("| Source ID | Name | Warning |")
+                    lines.append("|-----------|------|---------|")
+
+                    for resource in resources_with_warnings:
+                        source_id = resource.source_id
+                        name = resource.source_name or "N/A"
+                        warning = resource.error_message or "No warning message"
+                        # Extract WARNING text (remove "WARNING: " prefix if present)
+                        if warning.startswith("WARNING: "):
+                            warning = warning[9:]  # Remove "WARNING: " prefix
+                        # Escape pipe characters for markdown tables
+                        warning = warning.replace("|", "\\|")
+                        # Truncate long warnings
+                        if len(warning) > 150:
+                            warning = warning[:147] + "..."
+                        lines.append(f"| {source_id} | {name} | {warning} |")
+
+                    lines.append("")
+                    lines.append("**Note:**")
+                    lines.append("- These resources are functional but may have incomplete configurations")
+                    lines.append("- Review warnings and manually complete missing associations if needed")
+                    lines.append("- Common warnings: notification templates not migrated, credentials missing")
+                    lines.append("")
+
             if stats["discrepancy"] > 0:
                 lines.append(f"### Missing Resources (Discrepancy: {stats['discrepancy']})")
                 lines.append("")
