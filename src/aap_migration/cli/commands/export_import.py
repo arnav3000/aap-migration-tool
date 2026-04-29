@@ -1255,6 +1255,7 @@ def import_cmd(
         for resource in resources:
             identifier = resource.get(identifier_field)
             source_id = resource.get("_source_id")
+            org = None  # Initialize org for all resources (prevents UnboundLocalError)
             if identifier and source_id:
                 # Use composite key for organization-scoped resources to avoid duplicates
                 if resource_type in ORGANIZATION_SCOPED_RESOURCES:
