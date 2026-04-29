@@ -32,6 +32,7 @@ from aap_migration.reporting.live_progress import MigrationProgressDisplay
 from aap_migration.resources import (
     MANUAL_MIGRATION_ENDPOINTS,
     ORGANIZATION_SCOPED_RESOURCES,
+    PARENT_SCOPED_RESOURCES,
     READ_ONLY_ENDPOINTS,
     RESOURCE_REGISTRY,
     RUNTIME_DATA_ENDPOINTS,
@@ -1255,6 +1256,8 @@ def import_cmd(
         for resource in resources:
             identifier = resource.get(identifier_field)
             source_id = resource.get("_source_id")
+            org = None  # Initialize org for all resources (prevents UnboundLocalError)
+            parent_id = None  # Initialize parent_id for parent-scoped resources
             if identifier and source_id:
                 # Use composite key for organization-scoped resources to avoid duplicates
                 if resource_type in ORGANIZATION_SCOPED_RESOURCES:
@@ -1267,6 +1270,11 @@ def import_cmd(
                     else:
                         # Other org-scoped resources: (name, org) is unique
                         dict_key = (identifier, org) if org is not None else identifier
+                elif resource_type in PARENT_SCOPED_RESOURCES:
+                    # Parent-scoped resources: unique within parent (e.g., inventory_sources scoped to inventory)
+                    parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+                    parent_id = resource.get(parent_field)
+                    dict_key = (identifier, parent_id) if parent_id is not None else identifier
                 else:
                     # Use name only for globally unique resources
                     dict_key = identifier
@@ -1278,13 +1286,20 @@ def import_cmd(
 
                     # Determine which one to keep (keep the first one)
                     # Mark the current (duplicate) as skipped
-                    org_str = f"organization {org}" if org else "no organization"
+                    # Build scope string for error message
+                    if org is not None:
+                        scope_str = f"organization {org}"
+                    elif parent_id is not None and resource_type in PARENT_SCOPED_RESOURCES:
+                        parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+                        scope_str = f"{parent_field} {parent_id}"
+                    else:
+                        scope_str = "no specific scope"
 
                     # Build reason message - for credentials include credential_type
                     if resource_type == "credentials":
                         cred_type = resource.get("credential_type")
                         reason = (
-                            f"Duplicate credential: name '{identifier}', {org_str}, credential_type {cred_type}. "
+                            f"Duplicate credential: name '{identifier}', {scope_str}, credential_type {cred_type}. "
                             f"Another credential with source_id={existing_source_id} has the same name, organization, and credential_type. "
                             f"Source AAP has true duplicate credentials (same name, org, and type). "
                             f"Only the first occurrence (source_id={existing_source_id}) will be imported. "
@@ -1292,7 +1307,7 @@ def import_cmd(
                         )
                     else:
                         reason = (
-                            f"Duplicate {resource_type} name '{identifier}' in {org_str}. "
+                            f"Duplicate {resource_type} name '{identifier}' in {scope_str}. "
                             f"Another {resource_type[:-1] if resource_type.endswith('s') else resource_type} with source_id={existing_source_id} has the same name. "
                             f"Source AAP has multiple {resource_type} with identical names in the same organization. "
                             f"Only the first occurrence (source_id={existing_source_id}) will be imported. "
@@ -1316,6 +1331,7 @@ def import_cmd(
                         "source_id": source_id,
                         "name": identifier,
                         "organization": org,
+                        "parent_id": parent_id,
                         "kept_source_id": existing_source_id,
                     })
 
@@ -1326,7 +1342,8 @@ def import_cmd(
                         kept_source_id=existing_source_id,
                         name=identifier,
                         organization=org,
-                        reason="Duplicate name in same organization",
+                        parent_id=parent_id,
+                        reason="Duplicate name in same scope",
                     )
                     # Skip this duplicate, keep the first one
                     continue
@@ -1407,6 +1424,7 @@ def import_cmd(
                 # Index by identifier for fast lookup
                 # For organization-scoped resources, use composite key (name, organization)
                 # For credentials, also include credential_type to match AAP's uniqueness constraint
+                # For parent-scoped resources (inventory_sources, hosts, groups), use (name, parent_id)
                 for existing_resource in existing_batch:
                     if resource_type in ORGANIZATION_SCOPED_RESOURCES:
                         name = existing_resource.get("name")
@@ -1419,6 +1437,14 @@ def import_cmd(
                             else:
                                 # Other resources: (name, org)
                                 key = (name, org) if org is not None else name
+                            existing_by_identifier[key] = existing_resource
+                    elif resource_type in PARENT_SCOPED_RESOURCES:
+                        # Parent-scoped: (name, parent_id) - e.g., (source_name, inventory_id)
+                        name = existing_resource.get("name")
+                        parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+                        parent_id = existing_resource.get(parent_field)
+                        if name is not None:
+                            key = (name, parent_id) if parent_id is not None else name
                             existing_by_identifier[key] = existing_resource
                     else:
                         # Use name only for globally unique resources
@@ -1446,9 +1472,15 @@ def import_cmd(
 
             # Build lookup key based on resource scope
             # For org-scoped resources, dict_key is (name, org) or (name, org, cred_type) tuple
+            # For parent-scoped resources, dict_key is (name, parent_id) tuple
             # For globally unique resources, dict_key is just the name
             if resource_type in ORGANIZATION_SCOPED_RESOURCES:
                 # dict_key is already (name, org) or (name, org, cred_type) or name
+                lookup_key = dict_key
+                # Extract identifier (name) for logging
+                identifier = dict_key[0] if isinstance(dict_key, tuple) else dict_key
+            elif resource_type in PARENT_SCOPED_RESOURCES:
+                # dict_key is already (name, parent_id) or name
                 lookup_key = dict_key
                 # Extract identifier (name) for logging
                 identifier = dict_key[0] if isinstance(dict_key, tuple) else dict_key
@@ -1463,7 +1495,8 @@ def import_cmd(
                 resource_type=resource_type,
                 source_id=source_id,
                 lookup_key=str(lookup_key),
-                scoped=resource_type in ORGANIZATION_SCOPED_RESOURCES,
+                scoped=resource_type in ORGANIZATION_SCOPED_RESOURCES
+                or resource_type in PARENT_SCOPED_RESOURCES,
             )
 
             if lookup_key in existing_by_identifier:

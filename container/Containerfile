@@ -4,7 +4,7 @@ FROM ubi9/ubi
 
 # Labels (OCI standard)
 LABEL org.opencontainers.image.title="aap-bridge" \
-      org.opencontainers.image.version="0.5.1" \
+      org.opencontainers.image.version="0.5.2" \
       org.opencontainers.image.description="Production-grade migration tool for Ansible Automation Platform" \
       org.opencontainers.image.source="https://github.com/antonysallas/aap-bridge" \
       org.opencontainers.image.licenses="GPL-3.0-or-later" \

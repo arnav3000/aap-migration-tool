@@ -430,9 +430,10 @@ ORGANIZATION_SCOPED_RESOURCES = {
 
 # Parent-scoped resources: unique within parent resource
 # Format: {resource_type: parent_field_name}
+# NOTE: Use internal resource type names (e.g., "inventory_groups" not "groups")
 PARENT_SCOPED_RESOURCES = {
     "hosts": "inventory",
-    "groups": "inventory",
+    "inventory_groups": "inventory",
     "inventory_sources": "inventory",
 }
 
