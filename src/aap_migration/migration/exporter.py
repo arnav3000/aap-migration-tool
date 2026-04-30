@@ -1592,6 +1592,25 @@ class JobTemplateExporter(ResourceExporter):
                     notification_count=total_notifs,
                 )
 
+            # Fetch survey spec if survey is enabled
+            if template.get("survey_enabled"):
+                try:
+                    survey_spec = await self.client.get(
+                        f"job_templates/{template['id']}/survey_spec/"
+                    )
+                    template["survey_spec"] = survey_spec
+                    logger.debug(
+                        "job_template_survey_fetched",
+                        job_template_id=template["id"],
+                        survey_questions=len(survey_spec.get("spec", [])),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "failed_to_fetch_job_template_survey",
+                        job_template_id=template["id"],
+                        error=str(e),
+                    )
+
             yield template
 
     async def export_parallel(
@@ -1691,6 +1710,25 @@ class JobTemplateExporter(ResourceExporter):
                     job_template_id=template["id"],
                     notification_count=total_notifs,
                 )
+
+            # Fetch survey spec if survey is enabled
+            if template.get("survey_enabled"):
+                try:
+                    survey_spec = await self.client.get(
+                        f"job_templates/{template['id']}/survey_spec/"
+                    )
+                    template["survey_spec"] = survey_spec
+                    logger.debug(
+                        "job_template_survey_fetched",
+                        job_template_id=template["id"],
+                        survey_questions=len(survey_spec.get("spec", [])),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "failed_to_fetch_job_template_survey",
+                        job_template_id=template["id"],
+                        error=str(e),
+                    )
 
             yield template
 

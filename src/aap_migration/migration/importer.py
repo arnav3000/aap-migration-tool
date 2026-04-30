@@ -3801,6 +3801,7 @@ class JobTemplateImporter(ResourceImporter):
         failed_count = 0
         skipped_count = 0
         templates_with_schedules = []  # Collect templates that have schedules to create
+        templates_with_surveys = []  # Collect templates that have surveys to create
         templates_with_notifications = []  # Collect templates that have notification associations
 
         for template in templates:
@@ -3811,6 +3812,9 @@ class JobTemplateImporter(ResourceImporter):
 
             # Extract schedules for separate import
             schedules = template.pop("schedules", None)
+
+            # Extract survey spec for separate import (must be POSTed after template creation)
+            survey_spec = template.pop("survey_spec", None)
 
             # Extract notification associations for separate import
             notifications = template.pop("notifications", None)
@@ -3851,6 +3855,15 @@ class JobTemplateImporter(ResourceImporter):
                             "template_id": target_id,
                             "template_name": result.get("name", "unknown"),
                             "schedules": schedules,
+                        })
+
+                    # Store survey spec for later import
+                    if survey_spec:
+                        templates_with_surveys.append({
+                            "source_template_id": source_id,
+                            "template_id": target_id,
+                            "template_name": result.get("name", "unknown"),
+                            "survey_spec": survey_spec,
                         })
 
                     # Store notification associations for later import
@@ -3972,6 +3985,38 @@ class JobTemplateImporter(ResourceImporter):
                             schedule_name=schedule_name,
                             error=str(e),
                         )
+
+        # Import surveys
+        if templates_with_surveys:
+            logger.info(
+                "importing_job_template_surveys",
+                total_surveys=len(templates_with_surveys),
+            )
+
+            for survey_data in templates_with_surveys:
+                source_template_id = survey_data["source_template_id"]
+                template_id = survey_data["template_id"]
+                template_name = survey_data["template_name"]
+                survey_spec = survey_data["survey_spec"]
+
+                try:
+                    await self.client.post(
+                        f"job_templates/{template_id}/survey_spec/",
+                        json_data=survey_spec,
+                    )
+                    logger.info(
+                        "job_template_survey_imported",
+                        template_id=template_id,
+                        template_name=template_name,
+                        survey_questions=len(survey_spec.get("spec", [])),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "job_template_survey_import_failed",
+                        template_id=template_id,
+                        template_name=template_name,
+                        error=str(e),
+                    )
 
         # Associate notification templates
         if templates_with_notifications:
