@@ -435,6 +435,7 @@ PARENT_SCOPED_RESOURCES = {
     "hosts": "inventory",
     "inventory_groups": "inventory",
     "inventory_sources": "inventory",
+    "schedules": "unified_job_template",
 }
 
 # All other resources are globally unique by name (organizations, users, labels, etc.)

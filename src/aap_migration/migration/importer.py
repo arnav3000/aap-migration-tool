@@ -1999,6 +1999,8 @@ class InventorySourceImporter(ResourceImporter):
 
                 for schedule in schedules:
                     schedule_name = schedule.get("name", "unknown")
+                    # Capture source schedule ID before it's removed (for database tracking)
+                    source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
                     schedule_to_import = {k: v for k, v in schedule.items() if k not in [
@@ -2025,6 +2027,40 @@ class InventorySourceImporter(ResourceImporter):
                             original_enabled=original_enabled,
                             imported_as_disabled=True,
                         )
+
+                        # Track schedule in database if source_id is available
+                        # This allows standalone schedule import to skip already-created schedules
+                        if source_schedule_id and result.get("id"):
+                            try:
+                                self.state.save_id_mapping(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    source_name=schedule_name,
+                                    target_name=schedule_name,
+                                )
+                                self.state.mark_completed(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    target_name=schedule_name,
+                                    source_name=schedule_name,
+                                )
+                                logger.debug(
+                                    "inventory_source_schedule_tracked",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                )
+                            except Exception as tracking_error:
+                                # Don't fail schedule import if tracking fails
+                                logger.warning(
+                                    "inventory_source_schedule_tracking_failed",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                    error=str(tracking_error),
+                                )
                     except Exception as e:
                         logger.error(
                             "inventory_source_schedule_import_failed",
@@ -3503,6 +3539,8 @@ class ProjectImporter(ResourceImporter):
 
                 for schedule in schedules:
                     schedule_name = schedule.get("name", "unknown")
+                    # Capture source schedule ID before it's removed (for database tracking)
+                    source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
                     schedule_to_import = {k: v for k, v in schedule.items() if k not in [
@@ -3529,6 +3567,40 @@ class ProjectImporter(ResourceImporter):
                             original_enabled=original_enabled,
                             imported_as_disabled=True,
                         )
+
+                        # Track schedule in database if source_id is available
+                        # This allows standalone schedule import to skip already-created schedules
+                        if source_schedule_id and result.get("id"):
+                            try:
+                                self.state.save_id_mapping(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    source_name=schedule_name,
+                                    target_name=schedule_name,
+                                )
+                                self.state.mark_completed(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    target_name=schedule_name,
+                                    source_name=schedule_name,
+                                )
+                                logger.debug(
+                                    "project_schedule_tracked",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                )
+                            except Exception as tracking_error:
+                                # Don't fail schedule import if tracking fails
+                                logger.warning(
+                                    "project_schedule_tracking_failed",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                    error=str(tracking_error),
+                                )
                     except Exception as e:
                         logger.error(
                             "project_schedule_import_failed",
@@ -3830,6 +3902,8 @@ class JobTemplateImporter(ResourceImporter):
 
                 for schedule in schedules:
                     schedule_name = schedule.get("name", "unknown")
+                    # Capture source schedule ID before it's removed (for database tracking)
+                    source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
                     schedule_to_import = {k: v for k, v in schedule.items() if k not in [
@@ -3856,6 +3930,40 @@ class JobTemplateImporter(ResourceImporter):
                             original_enabled=original_enabled,
                             imported_as_disabled=True,
                         )
+
+                        # Track schedule in database if source_id is available
+                        # This allows standalone schedule import to skip already-created schedules
+                        if source_schedule_id and result.get("id"):
+                            try:
+                                self.state.save_id_mapping(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    source_name=schedule_name,
+                                    target_name=schedule_name,
+                                )
+                                self.state.mark_completed(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    target_name=schedule_name,
+                                    source_name=schedule_name,
+                                )
+                                logger.debug(
+                                    "job_template_schedule_tracked",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                )
+                            except Exception as tracking_error:
+                                # Don't fail schedule import if tracking fails
+                                logger.warning(
+                                    "job_template_schedule_tracking_failed",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                    error=str(tracking_error),
+                                )
                     except Exception as e:
                         logger.error(
                             "job_template_schedule_import_failed",
@@ -4430,6 +4538,8 @@ class WorkflowImporter(ResourceImporter):
 
                 for schedule in schedules:
                     schedule_name = schedule.get("name", "unknown")
+                    # Capture source schedule ID before it's removed (for database tracking)
+                    source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
                     schedule_to_import = {k: v for k, v in schedule.items() if k not in [
@@ -4456,6 +4566,40 @@ class WorkflowImporter(ResourceImporter):
                             original_enabled=original_enabled,
                             imported_as_disabled=True,
                         )
+
+                        # Track schedule in database if source_id is available
+                        # This allows standalone schedule import to skip already-created schedules
+                        if source_schedule_id and result.get("id"):
+                            try:
+                                self.state.save_id_mapping(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    source_name=schedule_name,
+                                    target_name=schedule_name,
+                                )
+                                self.state.mark_completed(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    target_name=schedule_name,
+                                    source_name=schedule_name,
+                                )
+                                logger.debug(
+                                    "workflow_schedule_tracked",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                )
+                            except Exception as tracking_error:
+                                # Don't fail schedule import if tracking fails
+                                logger.warning(
+                                    "workflow_schedule_tracking_failed",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                    error=str(tracking_error),
+                                )
                     except Exception as e:
                         logger.error(
                             "workflow_schedule_import_failed",
