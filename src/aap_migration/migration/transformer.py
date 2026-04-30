@@ -1456,6 +1456,27 @@ class JobTemplateTransformer(DataTransformer):
                 data.pop("webhook_url", None)
                 data.pop("enable_webhook", None)
 
+        # Clean survey spec for import compatibility
+        # AAP 2.6 rejects "$encrypted$" as a reserved keyword for password defaults
+        if "survey_spec" in data and data["survey_spec"]:
+            survey_spec = data["survey_spec"]
+            if "spec" in survey_spec and isinstance(survey_spec["spec"], list):
+                for question in survey_spec["spec"]:
+                    # Remove $encrypted$ default from password fields
+                    # This is exported by AAP 2.5 but rejected by AAP 2.6
+                    if question.get("type") == "password":
+                        if question.get("default") == "$encrypted$":
+                            question["default"] = ""
+                            logger.debug(
+                                "survey_password_default_cleared",
+                                resource_type="job_templates",
+                                source_id=source_id,
+                                source_name=data.get("name"),
+                                variable=question.get("variable"),
+                                question_name=question.get("question_name"),
+                                reason="$encrypted$ is reserved keyword in target AAP",
+                            )
+
         return data
 
     @staticmethod
@@ -1628,6 +1649,27 @@ class WorkflowTransformer(DataTransformer):
                 data.pop("webhook_service", None)
                 data.pop("webhook_url", None)
                 data.pop("enable_webhook", None)
+
+        # Clean survey spec for import compatibility
+        # AAP 2.6 rejects "$encrypted$" as a reserved keyword for password defaults
+        if "survey_spec" in data and data["survey_spec"]:
+            survey_spec = data["survey_spec"]
+            if "spec" in survey_spec and isinstance(survey_spec["spec"], list):
+                for question in survey_spec["spec"]:
+                    # Remove $encrypted$ default from password fields
+                    # This is exported by AAP 2.5 but rejected by AAP 2.6
+                    if question.get("type") == "password":
+                        if question.get("default") == "$encrypted$":
+                            question["default"] = ""
+                            logger.debug(
+                                "survey_password_default_cleared",
+                                resource_type="workflow_job_templates",
+                                source_id=source_id,
+                                source_name=data.get("name"),
+                                variable=question.get("variable"),
+                                question_name=question.get("question_name"),
+                                reason="$encrypted$ is reserved keyword in target AAP",
+                            )
 
         return data
 
