@@ -17,6 +17,7 @@ from aap_migration.config import PerformanceConfig
 from aap_migration.migration.database import get_session
 from aap_migration.migration.models import MigrationProgress
 from aap_migration.migration.state import MigrationState
+from aap_migration.resources import PARENT_SCOPED_RESOURCES
 from aap_migration.utils.idempotency import compare_resources
 from aap_migration.utils.logging import get_logger
 
@@ -178,6 +179,8 @@ class ResourceImporter:
                     # For organization-scoped resources, check duplicates within same org only
                     # This prevents mapping resources with same name in different orgs to single target
                     organization_id = None
+                    parent_id = None
+                    parent_field = None
                     skip_duplicate_check = False
 
                     if resource_type in ORGANIZATION_SCOPED_RESOURCES:
@@ -197,6 +200,25 @@ class ResourceImporter:
                                 reason="organization_is_none",
                             )
 
+                    # For parent-scoped resources, check duplicates within same parent only
+                    # This prevents mapping resources with same name in different parents to single target
+                    elif resource_type in PARENT_SCOPED_RESOURCES:
+                        parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+                        parent_id = data.get(parent_field)
+
+                        # Skip duplicate detection if parent is None
+                        # Passing None would search globally, incorrectly matching resources from other parents
+                        if parent_id is None:
+                            skip_duplicate_check = True
+                            logger.debug(
+                                "skipping_duplicate_detection_no_parent",
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                name=resource_name,
+                                parent_field=parent_field,
+                                reason="parent_is_none",
+                            )
+
                     if skip_duplicate_check:
                         # Skip duplicate check - will attempt creation
                         # If duplicate exists, API will return 409/400 and we handle it below
@@ -206,6 +228,8 @@ class ResourceImporter:
                             resource_type,
                             resource_name,
                             organization_id=organization_id,
+                            parent_id=parent_id,
+                            parent_field=parent_field,
                         )
                     if existing:
                         logger.warning(
@@ -215,6 +239,8 @@ class ResourceImporter:
                             target_id=existing["id"],
                             name=resource_name,
                             organization_id=organization_id,
+                            parent_id=parent_id,
+                            parent_field=parent_field,
                             action="marking_as_skipped_duplicate",
                         )
                         # Mark as skipped with target_id (duplicate detection)
