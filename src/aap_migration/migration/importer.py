@@ -3105,15 +3105,50 @@ class CredentialImporter(ResourceImporter):
         data.pop("_encrypted_fields", None)
         data.pop("_needs_vault_lookup", None)
 
+        # Resolve dependencies BEFORE lookup to get target org/credential_type IDs
+        # This ensures we can search by the complete composite key
+        if resolve_dependencies:
+            data = await self._resolve_dependencies(resource_type, data)
+
         try:
-            # Find existing credential in target by name
-            results = await self.client.get("credentials/", params={"name": name})
+            # Build query params for exact match: (name, organization, credential_type)
+            # Credentials are unique by this composite key in AAP
+            query_params = {"name": name}
+
+            # Add organization to query if present
+            # Note: Some credentials may have organization=null (system/global credentials)
+            if "organization" in data and data["organization"] is not None:
+                query_params["organization"] = data["organization"]
+
+            # Add credential_type to query if present
+            if "credential_type" in data and data["credential_type"] is not None:
+                query_params["credential_type"] = data["credential_type"]
+
+            # Find existing credential in target by composite key
+            logger.debug(
+                "credential_lookup",
+                name=name,
+                source_id=source_id,
+                query_params=query_params,
+                message="Looking up credential by composite key (name, org, type)",
+            )
+            results = await self.client.get("credentials/", params=query_params)
             resources = results.get("results", [])
 
             if resources:
                 # Credential exists - PATCH it
                 target_id = resources[0]["id"]
                 is_managed = resources[0].get("managed", False)
+
+                logger.info(
+                    "credential_found_in_target",
+                    name=name,
+                    source_id=source_id,
+                    target_id=target_id,
+                    organization=data.get("organization"),
+                    credential_type=data.get("credential_type"),
+                    message="Found existing credential with matching name/org/type",
+                )
 
                 # Skip PATCH for managed (built-in) credentials - AAP doesn't allow modifications
                 if is_managed:
@@ -3142,11 +3177,8 @@ class CredentialImporter(ResourceImporter):
                     # Return skipped signal
                     return {"id": target_id, "name": name, "_skipped": True}
 
-                # Resolve dependencies
-                if resolve_dependencies:
-                    data = await self._resolve_dependencies(resource_type, data)
-
                 # Build PATCH payload (organization, description only)
+                # Note: Dependencies already resolved above before lookup
                 patch_data = {}
                 if data.get("organization"):
                     patch_data["organization"] = data["organization"]
@@ -3180,18 +3212,17 @@ class CredentialImporter(ResourceImporter):
                     "credential_creating",
                     name=name,
                     source_id=source_id,
-                    message="Creating new credential with temporary values",
+                    organization=data.get("organization"),
+                    credential_type=data.get("credential_type"),
+                    message="Creating new credential - no match found for name/org/type composite key",
                 )
 
-                # Resolve dependencies
-                if resolve_dependencies:
-                    data = await self._resolve_dependencies(resource_type, data)
-
+                # Dependencies already resolved above before lookup
                 # Create resource
                 result = await self.client.create_resource(
                     resource_type="credentials",
                     data=data,
-                    check_exists=False,  # We already checked
+                    check_exists=False,  # We already checked with composite key
                 )
 
                 target_id = result["id"]
