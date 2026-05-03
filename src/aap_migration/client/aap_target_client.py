@@ -249,6 +249,8 @@ class AAPTargetClient(BaseAPIClient):
         name: str,
         organization: str | None = None,
         organization_id: int | None = None,
+        parent_id: int | None = None,
+        parent_field: str | None = None,
     ) -> dict[str, Any] | None:
         """Find a resource by name.
 
@@ -257,6 +259,8 @@ class AAPTargetClient(BaseAPIClient):
             name: Resource name
             organization: Optional organization name to filter by
             organization_id: Optional organization ID to filter by (takes precedence over organization)
+            parent_id: Optional parent resource ID (for parent-scoped resources like inventory_sources)
+            parent_field: Parent field name (e.g., 'inventory', 'unified_job_template')
 
         Returns:
             Resource data if found, None otherwise
@@ -268,6 +272,10 @@ class AAPTargetClient(BaseAPIClient):
             params["organization"] = organization_id
         elif organization:
             params["organization__name"] = organization
+
+        # Filter by parent field (for parent-scoped resources)
+        if parent_id is not None and parent_field:
+            params[parent_field] = parent_id
 
         endpoint = f"{resource_type}/"
         response = await self.get(endpoint, params=params)

@@ -748,6 +748,65 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
                     lines.append("- Common warnings: notification templates not migrated, credentials missing")
                     lines.append("")
 
+            # Special check for credentials: detect duplicate target_id mappings
+            # This indicates the bug where multiple source credentials were mapped to same target
+            if stats["resource_type"] == "credentials" and stats["completed_count"] > 0:
+                with get_session(migration_state.database_url) as session:
+                    # Find target_ids with multiple source mappings
+                    duplicate_mappings_query = """
+                        SELECT target_id, COUNT(*) as mapping_count, GROUP_CONCAT(source_id) as source_ids
+                        FROM id_mappings
+                        WHERE resource_type = 'credentials'
+                        GROUP BY target_id
+                        HAVING mapping_count > 1
+                        ORDER BY mapping_count DESC
+                    """
+                    result = session.execute(duplicate_mappings_query)
+                    duplicate_mappings = result.fetchall()
+
+                if duplicate_mappings:
+                    total_affected = sum(count - 1 for _, count, _ in duplicate_mappings)
+                    lines.append(f"### ⚠️ CRITICAL: Duplicate Target Mappings Detected ({total_affected} credentials affected)")
+                    lines.append("")
+                    lines.append("**Problem:** Multiple source credentials were incorrectly mapped to the same target credential.")
+                    lines.append(f"This means **{total_affected} credentials were NOT created** in target AAP.")
+                    lines.append("")
+                    lines.append("**Root Cause:** Credential lookup bug - query only checked 'name' field, ignoring 'organization' and 'credential_type'.")
+                    lines.append("")
+                    lines.append("**Impact:**")
+                    lines.append("- Organizations are missing credentials they should have")
+                    lines.append("- Job templates/workflows using these credentials may fail")
+                    lines.append("- Multiple source credentials share same target credential (wrong organization)")
+                    lines.append("")
+
+                    lines.append("| Target ID | Source Count | Sample Source IDs | Organizations Affected |")
+                    lines.append("|-----------|--------------|-------------------|------------------------|")
+
+                    for target_id, mapping_count, source_ids_str in duplicate_mappings[:10]:  # Show top 10
+                        source_ids = source_ids_str.split(",")[:5]  # Show first 5 source IDs
+                        sample_ids = ", ".join(source_ids)
+                        if mapping_count > 5:
+                            sample_ids += f", ... (+{mapping_count - 5} more)"
+                        orgs_affected = mapping_count - 1  # One org got it, others are missing
+                        lines.append(f"| {target_id} | {mapping_count} | {sample_ids} | {orgs_affected} |")
+
+                    if len(duplicate_mappings) > 10:
+                        lines.append(f"| ... | ... | ... | ... |")
+                        lines.append(f"| **({len(duplicate_mappings) - 10} more)** | | | |")
+
+                    lines.append("")
+                    lines.append("**Recommended Actions:**")
+                    lines.append("1. **URGENT:** Apply the credential import bug fix (check with migration tool maintainer)")
+                    lines.append("2. Re-run credential import to create missing credentials")
+                    lines.append("3. Verify all organizations have their required credentials")
+                    lines.append("4. Test job templates/workflows after credential fix")
+                    lines.append("")
+                    lines.append("**Technical Details:**")
+                    lines.append("- See detailed list of affected credentials in separate analysis file")
+                    lines.append("- Bug affects credentials with same name but different organizations")
+                    lines.append("- Fix: Query by composite key (name, organization, credential_type)")
+                    lines.append("")
+
             if stats["discrepancy"] > 0:
                 lines.append(f"### Missing Resources (Discrepancy: {stats['discrepancy']})")
                 lines.append("")

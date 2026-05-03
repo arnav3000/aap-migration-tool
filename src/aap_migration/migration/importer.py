@@ -17,6 +17,7 @@ from aap_migration.config import PerformanceConfig
 from aap_migration.migration.database import get_session
 from aap_migration.migration.models import MigrationProgress
 from aap_migration.migration.state import MigrationState
+from aap_migration.resources import PARENT_SCOPED_RESOURCES
 from aap_migration.utils.idempotency import compare_resources
 from aap_migration.utils.logging import get_logger
 
@@ -178,6 +179,8 @@ class ResourceImporter:
                     # For organization-scoped resources, check duplicates within same org only
                     # This prevents mapping resources with same name in different orgs to single target
                     organization_id = None
+                    parent_id = None
+                    parent_field = None
                     skip_duplicate_check = False
 
                     if resource_type in ORGANIZATION_SCOPED_RESOURCES:
@@ -197,6 +200,25 @@ class ResourceImporter:
                                 reason="organization_is_none",
                             )
 
+                    # For parent-scoped resources, check duplicates within same parent only
+                    # This prevents mapping resources with same name in different parents to single target
+                    elif resource_type in PARENT_SCOPED_RESOURCES:
+                        parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+                        parent_id = data.get(parent_field)
+
+                        # Skip duplicate detection if parent is None
+                        # Passing None would search globally, incorrectly matching resources from other parents
+                        if parent_id is None:
+                            skip_duplicate_check = True
+                            logger.debug(
+                                "skipping_duplicate_detection_no_parent",
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                name=resource_name,
+                                parent_field=parent_field,
+                                reason="parent_is_none",
+                            )
+
                     if skip_duplicate_check:
                         # Skip duplicate check - will attempt creation
                         # If duplicate exists, API will return 409/400 and we handle it below
@@ -206,6 +228,8 @@ class ResourceImporter:
                             resource_type,
                             resource_name,
                             organization_id=organization_id,
+                            parent_id=parent_id,
+                            parent_field=parent_field,
                         )
                     if existing:
                         logger.warning(
@@ -215,6 +239,8 @@ class ResourceImporter:
                             target_id=existing["id"],
                             name=resource_name,
                             organization_id=organization_id,
+                            parent_id=parent_id,
+                            parent_field=parent_field,
                             action="marking_as_skipped_duplicate",
                         )
                         # Mark as skipped with target_id (duplicate detection)
@@ -1999,6 +2025,8 @@ class InventorySourceImporter(ResourceImporter):
 
                 for schedule in schedules:
                     schedule_name = schedule.get("name", "unknown")
+                    # Capture source schedule ID before it's removed (for database tracking)
+                    source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
                     schedule_to_import = {k: v for k, v in schedule.items() if k not in [
@@ -2025,6 +2053,40 @@ class InventorySourceImporter(ResourceImporter):
                             original_enabled=original_enabled,
                             imported_as_disabled=True,
                         )
+
+                        # Track schedule in database if source_id is available
+                        # This allows standalone schedule import to skip already-created schedules
+                        if source_schedule_id and result.get("id"):
+                            try:
+                                self.state.save_id_mapping(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    source_name=schedule_name,
+                                    target_name=schedule_name,
+                                )
+                                self.state.mark_completed(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    target_name=schedule_name,
+                                    source_name=schedule_name,
+                                )
+                                logger.debug(
+                                    "inventory_source_schedule_tracked",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                )
+                            except Exception as tracking_error:
+                                # Don't fail schedule import if tracking fails
+                                logger.warning(
+                                    "inventory_source_schedule_tracking_failed",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                    error=str(tracking_error),
+                                )
                     except Exception as e:
                         logger.error(
                             "inventory_source_schedule_import_failed",
@@ -3105,15 +3167,50 @@ class CredentialImporter(ResourceImporter):
         data.pop("_encrypted_fields", None)
         data.pop("_needs_vault_lookup", None)
 
+        # Resolve dependencies BEFORE lookup to get target org/credential_type IDs
+        # This ensures we can search by the complete composite key
+        if resolve_dependencies:
+            data = await self._resolve_dependencies(resource_type, data)
+
         try:
-            # Find existing credential in target by name
-            results = await self.client.get("credentials/", params={"name": name})
+            # Build query params for exact match: (name, organization, credential_type)
+            # Credentials are unique by this composite key in AAP
+            query_params = {"name": name}
+
+            # Add organization to query if present
+            # Note: Some credentials may have organization=null (system/global credentials)
+            if "organization" in data and data["organization"] is not None:
+                query_params["organization"] = data["organization"]
+
+            # Add credential_type to query if present
+            if "credential_type" in data and data["credential_type"] is not None:
+                query_params["credential_type"] = data["credential_type"]
+
+            # Find existing credential in target by composite key
+            logger.debug(
+                "credential_lookup",
+                name=name,
+                source_id=source_id,
+                query_params=query_params,
+                message="Looking up credential by composite key (name, org, type)",
+            )
+            results = await self.client.get("credentials/", params=query_params)
             resources = results.get("results", [])
 
             if resources:
                 # Credential exists - PATCH it
                 target_id = resources[0]["id"]
                 is_managed = resources[0].get("managed", False)
+
+                logger.info(
+                    "credential_found_in_target",
+                    name=name,
+                    source_id=source_id,
+                    target_id=target_id,
+                    organization=data.get("organization"),
+                    credential_type=data.get("credential_type"),
+                    message="Found existing credential with matching name/org/type",
+                )
 
                 # Skip PATCH for managed (built-in) credentials - AAP doesn't allow modifications
                 if is_managed:
@@ -3142,11 +3239,8 @@ class CredentialImporter(ResourceImporter):
                     # Return skipped signal
                     return {"id": target_id, "name": name, "_skipped": True}
 
-                # Resolve dependencies
-                if resolve_dependencies:
-                    data = await self._resolve_dependencies(resource_type, data)
-
                 # Build PATCH payload (organization, description only)
+                # Note: Dependencies already resolved above before lookup
                 patch_data = {}
                 if data.get("organization"):
                     patch_data["organization"] = data["organization"]
@@ -3180,18 +3274,17 @@ class CredentialImporter(ResourceImporter):
                     "credential_creating",
                     name=name,
                     source_id=source_id,
-                    message="Creating new credential with temporary values",
+                    organization=data.get("organization"),
+                    credential_type=data.get("credential_type"),
+                    message="Creating new credential - no match found for name/org/type composite key",
                 )
 
-                # Resolve dependencies
-                if resolve_dependencies:
-                    data = await self._resolve_dependencies(resource_type, data)
-
+                # Dependencies already resolved above before lookup
                 # Create resource
                 result = await self.client.create_resource(
                     resource_type="credentials",
                     data=data,
-                    check_exists=False,  # We already checked
+                    check_exists=False,  # We already checked with composite key
                 )
 
                 target_id = result["id"]
@@ -3472,6 +3565,8 @@ class ProjectImporter(ResourceImporter):
 
                 for schedule in schedules:
                     schedule_name = schedule.get("name", "unknown")
+                    # Capture source schedule ID before it's removed (for database tracking)
+                    source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
                     schedule_to_import = {k: v for k, v in schedule.items() if k not in [
@@ -3498,6 +3593,40 @@ class ProjectImporter(ResourceImporter):
                             original_enabled=original_enabled,
                             imported_as_disabled=True,
                         )
+
+                        # Track schedule in database if source_id is available
+                        # This allows standalone schedule import to skip already-created schedules
+                        if source_schedule_id and result.get("id"):
+                            try:
+                                self.state.save_id_mapping(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    source_name=schedule_name,
+                                    target_name=schedule_name,
+                                )
+                                self.state.mark_completed(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    target_name=schedule_name,
+                                    source_name=schedule_name,
+                                )
+                                logger.debug(
+                                    "project_schedule_tracked",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                )
+                            except Exception as tracking_error:
+                                # Don't fail schedule import if tracking fails
+                                logger.warning(
+                                    "project_schedule_tracking_failed",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                    error=str(tracking_error),
+                                )
                     except Exception as e:
                         logger.error(
                             "project_schedule_import_failed",
@@ -3698,6 +3827,7 @@ class JobTemplateImporter(ResourceImporter):
         failed_count = 0
         skipped_count = 0
         templates_with_schedules = []  # Collect templates that have schedules to create
+        templates_with_surveys = []  # Collect templates that have surveys to create
         templates_with_notifications = []  # Collect templates that have notification associations
 
         for template in templates:
@@ -3708,6 +3838,9 @@ class JobTemplateImporter(ResourceImporter):
 
             # Extract schedules for separate import
             schedules = template.pop("schedules", None)
+
+            # Extract survey spec for separate import (must be POSTed after template creation)
+            survey_spec = template.pop("survey_spec", None)
 
             # Extract notification associations for separate import
             notifications = template.pop("notifications", None)
@@ -3748,6 +3881,15 @@ class JobTemplateImporter(ResourceImporter):
                             "template_id": target_id,
                             "template_name": result.get("name", "unknown"),
                             "schedules": schedules,
+                        })
+
+                    # Store survey spec for later import
+                    if survey_spec:
+                        templates_with_surveys.append({
+                            "source_template_id": source_id,
+                            "template_id": target_id,
+                            "template_name": result.get("name", "unknown"),
+                            "survey_spec": survey_spec,
                         })
 
                     # Store notification associations for later import
@@ -3799,6 +3941,8 @@ class JobTemplateImporter(ResourceImporter):
 
                 for schedule in schedules:
                     schedule_name = schedule.get("name", "unknown")
+                    # Capture source schedule ID before it's removed (for database tracking)
+                    source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
                     schedule_to_import = {k: v for k, v in schedule.items() if k not in [
@@ -3825,6 +3969,40 @@ class JobTemplateImporter(ResourceImporter):
                             original_enabled=original_enabled,
                             imported_as_disabled=True,
                         )
+
+                        # Track schedule in database if source_id is available
+                        # This allows standalone schedule import to skip already-created schedules
+                        if source_schedule_id and result.get("id"):
+                            try:
+                                self.state.save_id_mapping(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    source_name=schedule_name,
+                                    target_name=schedule_name,
+                                )
+                                self.state.mark_completed(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    target_name=schedule_name,
+                                    source_name=schedule_name,
+                                )
+                                logger.debug(
+                                    "job_template_schedule_tracked",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                )
+                            except Exception as tracking_error:
+                                # Don't fail schedule import if tracking fails
+                                logger.warning(
+                                    "job_template_schedule_tracking_failed",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                    error=str(tracking_error),
+                                )
                     except Exception as e:
                         logger.error(
                             "job_template_schedule_import_failed",
@@ -3833,6 +4011,38 @@ class JobTemplateImporter(ResourceImporter):
                             schedule_name=schedule_name,
                             error=str(e),
                         )
+
+        # Import surveys
+        if templates_with_surveys:
+            logger.info(
+                "importing_job_template_surveys",
+                total_surveys=len(templates_with_surveys),
+            )
+
+            for survey_data in templates_with_surveys:
+                source_template_id = survey_data["source_template_id"]
+                template_id = survey_data["template_id"]
+                template_name = survey_data["template_name"]
+                survey_spec = survey_data["survey_spec"]
+
+                try:
+                    await self.client.post(
+                        f"job_templates/{template_id}/survey_spec/",
+                        json_data=survey_spec,
+                    )
+                    logger.info(
+                        "job_template_survey_imported",
+                        template_id=template_id,
+                        template_name=template_name,
+                        survey_questions=len(survey_spec.get("spec", [])),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "job_template_survey_import_failed",
+                        template_id=template_id,
+                        template_name=template_name,
+                        error=str(e),
+                    )
 
         # Associate notification templates
         if templates_with_notifications:
@@ -4399,6 +4609,8 @@ class WorkflowImporter(ResourceImporter):
 
                 for schedule in schedules:
                     schedule_name = schedule.get("name", "unknown")
+                    # Capture source schedule ID before it's removed (for database tracking)
+                    source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
                     schedule_to_import = {k: v for k, v in schedule.items() if k not in [
@@ -4425,6 +4637,40 @@ class WorkflowImporter(ResourceImporter):
                             original_enabled=original_enabled,
                             imported_as_disabled=True,
                         )
+
+                        # Track schedule in database if source_id is available
+                        # This allows standalone schedule import to skip already-created schedules
+                        if source_schedule_id and result.get("id"):
+                            try:
+                                self.state.save_id_mapping(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    source_name=schedule_name,
+                                    target_name=schedule_name,
+                                )
+                                self.state.mark_completed(
+                                    resource_type="schedules",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    target_name=schedule_name,
+                                    source_name=schedule_name,
+                                )
+                                logger.debug(
+                                    "workflow_schedule_tracked",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                )
+                            except Exception as tracking_error:
+                                # Don't fail schedule import if tracking fails
+                                logger.warning(
+                                    "workflow_schedule_tracking_failed",
+                                    source_id=source_schedule_id,
+                                    target_id=result.get("id"),
+                                    schedule_name=schedule_name,
+                                    error=str(tracking_error),
+                                )
                     except Exception as e:
                         logger.error(
                             "workflow_schedule_import_failed",

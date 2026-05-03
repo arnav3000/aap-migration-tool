@@ -1592,6 +1592,31 @@ class JobTemplateExporter(ResourceExporter):
                     notification_count=total_notifs,
                 )
 
+            # Fetch survey spec regardless of enabled state
+            # Disabled surveys still have definitions that should be preserved
+            try:
+                survey_spec = await self.client.get(
+                    f"job_templates/{template['id']}/survey_spec/"
+                )
+                # Only store if survey has actual questions
+                if survey_spec and survey_spec.get("spec"):
+                    template["survey_spec"] = survey_spec
+                    logger.debug(
+                        "job_template_survey_fetched",
+                        job_template_id=template["id"],
+                        survey_enabled=template.get("survey_enabled"),
+                        survey_questions=len(survey_spec.get("spec", [])),
+                    )
+            except Exception as e:
+                # 404 is normal if no survey defined, don't warn
+                if "404" not in str(e).lower():
+                    logger.warning(
+                        "failed_to_fetch_job_template_survey",
+                        job_template_id=template["id"],
+                        survey_enabled=template.get("survey_enabled"),
+                        error=str(e),
+                    )
+
             yield template
 
     async def export_parallel(
@@ -1692,6 +1717,31 @@ class JobTemplateExporter(ResourceExporter):
                     notification_count=total_notifs,
                 )
 
+            # Fetch survey spec regardless of enabled state
+            # Disabled surveys still have definitions that should be preserved
+            try:
+                survey_spec = await self.client.get(
+                    f"job_templates/{template['id']}/survey_spec/"
+                )
+                # Only store if survey has actual questions
+                if survey_spec and survey_spec.get("spec"):
+                    template["survey_spec"] = survey_spec
+                    logger.debug(
+                        "job_template_survey_fetched",
+                        job_template_id=template["id"],
+                        survey_enabled=template.get("survey_enabled"),
+                        survey_questions=len(survey_spec.get("spec", [])),
+                    )
+            except Exception as e:
+                # 404 is normal if no survey defined, don't warn
+                if "404" not in str(e).lower():
+                    logger.warning(
+                        "failed_to_fetch_job_template_survey",
+                        job_template_id=template["id"],
+                        survey_enabled=template.get("survey_enabled"),
+                        error=str(e),
+                    )
+
             yield template
 
 
@@ -1738,22 +1788,28 @@ class WorkflowExporter(ResourceExporter):
                     )
                     workflow["nodes"] = []
 
-            # Fetch survey spec if survey is enabled
-            if workflow.get("survey_enabled"):
-                try:
-                    survey_spec = await self.client.get(
-                        f"workflow_job_templates/{workflow['id']}/survey_spec/"
-                    )
+            # Fetch survey spec regardless of enabled state
+            # Disabled surveys still have definitions that should be preserved
+            try:
+                survey_spec = await self.client.get(
+                    f"workflow_job_templates/{workflow['id']}/survey_spec/"
+                )
+                # Only store if survey has actual questions
+                if survey_spec and survey_spec.get("spec"):
                     workflow["survey_spec"] = survey_spec
                     logger.debug(
                         "workflow_survey_fetched",
                         workflow_id=workflow["id"],
+                        survey_enabled=workflow.get("survey_enabled"),
                         survey_questions=len(survey_spec.get("spec", [])),
                     )
-                except Exception as e:
+            except Exception as e:
+                # 404 is normal if no survey defined, don't warn
+                if "404" not in str(e).lower():
                     logger.warning(
                         "failed_to_fetch_workflow_survey",
                         workflow_id=workflow["id"],
+                        survey_enabled=workflow.get("survey_enabled"),
                         error=str(e),
                     )
 
@@ -1858,22 +1914,28 @@ class WorkflowExporter(ResourceExporter):
                 )
                 workflow["nodes"] = []
 
-            # Fetch survey spec if survey is enabled
-            if workflow.get("survey_enabled"):
-                try:
-                    survey_spec = await self.client.get(
-                        f"workflow_job_templates/{workflow['id']}/survey_spec/"
-                    )
+            # Fetch survey spec regardless of enabled state
+            # Disabled surveys still have definitions that should be preserved
+            try:
+                survey_spec = await self.client.get(
+                    f"workflow_job_templates/{workflow['id']}/survey_spec/"
+                )
+                # Only store if survey has actual questions
+                if survey_spec and survey_spec.get("spec"):
                     workflow["survey_spec"] = survey_spec
                     logger.debug(
                         "workflow_survey_fetched",
                         workflow_id=workflow["id"],
+                        survey_enabled=workflow.get("survey_enabled"),
                         survey_questions=len(survey_spec.get("spec", [])),
                     )
-                except Exception as e:
+            except Exception as e:
+                # 404 is normal if no survey defined, don't warn
+                if "404" not in str(e).lower():
                     logger.warning(
                         "failed_to_fetch_workflow_survey",
                         workflow_id=workflow["id"],
+                        survey_enabled=workflow.get("survey_enabled"),
                         error=str(e),
                     )
 
