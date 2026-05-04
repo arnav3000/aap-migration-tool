@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import click
+from sqlalchemy import text
 
 from aap_migration.cli.context import MigrationContext
 from aap_migration.cli.decorators import handle_errors, pass_context, requires_config
@@ -753,14 +754,14 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
             if stats["resource_type"] == "credentials" and stats["completed_count"] > 0:
                 with get_session(migration_state.database_url) as session:
                     # Find target_ids with multiple source mappings
-                    duplicate_mappings_query = """
+                    duplicate_mappings_query = text("""
                         SELECT target_id, COUNT(*) as mapping_count, GROUP_CONCAT(source_id) as source_ids
                         FROM id_mappings
                         WHERE resource_type = 'credentials'
                         GROUP BY target_id
                         HAVING mapping_count > 1
                         ORDER BY mapping_count DESC
-                    """
+                    """)
                     result = session.execute(duplicate_mappings_query)
                     duplicate_mappings = result.fetchall()
 
