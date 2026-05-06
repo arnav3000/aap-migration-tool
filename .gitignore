@@ -298,3 +298,46 @@ test_creds_export/
 test_prep/
 
 container/diagnose_migration.sh
+
+# Documentation and analysis files (code only in repo)
+docs/*.md
+!docs/README.md
+*.md
+!README.md
+!CHANGELOG.md
+!CONTRIBUTING.md
+!LICENSE.md
+
+# Analysis and planning documents
+AAP24_AUTH_IMPLEMENTATION_STEPS.md
+AUTOMATION_HUB_*.md
+AI_TEST_*.md
+BUG_*.md
+COMPREHENSIVE_*.md
+CREATE_*.md
+DESIGN_*.md
+ENDPOINT_*.md
+FAILURES_*.md
+FINAL_*.md
+FIXES_*.md
+FK_*.md
+ORGANIZATION_*.md
+RELEASE_*.md
+SECURITY-*.md
+TEST_*.md
+WORKFLOW_*.md
+
+# Shell scripts in root (except git hooks)
+/*.sh
+!.git/hooks/*.sh
+
+# Container test directories
+container/cli-commands-test/
+container/ah-test/
+
+# Token files
+*token*.json
+magnus-token.json
+
+# Python cleanup scripts in root
+/*.py

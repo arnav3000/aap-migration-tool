@@ -552,6 +552,37 @@ class TransformConfig(BaseModel):
     )
 
 
+class AutomationHubInstanceConfig(BaseModel):
+    """Configuration for an Automation Hub instance (source or target)."""
+
+    url: str = Field(..., description="Automation Hub URL")
+    token: str | None = Field(default=None, description="Galaxy API token (AAP 2.6)")
+    username: str | None = Field(default=None, description="Username for basic auth (AAP 2.4)")
+    password: str | None = Field(default=None, description="Password for basic auth (AAP 2.4)")
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Validate and normalize URL."""
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("URL must start with http:// or https://")
+        return v.rstrip("/")
+
+
+class AutomationHubConfig(BaseModel):
+    """Automation Hub migration configuration."""
+
+    source: AutomationHubInstanceConfig = Field(..., description="Source Hub configuration")
+    target: AutomationHubInstanceConfig = Field(..., description="Target Hub configuration")
+    verify_ssl: bool = Field(default=True, description="Verify SSL certificates")
+    download_artifacts: bool = Field(
+        default=True, description="Download collection artifacts during export"
+    )
+    skip_existing: bool = Field(
+        default=True, description="Skip resources that already exist on target"
+    )
+
+
 class MigrationConfig(BaseSettings):
     """Main migration configuration."""
 
@@ -568,6 +599,11 @@ class MigrationConfig(BaseSettings):
 
     # Vault (optional)
     vault: VaultConfig | None = Field(default=None, description="Vault configuration")
+
+    # Automation Hub (optional)
+    automation_hub: AutomationHubConfig | None = Field(
+        default=None, description="Automation Hub migration configuration"
+    )
 
     # Paths
     paths: PathConfig = Field(default_factory=PathConfig, description="Path configuration")

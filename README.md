@@ -130,14 +130,14 @@ podman exec -it aap-bridge bash
 aap-bridge --help
 ```
 
-📖 **For detailed container setup and deployment options**, see the [Container Deployment Guide](https://github.com/arnav3000/aap-migration-tool/blob/main/container/README.md)
+📖 **For detailed container setup and deployment options**, see the [Container Deployment Guide](https://github.com/arnav3000/aap-bridge-fork/blob/add-reporting-for-missing-items/container/README.md)
 
 #### Option 2: Local Python Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/arnav3000/aap-migration-tool.git
-cd aap-migration-tool
+git clone https://github.com/arnav3000/aap-bridge-fork.git
+cd aap-bridge-fork
 
 # Create virtual environment (using uv)
 uv venv --seed --python 3.12
