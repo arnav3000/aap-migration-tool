@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Convenience wrapper for test selection script
+# Usage: ./test-selector [args...]
+#
+# Examples:
+#   ./test-selector                    # Check current changes
+#   ./test-selector --commit abc123    # Check specific commit
+#   ./test-selector --base main        # Check against main branch
+
+python3 tests/select_tests.py "$@"

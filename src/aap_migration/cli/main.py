@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 
 from aap_migration import __version__
 from aap_migration.cli.commands import analyze_dependencies as analyze_dependencies_commands
-from aap_migration.cli.commands import automation_hub as automation_hub_commands
 from aap_migration.cli.commands import cleanup as cleanup_commands
 from aap_migration.cli.commands import config as config_commands
 from aap_migration.cli.commands import credentials as credentials_commands
@@ -124,7 +123,6 @@ cli.add_command(credentials_commands.credentials)
 cli.add_command(migrate_commands.migrate)
 cli.add_command(retry_commands.retry_group, name="retry")
 cli.add_command(state_commands.state)
-cli.add_command(automation_hub_commands.hub)
 
 # Register standalone commands
 cli.add_command(analyze_dependencies_commands.analyze_dependencies_cmd)
