@@ -201,9 +201,6 @@ schemas/
 xformed/
 sql/
 tests/
-!tests/component_mapping.py
-!tests/select_tests.py
-!tests/scripts/
 migrations/
 scripts/
 
@@ -301,3 +298,5 @@ test_creds_export/
 test_prep/
 
 container/diagnose_migration.sh
+org.txt
+.env.org-backup

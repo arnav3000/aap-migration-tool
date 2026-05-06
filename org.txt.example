@@ -1,0 +1,16 @@
+# Organization Token Mapping
+#
+# Format: organization_name=api_token
+#
+# Example:
+# org1=AbCdEf123456789
+# org2=XyZ987654321abc
+#
+# Usage:
+#   cp org.txt.example org.txt
+#   Edit org.txt with your organization names and tokens
+#   Run: ./org-migration.sh --organization org1 migrate -r organizations
+
+# Add your organizations below
+# org1=YOUR_TOKEN_HERE
+# org2=YOUR_TOKEN_HERE
