@@ -1,0 +1,114 @@
+---
+- name: Create Organizations, Users, and Teams
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    - name: Create Organizations
+      awx.awx.organization:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Engineering
+          description: Software development and engineering teams
+        - name: Operations
+          description: Infrastructure and operations teams
+        - name: QA
+          description: Quality assurance and testing teams
+      tags: [organizations]
+
+    - name: Create Users
+      awx.awx.user:
+        username: "{{ item.username }}"
+        password: "{{ item.password }}"
+        email: "{{ item.email }}"
+        first_name: "{{ item.first_name }}"
+        last_name: "{{ item.last_name }}"
+        is_superuser: "{{ item.superuser | default(false) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - username: john_dev
+          password: password123
+          email: john@example.com
+          first_name: John
+          last_name: Developer
+        - username: jane_ops
+          password: password123
+          email: jane@example.com
+          first_name: Jane
+          last_name: Operations
+        - username: bob_qa
+          password: password123
+          email: bob@example.com
+          first_name: Bob
+          last_name: QA
+        - username: alice_admin
+          password: password123
+          email: alice@example.com
+          first_name: Alice
+          last_name: Admin
+          superuser: true
+      tags: [users]
+
+    - name: Create Teams
+      awx.awx.team:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        organization: "{{ item.organization }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Backend Developers
+          description: Backend development team
+          organization: Engineering
+        - name: Frontend Developers
+          description: Frontend development team
+          organization: Engineering
+        - name: Infrastructure Team
+          description: Infrastructure and platform team
+          organization: Operations
+        - name: QA Automation Team
+          description: Automated testing team
+          organization: QA
+      tags: [teams]
+
+    - name: Add Users to Teams
+      awx.awx.role:
+        user: "{{ item.user }}"
+        target_team: "{{ item.team }}"
+        role: "{{ item.role }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - user: john_dev
+          team: Backend Developers
+          role: member
+        - user: jane_ops
+          team: Infrastructure Team
+          role: admin
+        - user: bob_qa
+          team: QA Automation Team
+          role: member
+      tags: [team_membership]

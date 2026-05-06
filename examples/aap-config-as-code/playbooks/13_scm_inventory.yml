@@ -1,0 +1,208 @@
+---
+- name: Create Inventory with SCM Source
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    # Create a project that contains inventory files
+    - name: Create Project for Inventory Source
+      awx.awx.project:
+        name: "Ansible Inventory Repository"
+        description: "Git repository containing dynamic inventory files"
+        organization: Engineering
+        scm_type: git
+        scm_url: "https://github.com/ansible/ansible-examples"
+        scm_branch: master
+        scm_update_on_launch: false
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: inventory_project
+      tags: [project]
+
+    # Wait for project sync
+    - name: Wait for project to sync
+      ansible.builtin.pause:
+        seconds: 5
+      tags: [project]
+
+    # Create inventory that will use SCM source
+    - name: Create Inventory with SCM Source
+      awx.awx.inventory:
+        name: "Dynamic SCM Inventory"
+        description: "Inventory sourced from Git repository"
+        organization: Engineering
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: scm_inventory
+      tags: [inventory]
+
+    # Add SCM inventory source
+    - name: Add SCM Inventory Source
+      awx.awx.inventory_source:
+        name: "Git Inventory Source"
+        description: "Pulls inventory from Git repository"
+        inventory: "Dynamic SCM Inventory"
+        source: scm
+        source_project: "Ansible Inventory Repository"
+        source_path: "inventory"
+        update_on_launch: true
+        update_cache_timeout: 0
+        overwrite: true
+        overwrite_vars: true
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: inventory_source
+      tags: [inventory_source]
+
+    # Create another inventory with constructed inventory source
+    - name: Create Constructed Inventory
+      awx.awx.inventory:
+        name: "Constructed Plugin Inventory"
+        description: "Inventory using constructed plugin"
+        organization: Engineering
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      tags: [inventory]
+
+    # Add constructed inventory source
+    - name: Add Constructed Inventory Source
+      awx.awx.inventory_source:
+        name: "Constructed Source"
+        description: "Constructed inventory plugin"
+        inventory: "Constructed Plugin Inventory"
+        source: constructed
+        source_vars:
+          plugin: constructed
+          strict: false
+          use_vars_plugins: true
+          groups:
+            webservers: "'web' in inventory_hostname"
+            dbservers: "'db' in inventory_hostname"
+        update_on_launch: false
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: constructed_source
+      ignore_errors: true
+      tags: [inventory_source]
+
+    # Create inventory with file-based source from project
+    - name: Create File-based Inventory from Project
+      awx.awx.inventory:
+        name: "Project File Inventory"
+        description: "Inventory from static file in project"
+        organization: Engineering
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      tags: [inventory]
+
+    # Add file inventory source from project
+    - name: Add File Inventory Source from Project
+      awx.awx.inventory_source:
+        name: "Project Inventory File Source"
+        description: "Static inventory file from project"
+        inventory: "Project File Inventory"
+        source: scm
+        source_project: "Ansible Inventory Repository"
+        source_path: "hosts"
+        update_on_launch: true
+        update_cache_timeout: 0
+        overwrite: true
+        overwrite_vars: false
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: file_source
+      ignore_errors: true
+      tags: [inventory_source]
+
+    # Trigger sync of inventory sources
+    - name: Get Inventory Source ID for sync
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/inventory_sources/?name=Git%20Inventory%20Source"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: source_info
+      tags: [sync]
+
+    - name: Trigger Inventory Source Sync
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/inventory_sources/{{ source_info.json.results[0].id }}/update/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 202]
+      when: source_info.json.count > 0
+      ignore_errors: true
+      register: sync_result
+      tags: [sync]
+
+    - name: Display Summary
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "✓ SCM-based Inventories created successfully!"
+          - ""
+          - "Summary:"
+          - "  Project Created:"
+          - "    - Ansible Inventory Repository (https://github.com/ansible/ansible-examples)"
+          - ""
+          - "  Inventories with SCM Sources:"
+          - "    1. Dynamic SCM Inventory"
+          - "       - Source: Git Inventory Source"
+          - "       - Project: Ansible Inventory Repository"
+          - "       - Path: inventory"
+          - "       - Update on launch: Yes"
+          - ""
+          - "    2. Project File Inventory"
+          - "       - Source: Project Inventory File Source"
+          - "       - Project: Ansible Inventory Repository"
+          - "       - Path: hosts"
+          - "       - Update on launch: Yes"
+          - ""
+          - "    3. Constructed Plugin Inventory"
+          - "       - Source: Constructed plugin"
+          - "       - Dynamic groups based on hostname patterns"
+          - ""
+          - "  Features:"
+          - "    - Inventories auto-update from Git on job launch"
+          - "    - Can sync manually via AAP UI"
+          - "    - Supports inventory files, scripts, and plugins"
+          - ""
+          - "Next steps:"
+          - "  1. View in AAP UI: Resources → Inventories → Dynamic SCM Inventory"
+          - "  2. Sync inventory: Click 'Sync' button in inventory sources tab"
+          - "  3. Use in job templates with dynamic updates"

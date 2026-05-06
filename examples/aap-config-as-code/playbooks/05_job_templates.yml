@@ -1,0 +1,220 @@
+---
+- name: Create Job Templates
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    - name: Create Job Templates
+      awx.awx.job_template:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        job_type: "{{ item.job_type | default('run') }}"
+        inventory: "{{ item.inventory }}"
+        project: "{{ item.project }}"
+        playbook: "{{ item.playbook }}"
+        credentials: "{{ item.credentials | default([]) }}"
+        verbosity: "{{ item.verbosity | default(0) }}"
+        ask_variables_on_launch: "{{ item.ask_variables_on_launch | default(false) }}"
+        ask_limit_on_launch: "{{ item.ask_limit_on_launch | default(false) }}"
+        ask_tags_on_launch: "{{ item.ask_tags_on_launch | default(false) }}"
+        ask_skip_tags_on_launch: "{{ item.ask_skip_tags_on_launch | default(false) }}"
+        ask_credential_on_launch: "{{ item.ask_credential_on_launch | default(false) }}"
+        extra_vars: "{{ item.extra_vars | default(omit) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        # Development Templates
+        - name: Deploy Web Application - Dev
+          description: Deploy web application to development
+          inventory: Development Servers
+          project: Web Application Deployment
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Dev SSH Key
+          extra_vars:
+            env: development
+
+        - name: Configure Database - Dev
+          description: Configure database servers in development
+          inventory: Development Servers
+          project: Database Management
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Dev SSH Key
+
+        - name: Run Health Check - Dev
+          description: Health check for development servers
+          inventory: Development Servers
+          project: Infrastructure as Code
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Dev SSH Key
+          ask_limit_on_launch: true
+
+        # Production Templates
+        - name: Deploy Web Application - Prod
+          description: Deploy web application to production
+          inventory: Production Servers
+          project: Web Application Deployment
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+          extra_vars:
+            env: production
+          ask_variables_on_launch: true
+
+        - name: Configure Database - Prod
+          description: Configure production database servers
+          inventory: Production Servers
+          project: Database Management
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+
+        - name: Backup Database - Prod
+          description: Backup production databases
+          inventory: Production Servers
+          project: Backup and Recovery
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+          extra_vars:
+            backup_destination: /backups
+            retention_days: 30
+
+        - name: Security Scan - Prod
+          description: Run security compliance scan
+          inventory: Production Servers
+          project: Security Compliance
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+
+        # QA Templates
+        - name: Deploy Test Environment
+          description: Deploy complete QA test environment
+          inventory: QA Servers
+          project: Web Application Deployment
+          playbook: lamp_simple/site.yml
+          credentials:
+            - QA SSH Key
+          extra_vars:
+            env: qa
+
+        - name: Run Integration Tests
+          description: Execute integration test suite
+          inventory: QA Servers
+          project: Security Compliance
+          playbook: lamp_simple/site.yml
+          credentials:
+            - QA SSH Key
+
+        # Cloud Templates
+        - name: Provision AWS Resources
+          description: Provision cloud infrastructure on AWS
+          inventory: Cloud Infrastructure
+          project: Cloud Provisioning
+          playbook: lamp_simple/site.yml
+          credentials:
+            - AWS Development Account
+            - Dev SSH Key
+
+        - name: Configure Cloud Instances
+          description: Configure cloud-based instances
+          inventory: Cloud Infrastructure
+          project: Infrastructure as Code
+          playbook: lamp_simple/site.yml
+          credentials:
+            - AWS Development Account
+            - Dev SSH Key
+
+        # Infrastructure Templates
+        - name: Install Monitoring Stack
+          description: Deploy monitoring and logging infrastructure
+          inventory: Production Servers
+          project: Monitoring and Logging
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+
+        - name: Update System Packages
+          description: Update all system packages
+          inventory: Production Servers
+          project: Infrastructure as Code
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+          ask_limit_on_launch: true
+
+        - name: Configure Network Devices
+          description: Configure network switches and routers
+          inventory: Network Devices
+          project: Network Automation
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Network Devices Credential
+
+        # CI/CD Templates
+        - name: Build and Deploy Pipeline
+          description: Full CI/CD pipeline execution
+          inventory: Development Servers
+          project: CI/CD Pipeline
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Dev SSH Key
+            - GitHub Credentials
+          ask_variables_on_launch: true
+
+        - name: Rollback Deployment
+          description: Rollback to previous deployment version
+          inventory: Production Servers
+          project: Web Application Deployment
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+          ask_variables_on_launch: true
+
+        # Maintenance Templates
+        - name: Restart Services
+          description: Restart application services
+          inventory: Production Servers
+          project: Infrastructure as Code
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+          ask_limit_on_launch: true
+          ask_tags_on_launch: true
+
+        - name: Clean Temp Files
+          description: Clean temporary files and logs
+          inventory: Production Servers
+          project: Infrastructure as Code
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+
+        # Container Templates
+        - name: Deploy Container Platform
+          description: Deploy and configure container orchestration
+          inventory: Production Servers
+          project: Container Platform
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+
+        - name: Scale Container Services
+          description: Scale container services up or down
+          inventory: Production Servers
+          project: Container Platform
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Prod SSH Key
+          ask_variables_on_launch: true
+      tags: [job_templates]

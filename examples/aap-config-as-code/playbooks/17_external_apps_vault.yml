@@ -1,0 +1,542 @@
+---
+- name: Create External Applications and HashiCorp Vault Integration
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    # Create OAuth2 Applications for external monitoring systems
+    - name: Create OAuth2 Application for Prometheus
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/applications/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "Prometheus Monitoring"
+          description: "OAuth2 application for Prometheus to query AAP metrics and job status"
+          organization: 1
+          client_type: "confidential"
+          authorization_grant_type: "authorization-code"
+          redirect_uris: "https://prometheus.example.com/oauth/callback"
+          skip_authorization: false
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      register: prometheus_app
+      ignore_errors: true
+      tags: [oauth_apps]
+
+    - name: Create OAuth2 Application for Grafana
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/applications/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "Grafana Dashboard"
+          description: "OAuth2 application for Grafana to display AAP metrics and dashboards"
+          organization: 1
+          client_type: "confidential"
+          authorization_grant_type: "authorization-code"
+          redirect_uris: "https://grafana.example.com/login/generic_oauth\nhttps://grafana.example.com/oauth/callback"
+          skip_authorization: false
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      register: grafana_app
+      ignore_errors: true
+      tags: [oauth_apps]
+
+    - name: Create OAuth2 Application for Splunk
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/applications/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "Splunk Log Aggregation"
+          description: "OAuth2 application for Splunk to collect AAP logs and events"
+          organization: 1
+          client_type: "confidential"
+          authorization_grant_type: "client-credentials"
+          redirect_uris: ""
+          skip_authorization: true
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      register: splunk_app
+      ignore_errors: true
+      tags: [oauth_apps]
+
+    - name: Create OAuth2 Application for Datadog
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/applications/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "Datadog APM"
+          description: "OAuth2 application for Datadog application performance monitoring"
+          organization: 1
+          client_type: "confidential"
+          authorization_grant_type: "client-credentials"
+          redirect_uris: ""
+          skip_authorization: true
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      register: datadog_app
+      ignore_errors: true
+      tags: [oauth_apps]
+
+    - name: Create OAuth2 Application for Custom Monitoring
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/applications/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "Custom Monitoring System"
+          description: "OAuth2 application for custom internal monitoring platform"
+          organization: 1
+          client_type: "public"
+          authorization_grant_type: "password"
+          redirect_uris: ""
+          skip_authorization: true
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      register: custom_monitoring_app
+      ignore_errors: true
+      tags: [oauth_apps]
+
+    # Get the created applications to retrieve client IDs and secrets
+    - name: Get OAuth2 Applications
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/applications/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: oauth_apps
+      tags: [oauth_apps]
+
+    # Create OAuth2 Access Tokens for applications
+    - name: Create OAuth2 Token for Prometheus
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/tokens/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          description: "Prometheus API access token"
+          application: "{{ prometheus_app.json.id }}"
+          scope: "read"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      when: prometheus_app.json is defined and prometheus_app.json.id is defined
+      register: prometheus_token
+      ignore_errors: true
+      tags: [oauth_tokens]
+
+    - name: Create OAuth2 Token for Grafana
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/tokens/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          description: "Grafana API access token"
+          application: "{{ grafana_app.json.id }}"
+          scope: "read"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      when: grafana_app.json is defined and grafana_app.json.id is defined
+      register: grafana_token
+      ignore_errors: true
+      tags: [oauth_tokens]
+
+    # Create HashiCorp Vault Credential
+    - name: Create HashiCorp Vault Credential
+      awx.awx.credential:
+        name: "Production HashiCorp Vault"
+        description: "HashiCorp Vault server for secret management and credential injection"
+        organization: "IT Operations"
+        credential_type: "HashiCorp Vault Secret Lookup"
+        inputs:
+          url: "https://vault.example.com:8200"
+          token: "YOUR_VAULT_TOKEN_HERE"
+          cacert: |
+            -----BEGIN CERTIFICATE-----
+            MIIDXTCCAkWgAwIBAgIJAKJ5pVqvLxGWMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
+            BAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX
+            aWRnaXRzIFB0eSBMdGQwHhcNMjQwMTAxMDAwMDAwWhcNMjUwMTAxMDAwMDAwWjBF
+            MQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50
+            ZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB
+            CgKCAQEAw4lQvBqGxN0aNrvOW6YHQqEPTqN2W4qJE6KCMVrJ1V7qzDxN5pYQjlS/
+            example-vault-ca-cert-content-here
+            -----END CERTIFICATE-----
+          namespace: "admin/aap"
+          api_version: "v2"
+          default_auth_path: "approle"
+          role_id: "12345678-1234-1234-1234-123456789abc"
+          secret_id: "87654321-4321-4321-4321-cba987654321"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: vault_credential
+      tags: [vault_credential]
+
+    # Create additional Vault credential with different auth method (Token)
+    - name: Create HashiCorp Vault Credential (Token Auth)
+      awx.awx.credential:
+        name: "Development HashiCorp Vault"
+        description: "HashiCorp Vault for development environment using token authentication"
+        organization: "Global Engineering"
+        credential_type: "HashiCorp Vault Secret Lookup"
+        inputs:
+          url: "https://vault-dev.example.com:8200"
+          token: "hvs.DEVTokenForTestingPurposesOnly123456789"
+          namespace: "engineering/dev"
+          api_version: "v1"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: vault_dev_credential
+      tags: [vault_credential]
+
+    # Create Vault credential with Kubernetes auth
+    - name: Create HashiCorp Vault Credential (Kubernetes Auth)
+      awx.awx.credential:
+        name: "Kubernetes HashiCorp Vault"
+        description: "HashiCorp Vault using Kubernetes service account authentication"
+        organization: "Cloud Services"
+        credential_type: "HashiCorp Vault Secret Lookup"
+        inputs:
+          url: "https://vault-k8s.example.com:8200"
+          namespace: "cloud/kubernetes"
+          api_version: "v2"
+          default_auth_path: "kubernetes"
+          kubernetes_role: "aap-automation-role"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: vault_k8s_credential
+      tags: [vault_credential]
+
+    # Create a test credential that uses Vault as input source
+    - name: Create Machine Credential with Vault Backend
+      awx.awx.credential:
+        name: "Vault-Backed SSH Credential"
+        description: "SSH credential with secrets pulled from HashiCorp Vault"
+        organization: "IT Operations"
+        credential_type: "Machine"
+        inputs:
+          username: "ansible-automation"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: vault_backed_cred
+      tags: [vault_input_source]
+
+    # Create credential input source linking to Vault
+    - name: Create Credential Input Source for SSH Password from Vault
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/credentials/{{ vault_backed_cred.id }}/input_sources/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          source_credential: "{{ vault_credential.id }}"
+          input_field_name: "password"
+          metadata:
+            secret_path: "secret/data/ssh/production"
+            secret_key: "password"
+            secret_version: "v2"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      when: vault_backed_cred.id is defined and vault_credential.id is defined
+      register: vault_input_source
+      ignore_errors: true
+      tags: [vault_input_source]
+
+    - name: Create Credential Input Source for SSH Key from Vault
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/credentials/{{ vault_backed_cred.id }}/input_sources/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          source_credential: "{{ vault_credential.id }}"
+          input_field_name: "ssh_key_data"
+          metadata:
+            secret_path: "secret/data/ssh/production"
+            secret_key: "private_key"
+            secret_version: "v2"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      when: vault_backed_cred.id is defined and vault_credential.id is defined
+      register: vault_ssh_key_source
+      ignore_errors: true
+      tags: [vault_input_source]
+
+    # Create another example with AWS credentials from Vault
+    - name: Create AWS Credential with Vault Backend
+      awx.awx.credential:
+        name: "Vault-Backed AWS Credential"
+        description: "AWS credentials dynamically retrieved from HashiCorp Vault"
+        organization: "Cloud Services"
+        credential_type: "Amazon Web Services"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: vault_aws_cred
+      tags: [vault_input_source]
+
+    - name: Create Credential Input Source for AWS Access Key from Vault
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/credentials/{{ vault_aws_cred.id }}/input_sources/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          source_credential: "{{ vault_credential.id }}"
+          input_field_name: "username"
+          metadata:
+            secret_path: "aws/creds/aap-automation-role"
+            secret_key: "access_key"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      when: vault_aws_cred.id is defined and vault_credential.id is defined
+      register: vault_aws_access_key
+      ignore_errors: true
+      tags: [vault_input_source]
+
+    - name: Create Credential Input Source for AWS Secret Key from Vault
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/credentials/{{ vault_aws_cred.id }}/input_sources/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          source_credential: "{{ vault_credential.id }}"
+          input_field_name: "password"
+          metadata:
+            secret_path: "aws/creds/aap-automation-role"
+            secret_key: "secret_key"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      when: vault_aws_cred.id is defined and vault_credential.id is defined
+      register: vault_aws_secret_key
+      ignore_errors: true
+      tags: [vault_input_source]
+
+    - name: Display Summary
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "✓ External Applications and HashiCorp Vault Integration configured!"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "OAUTH2 APPLICATIONS (5):"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "1. Prometheus Monitoring"
+          - "   • Client Type: Confidential"
+          - "   • Grant Type: Authorization Code"
+          - "   • Redirect URI: https://prometheus.example.com/oauth/callback"
+          - "   • Use Case: Query AAP metrics and job status"
+          - ""
+          - "2. Grafana Dashboard"
+          - "   • Client Type: Confidential"
+          - "   • Grant Type: Authorization Code"
+          - "   • Redirect URIs:"
+          - "     - https://grafana.example.com/login/generic_oauth"
+          - "     - https://grafana.example.com/oauth/callback"
+          - "   • Use Case: Display AAP metrics in dashboards"
+          - ""
+          - "3. Splunk Log Aggregation"
+          - "   • Client Type: Confidential"
+          - "   • Grant Type: Client Credentials"
+          - "   • Skip Authorization: Yes (service-to-service)"
+          - "   • Use Case: Collect AAP logs and events"
+          - ""
+          - "4. Datadog APM"
+          - "   • Client Type: Confidential"
+          - "   • Grant Type: Client Credentials"
+          - "   • Skip Authorization: Yes"
+          - "   • Use Case: Application performance monitoring"
+          - ""
+          - "5. Custom Monitoring System"
+          - "   • Client Type: Public"
+          - "   • Grant Type: Password (Resource Owner)"
+          - "   • Use Case: Internal monitoring platform"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "HASHICORP VAULT CREDENTIALS (3):"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "1. Production HashiCorp Vault (IT Operations)"
+          - "   • URL: https://vault.example.com:8200"
+          - "   • Namespace: admin/aap"
+          - "   • API Version: v2"
+          - "   • Auth Method: AppRole"
+          - "   • Auth Path: approle"
+          - "   • Role ID: 12345678-1234-1234-1234-123456789abc"
+          - "   • Secret ID: 87654321-4321-4321-4321-cba987654321"
+          - "   • CA Certificate: Configured (custom CA)"
+          - ""
+          - "2. Development HashiCorp Vault (Global Engineering)"
+          - "   • URL: https://vault-dev.example.com:8200"
+          - "   • Namespace: engineering/dev"
+          - "   • API Version: v1"
+          - "   • Auth Method: Token"
+          - "   • Token: hvs.DEVTokenForTestingPurposesOnly123456789"
+          - ""
+          - "3. Kubernetes HashiCorp Vault (Cloud Services)"
+          - "   • URL: https://vault-k8s.example.com:8200"
+          - "   • Namespace: cloud/kubernetes"
+          - "   • API Version: v2"
+          - "   • Auth Method: Kubernetes"
+          - "   • Auth Path: kubernetes"
+          - "   • Kubernetes Role: aap-automation-role"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "VAULT-BACKED CREDENTIALS (2):"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "1. Vault-Backed SSH Credential"
+          - "   • Type: Machine (SSH)"
+          - "   • Organization: IT Operations"
+          - "   • Vault Source: Production HashiCorp Vault"
+          - "   • Input Sources:"
+          - "     - password: secret/data/ssh/production → password"
+          - "     - ssh_key_data: secret/data/ssh/production → private_key"
+          - "   • Username: ansible-automation (static)"
+          - ""
+          - "2. Vault-Backed AWS Credential"
+          - "   • Type: Amazon Web Services"
+          - "   • Organization: Cloud Services"
+          - "   • Vault Source: Production HashiCorp Vault"
+          - "   • Input Sources:"
+          - "     - Access Key: aws/creds/aap-automation-role → access_key"
+          - "     - Secret Key: aws/creds/aap-automation-role → secret_key"
+          - "   • Dynamic Credentials: Yes (Vault generates on-demand)"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "OAUTH2 GRANT TYPES:"
+          - "═══════════════════════════════════════════════════════════════"
+          - "  • Authorization Code: User interactive (Prometheus, Grafana)"
+          - "  • Client Credentials: Service-to-service (Splunk, Datadog)"
+          - "  • Password (Resource Owner): Direct user auth (Custom)"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "VAULT AUTH METHODS:"
+          - "═══════════════════════════════════════════════════════════════"
+          - "  • AppRole: Production (role_id + secret_id)"
+          - "  • Token: Development (direct token)"
+          - "  • Kubernetes: Cloud (service account JWT)"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "CREDENTIAL INPUT SOURCES:"
+          - "═══════════════════════════════════════════════════════════════"
+          - "  Input sources allow credentials to dynamically fetch secrets"
+          - "  from external systems like HashiCorp Vault at job runtime."
+          - ""
+          - "  SSH Credential Example:"
+          - "    • Password: Fetched from Vault path secret/data/ssh/production"
+          - "    • SSH Key: Fetched from Vault path secret/data/ssh/production"
+          - ""
+          - "  AWS Credential Example:"
+          - "    • Access Key: Dynamically generated by Vault AWS engine"
+          - "    • Secret Key: Dynamically generated by Vault AWS engine"
+          - "    • Vault path: aws/creds/aap-automation-role"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "MONITORING INTEGRATION USE CASES:"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "Prometheus:"
+          - "  • Query /api/v2/metrics/ endpoint for AAP metrics"
+          - "  • Monitor job success/failure rates"
+          - "  • Track resource usage and performance"
+          - ""
+          - "Grafana:"
+          - "  • Create dashboards from AAP API data"
+          - "  • Visualize job execution trends"
+          - "  • Display inventory and host statistics"
+          - ""
+          - "Splunk:"
+          - "  • Collect AAP job logs via API"
+          - "  • Aggregate events from /api/v2/activity_stream/"
+          - "  • Search and analyze automation events"
+          - ""
+          - "Datadog:"
+          - "  • APM integration for job execution tracing"
+          - "  • Custom metrics from AAP API"
+          - "  • Alert on job failures or performance issues"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "MIGRATION TESTING VALUE:"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "OAuth2 Applications Migration:"
+          - "  ✓ OAuth2 application definitions"
+          - "  ✓ Client IDs and secrets"
+          - "  ✓ Authorization grant types"
+          - "  ✓ Redirect URIs"
+          - "  ✓ Organization associations"
+          - "  ✓ Token scopes and permissions"
+          - ""
+          - "HashiCorp Vault Integration Migration:"
+          - "  ✓ Vault credential configurations"
+          - "  ✓ Multiple Vault auth methods (AppRole, Token, K8s)"
+          - "  ✓ Vault namespaces"
+          - "  ✓ API versions (v1, v2)"
+          - "  ✓ Custom CA certificates"
+          - "  ✓ Credential input sources"
+          - "  ✓ Dynamic secret fetching"
+          - "  ✓ Secret path mappings"
+          - ""
+          - "Verification Commands:"
+          - "  • List OAuth apps: curl -sk -H 'Authorization: Bearer TOKEN' \\"
+          - "    https://localhost:8443/api/v2/applications/"
+          - "  • List Vault creds: curl -sk -H 'Authorization: Bearer TOKEN' \\"
+          - "    https://localhost:8443/api/v2/credentials/?credential_type__kind=vault"
+          - "  • View input sources: curl -sk -H 'Authorization: Bearer TOKEN' \\"
+          - "    https://localhost:8443/api/v2/credentials/ID/input_sources/"

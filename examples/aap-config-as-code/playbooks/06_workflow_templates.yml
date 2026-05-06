@@ -1,0 +1,60 @@
+---
+- name: Create Workflow Templates
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    - name: Create Workflow Job Templates
+      awx.awx.workflow_job_template:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        organization: "{{ item.organization }}"
+        inventory: "{{ item.inventory | default(omit) }}"
+        ask_variables_on_launch: "{{ item.ask_variables_on_launch | default(false) }}"
+        ask_inventory_on_launch: "{{ item.ask_inventory_on_launch | default(false) }}"
+        ask_limit_on_launch: "{{ item.ask_limit_on_launch | default(false) }}"
+        extra_vars: "{{ item.extra_vars | default(omit) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Full Application Deployment Pipeline
+          description: Complete deployment pipeline from build to production
+          organization: Engineering
+          ask_variables_on_launch: true
+
+        - name: Disaster Recovery Workflow
+          description: Full disaster recovery process
+          organization: Operations
+          inventory: Production Servers
+
+        - name: Security Compliance Audit
+          description: Comprehensive security and compliance audit
+          organization: Operations
+          inventory: Production Servers
+
+        - name: Multi-Cloud Deployment
+          description: Deploy application across multiple cloud providers
+          organization: Engineering
+          ask_inventory_on_launch: true
+
+        - name: Rolling Update Workflow
+          description: Rolling update with health checks and rollback
+          organization: Operations
+          inventory: Production Servers
+          ask_variables_on_launch: true
+      tags: [workflow_templates]
+
+    - name: Display workflow creation note
+      ansible.builtin.debug:
+        msg:
+          - "Workflow templates created successfully!"
+          - "Note: Workflow nodes must be added manually or via API"
+          - "Example workflow nodes:"
+          - "  1. Build → 2. Deploy Dev → 3. Test → 4. Deploy Prod"

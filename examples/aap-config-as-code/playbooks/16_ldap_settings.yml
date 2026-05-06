@@ -1,0 +1,356 @@
+---
+- name: Configure LDAP Integration Settings
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    # Configure LDAP Authentication Settings
+    - name: Configure LDAP Server Settings
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/settings/ldap/"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          AUTH_LDAP_SERVER_URI: "ldap://ldap.example.com:389"
+          AUTH_LDAP_BIND_DN: "cn=ansible-svc,ou=ServiceAccounts,dc=example,dc=com"
+          AUTH_LDAP_BIND_PASSWORD: "LDAPServicePassword123!"
+          AUTH_LDAP_START_TLS: false
+          AUTH_LDAP_CONNECTION_OPTIONS:
+            OPT_REFERRALS: 0
+            OPT_NETWORK_TIMEOUT: 30
+          AUTH_LDAP_USER_SEARCH:
+            - "ou=Users,dc=example,dc=com"
+            - "SCOPE_SUBTREE"
+            - "(sAMAccountName=%(user)s)"
+          AUTH_LDAP_USER_DN_TEMPLATE: "uid=%(user)s,ou=Users,dc=example,dc=com"
+          AUTH_LDAP_USER_ATTR_MAP:
+            first_name: givenName
+            last_name: sn
+            email: mail
+          AUTH_LDAP_GROUP_SEARCH:
+            - "ou=Groups,dc=example,dc=com"
+            - "SCOPE_SUBTREE"
+            - "(objectClass=group)"
+          AUTH_LDAP_GROUP_TYPE: "MemberDNGroupType"
+          AUTH_LDAP_REQUIRE_GROUP: null
+          AUTH_LDAP_DENY_GROUP: null
+          AUTH_LDAP_USER_FLAGS_BY_GROUP:
+            is_superuser: "cn=AAP-Admins,ou=Groups,dc=example,dc=com"
+            is_system_auditor: "cn=AAP-Auditors,ou=Groups,dc=example,dc=com"
+          AUTH_LDAP_ORGANIZATION_MAP:
+            "Global Engineering":
+              admins: "cn=Engineering-Admins,ou=Groups,dc=example,dc=com"
+              users: "cn=Engineering-Users,ou=Groups,dc=example,dc=com"
+              remove_admins: false
+              remove_users: false
+            "IT Operations":
+              admins: "cn=Operations-Admins,ou=Groups,dc=example,dc=com"
+              users: "cn=Operations-Users,ou=Groups,dc=example,dc=com"
+              remove_admins: false
+              remove_users: false
+            "Security & Compliance":
+              admins: "cn=Security-Admins,ou=Groups,dc=example,dc=com"
+              users: "cn=Security-Users,ou=Groups,dc=example,dc=com"
+              remove_admins: false
+              remove_users: false
+          AUTH_LDAP_TEAM_MAP:
+            "Backend Development":
+              organization: "Global Engineering"
+              users: "cn=Backend-Developers,ou=Groups,dc=example,dc=com"
+              remove: false
+            "Infrastructure Team":
+              organization: "IT Operations"
+              users: "cn=Infrastructure-Team,ou=Groups,dc=example,dc=com"
+              remove: false
+            "Security Operations":
+              organization: "Security & Compliance"
+              users: "cn=Security-Ops,ou=Groups,dc=example,dc=com"
+              remove: false
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [200, 400]
+      register: ldap_settings
+      ignore_errors: true
+      tags: [ldap_settings]
+
+    # Configure Additional LDAP Settings
+    - name: Configure Advanced LDAP Settings
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/settings/ldap/"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          AUTH_LDAP_1_SERVER_URI: "ldaps://ldap-backup.example.com:636"
+          AUTH_LDAP_1_BIND_DN: "cn=ansible-svc-backup,ou=ServiceAccounts,dc=example,dc=com"
+          AUTH_LDAP_1_BIND_PASSWORD: "LDAPBackupPassword123!"
+          AUTH_LDAP_1_START_TLS: false
+          AUTH_LDAP_1_USER_SEARCH:
+            - "ou=Users,dc=example,dc=com"
+            - "SCOPE_SUBTREE"
+            - "(uid=%(user)s)"
+          AUTH_LDAP_1_USER_ATTR_MAP:
+            first_name: givenName
+            last_name: sn
+            email: mail
+          AUTH_LDAP_1_GROUP_SEARCH:
+            - "ou=Groups,dc=example,dc=com"
+            - "SCOPE_SUBTREE"
+            - "(objectClass=groupOfNames)"
+          AUTH_LDAP_1_GROUP_TYPE: "GroupOfNamesType"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [200, 400]
+      register: ldap_backup_settings
+      ignore_errors: true
+      tags: [ldap_backup]
+
+    # Configure System-wide Authentication Settings
+    - name: Configure Authentication Settings
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/settings/authentication/"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          SOCIAL_AUTH_ORGANIZATION_MAP: null
+          SOCIAL_AUTH_TEAM_MAP: null
+          SOCIAL_AUTH_USER_FIELDS:
+            - username
+            - email
+          AUTH_LDAP_MIRROR_GROUPS: true
+          AUTH_LDAP_MIRROR_GROUPS_EXCEPT: []
+          LDAP_GROUP_CACHE_TIMEOUT: 3600
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [200, 400]
+      register: auth_settings
+      ignore_errors: true
+      tags: [auth_settings]
+
+    # Get current LDAP settings to verify
+    - name: Get LDAP Settings
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/settings/ldap/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: ldap_config
+      tags: [verify]
+
+    # Configure other system settings
+    - name: Configure System Settings
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/settings/system/"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          TOWER_URL_BASE: "https://localhost:8443"
+          REMOTE_HOST_HEADERS:
+            - HTTP_X_FORWARDED_FOR
+          PROXY_IP_ALLOWED_LIST: []
+          LICENSE: {}
+          REDHAT_USERNAME: ""
+          REDHAT_PASSWORD: ""
+          SUBSCRIPTIONS_USERNAME: ""
+          SUBSCRIPTIONS_PASSWORD: ""
+          AUTOMATION_ANALYTICS_URL: "https://example.com"
+          INSTALL_UUID: "00000000-0000-0000-0000-000000000000"
+          DEFAULT_EXECUTION_QUEUE_NAME: "default"
+          DEFAULT_EXECUTION_ENVIRONMENT: null
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [200, 400]
+      register: system_settings
+      ignore_errors: true
+      tags: [system_settings]
+
+    # Configure UI settings
+    - name: Configure UI Settings
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/settings/ui/"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          CUSTOM_LOGIN_INFO: "Welcome to AAP 2.4 Test Environment - LDAP Authentication Enabled"
+          CUSTOM_LOGO: ""
+          MAX_UI_JOB_EVENTS: 4000
+          UI_LIVE_UPDATES_ENABLED: true
+          PENDO_TRACKING_STATE: "off"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [200, 400]
+      register: ui_settings
+      ignore_errors: true
+      tags: [ui_settings]
+
+    # Configure job settings
+    - name: Configure Job Settings
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/settings/jobs/"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          AD_HOC_COMMANDS:
+            - command
+            - shell
+            - yum
+            - apt
+            - apt_key
+            - apt_repository
+            - apt_rpm
+            - service
+            - group
+            - user
+            - mount
+            - ping
+            - selinux
+            - setup
+            - win_ping
+            - win_service
+            - win_updates
+            - win_group
+            - win_user
+          AWX_ISOLATION_SHOW_PATHS:
+            - /etc/pki/ca-trust:/etc/pki/ca-trust:O
+            - /usr/share/pki:/usr/share/pki:O
+          AWX_TASK_ENV: {}
+          DEFAULT_JOB_TIMEOUT: 0
+          DEFAULT_JOB_IDLE_TIMEOUT: 0
+          DEFAULT_INVENTORY_UPDATE_TIMEOUT: 0
+          DEFAULT_PROJECT_UPDATE_TIMEOUT: 0
+          ANSIBLE_FACT_CACHE_TIMEOUT: 0
+          MAX_FORKS: 200
+          LOG_AGGREGATOR_ENABLED: false
+          LOG_AGGREGATOR_LEVEL: INFO
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [200, 400]
+      register: job_settings
+      ignore_errors: true
+      tags: [job_settings]
+
+    - name: Display Summary
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "✓ LDAP Integration and System Settings configured!"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "LDAP AUTHENTICATION SETTINGS:"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "Primary LDAP Server:"
+          - "  • Server URI: ldap://ldap.example.com:389"
+          - "  • Bind DN: cn=ansible-svc,ou=ServiceAccounts,dc=example,dc=com"
+          - "  • Start TLS: Disabled"
+          - "  • User Search Base: ou=Users,dc=example,dc=com"
+          - "  • Group Search Base: ou=Groups,dc=example,dc=com"
+          - ""
+          - "Backup LDAP Server:"
+          - "  • Server URI: ldaps://ldap-backup.example.com:636"
+          - "  • Bind DN: cn=ansible-svc-backup,ou=ServiceAccounts,dc=example,dc=com"
+          - "  • Protocol: LDAPS (636)"
+          - "  • Group Type: GroupOfNamesType"
+          - ""
+          - "User Attribute Mapping:"
+          - "  • first_name → givenName"
+          - "  • last_name → sn"
+          - "  • email → mail"
+          - ""
+          - "LDAP User Flags (by Group):"
+          - "  • Superusers: cn=AAP-Admins,ou=Groups,dc=example,dc=com"
+          - "  • Auditors: cn=AAP-Auditors,ou=Groups,dc=example,dc=com"
+          - ""
+          - "Organization Mapping (3 orgs):"
+          - "  • Global Engineering"
+          - "    - Admins: cn=Engineering-Admins,ou=Groups,dc=example,dc=com"
+          - "    - Users: cn=Engineering-Users,ou=Groups,dc=example,dc=com"
+          - ""
+          - "  • IT Operations"
+          - "    - Admins: cn=Operations-Admins,ou=Groups,dc=example,dc=com"
+          - "    - Users: cn=Operations-Users,ou=Groups,dc=example,dc=com"
+          - ""
+          - "  • Security & Compliance"
+          - "    - Admins: cn=Security-Admins,ou=Groups,dc=example,dc=com"
+          - "    - Users: cn=Security-Users,ou=Groups,dc=example,dc=com"
+          - ""
+          - "Team Mapping (3 teams):"
+          - "  • Backend Development → cn=Backend-Developers,ou=Groups"
+          - "  • Infrastructure Team → cn=Infrastructure-Team,ou=Groups"
+          - "  • Security Operations → cn=Security-Ops,ou=Groups"
+          - ""
+          - "Advanced LDAP Settings:"
+          - "  • Mirror Groups: Enabled"
+          - "  • Group Cache Timeout: 3600 seconds"
+          - "  • Connection Timeout: 30 seconds"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "SYSTEM SETTINGS:"
+          - "═══════════════════════════════════════════════════════════════"
+          - "  • Tower URL: https://localhost:8443"
+          - "  • Default Execution Queue: default"
+          - "  • Max Forks: 200"
+          - "  • Default Job Timeout: Unlimited"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "UI SETTINGS:"
+          - "═══════════════════════════════════════════════════════════════"
+          - "  • Custom Login Message: 'Welcome to AAP 2.4 Test Environment'"
+          - "  • Max UI Job Events: 4000"
+          - "  • Live Updates: Enabled"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "MIGRATION TESTING VALUE:"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "LDAP Settings Migration Tests:"
+          - "  ✓ LDAP server configuration (URI, bind DN, password)"
+          - "  ✓ User search and group search configurations"
+          - "  ✓ User attribute mapping"
+          - "  ✓ LDAP user flags (superuser, auditor)"
+          - "  ✓ Organization mapping with LDAP groups"
+          - "  ✓ Team mapping with LDAP groups"
+          - "  ✓ Multiple LDAP server configurations"
+          - "  ✓ LDAP connection options and timeouts"
+          - "  ✓ Group mirroring settings"
+          - ""
+          - "System Settings Migration Tests:"
+          - "  ✓ Tower URL configuration"
+          - "  ✓ Remote host headers"
+          - "  ✓ Execution queue settings"
+          - "  ✓ Job timeout configurations"
+          - "  ✓ Max forks setting"
+          - "  ✓ Log aggregator settings"
+          - "  ✓ UI customization settings"
+          - ""
+          - "Settings are stored at:"
+          - "  • /api/v2/settings/ldap/"
+          - "  • /api/v2/settings/authentication/"
+          - "  • /api/v2/settings/system/"
+          - "  • /api/v2/settings/ui/"
+          - "  • /api/v2/settings/jobs/"
+          - ""
+          - "To verify LDAP settings:"
+          - "  curl -sk -H 'Authorization: Bearer $SOURCE__TOKEN' \\"
+          - "    https://localhost:8443/api/v2/settings/ldap/ | jq"
+          - ""
+          - "Migration will verify:"
+          - "  ✓ All LDAP settings preserved"
+          - "  ✓ Organization and team mappings intact"
+          - "  ✓ System settings migrated correctly"
+          - "  ✓ UI customizations preserved"

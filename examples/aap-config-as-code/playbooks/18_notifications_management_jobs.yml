@@ -1,0 +1,633 @@
+---
+- name: Create Notification Templates and Management Jobs
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    # Create Notification Templates
+    - name: Create Email Notification Template
+      awx.awx.notification_template:
+        name: "Email - Operations Team"
+        description: "Email notifications to operations team"
+        organization: "IT Operations"
+        notification_type: email
+        notification_configuration:
+          host: "smtp.example.com"
+          port: 587
+          use_tls: true
+          use_ssl: false
+          username: "aap-notifications@example.com"
+          password: "SmtpPassword123!"
+          sender: "aap-automation@example.com"
+          recipients:
+            - ops-team@example.com
+            - devops@example.com
+          timeout: 30
+        messages:
+          started:
+            message: !unsafe "Job {{ job_id }} ({{ job_name }}) started"
+          success:
+            message: !unsafe "Job {{ job_id }} ({{ job_name }}) completed successfully"
+            body: !unsafe "Job {{ job_name }} finished at {{ finished }}\nStatus: {{ status }}\nURL: {{ url }}"
+          error:
+            message: !unsafe "Job {{ job_id }} ({{ job_name }}) failed"
+            body: !unsafe "Job {{ job_name }} failed at {{ finished }}\nStatus: {{ status }}\nURL: {{ url }}\nPlease check the logs."
+          workflow_approval:
+            message: !unsafe "Workflow approval needed for {{ job_name }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      tags: [notifications]
+
+    - name: Create Slack Notification Template
+      awx.awx.notification_template:
+        name: "Slack - Automation Channel"
+        description: "Slack notifications to #automation-alerts channel"
+        organization: "DevOps Platform"
+        notification_type: slack
+        notification_configuration:
+          token: "YOUR_SLACK_BOT_TOKEN_HERE"  # Replace with actual Slack bot token
+          channels:
+            - "#automation-alerts"
+            - "#devops-notifications"
+        messages:
+          started:
+            message: !unsafe ":rocket: Job *{{ job_name }}* started\nID: {{ job_id }}\nTemplate: {{ job_template_name }}"
+          success:
+            message: !unsafe ":white_check_mark: Job *{{ job_name }}* completed successfully\nDuration: {{ elapsed }} seconds\n<{{ url }}|View Details>"
+          error:
+            message: !unsafe ":x: Job *{{ job_name }}* failed\nError: {{ result_traceback }}\n<{{ url }}|View Logs>"
+          workflow_approval:
+            message: !unsafe ":raised_hand: Approval needed for workflow *{{ workflow_job_name }}*\n<{{ url }}|Approve/Deny>"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      tags: [notifications]
+
+    - name: Create PagerDuty Notification Template
+      awx.awx.notification_template:
+        name: "PagerDuty - Critical Alerts"
+        description: "PagerDuty for critical job failures"
+        organization: "IT Operations"
+        notification_type: pagerduty
+        notification_configuration:
+          token: "pd_token_1234567890abcdefghijklmnopqrstuvwxyz"
+          service_key: "service_key_abcdefghijklmnopqrstuvwxyz123456"
+          client_name: "AAP Production"
+        messages:
+          error:
+            message: !unsafe "Critical: AAP Job {{ job_name }} failed in production"
+          workflow_approval:
+            message: !unsafe "Workflow approval required: {{ workflow_job_name }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      tags: [notifications]
+
+    - name: Create Webhook Notification Template
+      awx.awx.notification_template:
+        name: "Webhook - Monitoring System"
+        description: "Generic webhook for external monitoring"
+        organization: "DevOps Platform"
+        notification_type: webhook
+        notification_configuration:
+          url: "https://monitoring.example.com/api/webhooks/aap"
+          http_method: "POST"
+          headers:
+            Authorization: "Bearer webhook-token-123456"
+            Content-Type: "application/json"
+          disable_ssl_verification: false
+        messages:
+          started:
+            message: |
+              {
+                "event": "job_started",
+                "job_id": {{ job_id }},
+                "job_name": "{{ job_name }}",
+                "template": "{{ job_template_name }}",
+                "timestamp": "{{ created }}"
+              }
+          success:
+            message: |
+              {
+                "event": "job_success",
+                "job_id": {{ job_id }},
+                "job_name": "{{ job_name }}",
+                "status": "{{ status }}",
+                "duration": {{ elapsed }},
+                "timestamp": "{{ finished }}"
+              }
+          error:
+            message: |
+              {
+                "event": "job_failed",
+                "job_id": {{ job_id }},
+                "job_name": "{{ job_name }}",
+                "status": "{{ status }}",
+                "error": "{{ result_traceback }}",
+                "timestamp": "{{ finished }}"
+              }
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      tags: [notifications]
+
+    - name: Create Twilio SMS Notification Template
+      awx.awx.notification_template:
+        name: "Twilio - On-Call SMS"
+        description: "SMS notifications for on-call engineers"
+        organization: "IT Operations"
+        notification_type: twilio
+        notification_configuration:
+          account_sid: "AC1234567890abcdefghijklmnopqrstuvwx"
+          account_token: "twilio_auth_token_1234567890abcdef"
+          from_number: "+15551234567"
+          to_numbers:
+            - "+15559876543"
+            - "+15559876544"
+        messages:
+          error:
+            message: !unsafe "ALERT: Production job {{ job_name }} failed. Check AAP immediately."
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      tags: [notifications]
+
+    - name: Create Mattermost Notification Template
+      awx.awx.notification_template:
+        name: "Mattermost - Engineering Channel"
+        description: "Mattermost notifications to engineering team"
+        organization: "Global Engineering"
+        notification_type: mattermost
+        notification_configuration:
+          url: "https://mattermost.example.com"
+          username: "AAP Bot"
+          channel: "automation-notifications"
+          icon_url: "https://example.com/aap-icon.png"
+        messages:
+          started:
+            message: !unsafe "**Job Started**: {{ job_name }}\nTemplate: {{ job_template_name }}\nStarted by: {{ created_by }}"
+          success:
+            message: !unsafe "**Job Completed**: {{ job_name }}\n:white_check_mark: Success\nDuration: {{ elapsed }}s"
+          error:
+            message: !unsafe "**Job Failed**: {{ job_name }}\n:x: Failed\nPlease investigate [job logs]({{ url }})"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      tags: [notifications]
+
+    # Create Management Job Templates
+    - name: Create System Job Template - Cleanup Job Data
+      awx.awx.job_template:
+        name: "MGMT - Cleanup Old Job Data"
+        description: "Management job to cleanup job history older than 90 days"
+        job_type: run
+        inventory: "Test Servers"
+        project: "Infrastructure Configuration"
+        playbook: "lamp_simple/site.yml"
+        credentials:
+          - "Production SSH Key"
+        verbosity: 1
+        extra_vars:
+          cleanup_days: 90
+          cleanup_type: "jobs"
+          dry_run: false
+        ask_variables_on_launch: true
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: mgmt_cleanup_jobs
+      tags: [management_jobs]
+
+    - name: Create System Job Template - Cleanup Activity Stream
+      awx.awx.job_template:
+        name: "MGMT - Cleanup Activity Stream"
+        description: "Management job to cleanup activity stream older than 30 days"
+        job_type: run
+        inventory: "Test Servers"
+        project: "Infrastructure Configuration"
+        playbook: "lamp_simple/site.yml"
+        credentials:
+          - "Production SSH Key"
+        extra_vars:
+          cleanup_days: 30
+          cleanup_type: "activity_stream"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: mgmt_cleanup_activity
+      tags: [management_jobs]
+
+    - name: Create System Job Template - Project Sync All
+      awx.awx.job_template:
+        name: "MGMT - Sync All Projects"
+        description: "Management job to sync all projects from SCM"
+        job_type: run
+        inventory: "Test Servers"
+        project: "Infrastructure Configuration"
+        playbook: "lamp_simple/site.yml"
+        credentials:
+          - "Production SSH Key"
+        extra_vars:
+          sync_all_projects: true
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: mgmt_sync_projects
+      tags: [management_jobs]
+
+    - name: Create System Job Template - Inventory Sync All
+      awx.awx.job_template:
+        name: "MGMT - Sync All Inventories"
+        description: "Management job to sync all inventory sources"
+        job_type: run
+        inventory: "Test Servers"
+        project: "Infrastructure Configuration"
+        playbook: "lamp_simple/site.yml"
+        credentials:
+          - "Production SSH Key"
+        extra_vars:
+          sync_all_inventories: true
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: mgmt_sync_inventories
+      tags: [management_jobs]
+
+    - name: Create System Job Template - Health Check
+      awx.awx.job_template:
+        name: "MGMT - System Health Check"
+        description: "Management job to check AAP system health and capacity"
+        job_type: run
+        inventory: "Test Servers"
+        project: "Infrastructure Configuration"
+        playbook: "lamp_simple/site.yml"
+        credentials:
+          - "Production SSH Key"
+        extra_vars:
+          check_instances: true
+          check_capacity: true
+          check_database: true
+          alert_threshold: 80
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: mgmt_health_check
+      tags: [management_jobs]
+
+    - name: Create System Job Template - Database Backup
+      awx.awx.job_template:
+        name: "MGMT - AAP Database Backup"
+        description: "Management job to backup AAP PostgreSQL database"
+        job_type: run
+        inventory: "Production Infrastructure"
+        project: "Database Management"
+        playbook: "lamp_simple/site.yml"
+        credentials:
+          - "Production SSH Key"
+          - "Production Database"
+        extra_vars:
+          backup_location: "/backups/aap"
+          retention_days: 30
+          backup_type: "full"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: mgmt_db_backup
+      tags: [management_jobs]
+
+    - name: Create System Job Template - License Check
+      awx.awx.job_template:
+        name: "MGMT - License Expiry Check"
+        description: "Management job to check AAP license expiration"
+        job_type: run
+        inventory: "Test Servers"
+        project: "Infrastructure Configuration"
+        playbook: "lamp_simple/site.yml"
+        credentials:
+          - "Production SSH Key"
+        extra_vars:
+          alert_days_before_expiry: 30
+          send_email: true
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: mgmt_license_check
+      tags: [management_jobs]
+
+    - name: Create System Job Template - Disk Space Monitor
+      awx.awx.job_template:
+        name: "MGMT - Disk Space Monitor"
+        description: "Management job to monitor disk space on AAP instances"
+        job_type: run
+        inventory: "Production Infrastructure"
+        project: "Infrastructure Configuration"
+        playbook: "lamp_simple/site.yml"
+        credentials:
+          - "Production SSH Key"
+        extra_vars:
+          warning_threshold: 80
+          critical_threshold: 90
+          check_paths:
+            - /var/lib/awx
+            - /var/log
+            - /tmp
+        ask_variables_on_launch: true
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: mgmt_disk_monitor
+      tags: [management_jobs]
+
+    # Create schedules for management jobs
+    - name: Create Schedule for Daily Cleanup Job Data
+      awx.awx.schedule:
+        name: "Daily - Cleanup Old Jobs (3 AM)"
+        description: "Daily cleanup of job history at 3 AM"
+        unified_job_template: "MGMT - Cleanup Old Job Data"
+        rrule: "DTSTART:20260101T030000Z RRULE:FREQ=DAILY;INTERVAL=1"
+        enabled: true
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      ignore_errors: true
+      tags: [management_schedules]
+
+    - name: Create Schedule for Weekly Activity Stream Cleanup
+      awx.awx.schedule:
+        name: "Weekly - Cleanup Activity Stream (Sunday 2 AM)"
+        description: "Weekly cleanup of activity stream every Sunday"
+        unified_job_template: "MGMT - Cleanup Activity Stream"
+        rrule: "DTSTART:20260104T020000Z RRULE:FREQ=WEEKLY;BYDAY=SU"
+        enabled: true
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      ignore_errors: true
+      tags: [management_schedules]
+
+    - name: Create Schedule for Daily Health Check
+      awx.awx.schedule:
+        name: "Daily - System Health Check (Every 6 hours)"
+        description: "Check system health every 6 hours"
+        unified_job_template: "MGMT - System Health Check"
+        rrule: "DTSTART:20260101T000000Z RRULE:FREQ=HOURLY;INTERVAL=6"
+        enabled: true
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      ignore_errors: true
+      tags: [management_schedules]
+
+    - name: Create Schedule for Daily Database Backup
+      awx.awx.schedule:
+        name: "Daily - Database Backup (1 AM)"
+        description: "Daily backup of AAP database at 1 AM"
+        unified_job_template: "MGMT - AAP Database Backup"
+        rrule: "DTSTART:20260101T010000Z RRULE:FREQ=DAILY;INTERVAL=1"
+        enabled: true
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      ignore_errors: true
+      tags: [management_schedules]
+
+    - name: Display Summary
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "✓ Notification Templates and Management Jobs created!"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "NOTIFICATION TEMPLATES (6):"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "1. Email - Operations Team"
+          - "   • Type: Email (SMTP)"
+          - "   • Server: smtp.example.com:587 (TLS)"
+          - "   • Sender: aap-automation@example.com"
+          - "   • Recipients: ops-team@example.com, devops@example.com"
+          - "   • Events: Started, Success, Error, Workflow Approval"
+          - ""
+          - "2. Slack - Automation Channel"
+          - "   • Type: Slack"
+          - "   • Channels: #automation-alerts, #devops-notifications"
+          - "   • Format: Rich formatting with emojis and links"
+          - "   • Events: Started, Success, Error, Workflow Approval"
+          - ""
+          - "3. PagerDuty - Critical Alerts"
+          - "   • Type: PagerDuty"
+          - "   • Severity: Critical"
+          - "   • Client: AAP Production"
+          - "   • Events: Error, Workflow Approval"
+          - ""
+          - "4. Webhook - Monitoring System"
+          - "   • Type: Generic Webhook"
+          - "   • URL: https://monitoring.example.com/api/webhooks/aap"
+          - "   • Method: POST (JSON)"
+          - "   • Auth: Bearer token"
+          - "   • Events: Started, Success, Error"
+          - ""
+          - "5. Twilio - On-Call SMS"
+          - "   • Type: Twilio SMS"
+          - "   • Recipients: 2 on-call engineers"
+          - "   • Events: Error only (critical alerts)"
+          - ""
+          - "6. Mattermost - Engineering Channel"
+          - "   • Type: Mattermost"
+          - "   • Channel: automation-notifications"
+          - "   • Format: Markdown with icons"
+          - "   • Events: Started, Success, Error"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "MANAGEMENT JOB TEMPLATES (8):"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "1. MGMT - Cleanup Old Job Data"
+          - "   • Purpose: Remove job history > 90 days"
+          - "   • Schedule: Daily at 3 AM"
+          - "   • Variables: cleanup_days, cleanup_type, dry_run"
+          - ""
+          - "2. MGMT - Cleanup Activity Stream"
+          - "   • Purpose: Remove activity stream > 30 days"
+          - "   • Schedule: Weekly (Sunday 2 AM)"
+          - "   • Variables: cleanup_days, cleanup_type"
+          - ""
+          - "3. MGMT - Sync All Projects"
+          - "   • Purpose: Update all projects from SCM"
+          - "   • Schedule: Manual"
+          - "   • Variables: sync_all_projects"
+          - ""
+          - "4. MGMT - Sync All Inventories"
+          - "   • Purpose: Update all inventory sources"
+          - "   • Schedule: Manual"
+          - "   • Variables: sync_all_inventories"
+          - ""
+          - "5. MGMT - System Health Check"
+          - "   • Purpose: Check instances, capacity, database"
+          - "   • Schedule: Every 6 hours"
+          - "   • Variables: check_instances, check_capacity, alert_threshold"
+          - ""
+          - "6. MGMT - AAP Database Backup"
+          - "   • Purpose: Backup PostgreSQL database"
+          - "   • Schedule: Daily at 1 AM"
+          - "   • Variables: backup_location, retention_days, backup_type"
+          - "   • Credentials: SSH + Database"
+          - ""
+          - "7. MGMT - License Expiry Check"
+          - "   • Purpose: Alert on license expiration"
+          - "   • Schedule: Manual"
+          - "   • Variables: alert_days_before_expiry, send_email"
+          - ""
+          - "8. MGMT - Disk Space Monitor"
+          - "   • Purpose: Monitor disk usage on instances"
+          - "   • Schedule: Manual"
+          - "   • Variables: warning_threshold, critical_threshold, check_paths"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "MANAGEMENT JOB SCHEDULES (4):"
+          - "═══════════════════════════════════════════════════════════════"
+          - "  • Daily - Cleanup Old Jobs (3 AM)"
+          - "  • Weekly - Cleanup Activity Stream (Sunday 2 AM)"
+          - "  • Daily - System Health Check (Every 6 hours)"
+          - "  • Daily - Database Backup (1 AM)"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "NOTIFICATION TYPES & USE CASES:"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "Email (SMTP):"
+          - "  • Best for: Detailed job logs, formal notifications"
+          - "  • Recipients: Multiple email addresses"
+          - "  • Format: Plain text or HTML"
+          - ""
+          - "Slack:"
+          - "  • Best for: Real-time team collaboration"
+          - "  • Features: Rich formatting, channel notifications"
+          - "  • Format: Markdown with emojis and links"
+          - ""
+          - "PagerDuty:"
+          - "  • Best for: Incident management, on-call alerts"
+          - "  • Features: Auto-escalation, incident tracking"
+          - "  • Priority: Critical failures only"
+          - ""
+          - "Webhook:"
+          - "  • Best for: Integration with custom systems"
+          - "  • Format: JSON payloads"
+          - "  • Method: POST/PUT with custom headers"
+          - ""
+          - "Twilio SMS:"
+          - "  • Best for: Urgent alerts to on-call staff"
+          - "  • Limitation: Short messages only"
+          - "  • Use: Critical production failures"
+          - ""
+          - "Mattermost:"
+          - "  • Best for: Self-hosted chat platforms"
+          - "  • Format: Markdown with custom icons"
+          - "  • Similar to: Slack"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "NOTIFICATION EVENTS:"
+          - "═══════════════════════════════════════════════════════════════"
+          - "  • started: Job/workflow begins execution"
+          - "  • success: Job/workflow completes successfully"
+          - "  • error: Job/workflow fails"
+          - "  • workflow_approval: Workflow needs approval"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "NOTIFICATION TEMPLATE VARIABLES:"
+          - "═══════════════════════════════════════════════════════════════"
+          - "  Available in messages:"
+          - "  • {{ job_id }} - Job identifier"
+          - "  • {{ job_name }} - Job name"
+          - "  • {{ job_template_name }} - Template name"
+          - "  • {{ status }} - Job status"
+          - "  • {{ url }} - Link to job in AAP UI"
+          - "  • {{ created }} - Job creation timestamp"
+          - "  • {{ finished }} - Job completion timestamp"
+          - "  • {{ elapsed }} - Job duration in seconds"
+          - "  • {{ created_by }} - User who launched job"
+          - "  • {{ result_traceback }} - Error details (on failure)"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "MIGRATION TESTING VALUE:"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "Notification Templates:"
+          - "  ✓ All notification types (email, slack, pagerduty, etc.)"
+          - "  ✓ Notification configurations (SMTP, tokens, keys)"
+          - "  ✓ Custom message templates"
+          - "  ✓ Organization associations"
+          - "  ✓ Template variables and formatting"
+          - ""
+          - "Management Jobs:"
+          - "  ✓ System job templates (cleanup, sync, health)"
+          - "  ✓ Extra vars for management tasks"
+          - "  ✓ Multiple credential usage"
+          - "  ✓ Ask variables on launch"
+          - "  ✓ Management job schedules"
+          - ""
+          - "To attach notifications to existing jobs:"
+          - "  • Use AAP UI: Job Template → Notifications tab"
+          - "  • Or via API: POST to /api/v2/job_templates/{id}/notification_templates_started/"
+          - ""
+          - "Verify notifications:"
+          - "  curl -sk -H 'Authorization: Bearer TOKEN' \\"
+          - "    https://localhost:8443/api/v2/notification_templates/"

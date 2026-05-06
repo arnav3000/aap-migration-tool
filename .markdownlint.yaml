@@ -1,0 +1,28 @@
+# Markdownlint configuration for AAP Bridge
+# https://github.com/DavidAnson/markdownlint
+
+# Default state for all rules
+default: true
+
+# MD013/line-length - Allow longer lines in documentation
+MD013:
+  line_length: 120
+  tables: false
+  code_blocks: false
+
+# MD033/no-inline-html - Allow HTML in markdown (for badges, etc.)
+MD033: false
+
+# MD041/first-line-heading - Don't require H1 as first line (allows front matter)
+MD041: false
+
+# MD024/no-duplicate-heading - Allow duplicate headings (useful for sections)
+MD024:
+  siblings_only: true
+
+# MD046/code-block-style - Prefer fenced code blocks
+MD046:
+  style: fenced
+
+# MD036/no-emphasis-as-heading - Allow emphasis instead of headings
+MD036: false

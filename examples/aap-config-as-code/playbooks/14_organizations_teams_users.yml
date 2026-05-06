@@ -1,0 +1,654 @@
+---
+- name: Create Organizations, Teams, and Users with RBAC
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    # Create Execution Environments first
+    - name: Create Execution Environments
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/execution_environments/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "{{ item.name }}"
+          description: "{{ item.description }}"
+          image: "{{ item.image }}"
+          pull: "{{ item.pull }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      loop:
+        - name: Default EE
+          description: Default execution environment
+          image: quay.io/ansible/awx-ee:latest
+          pull: missing
+        - name: Engineering EE
+          description: Engineering team execution environment
+          image: quay.io/ansible/creator-ee:latest
+          pull: missing
+        - name: Operations EE
+          description: Operations team execution environment
+          image: quay.io/ansible/awx-ee:latest
+          pull: missing
+        - name: Security EE
+          description: Security team execution environment
+          image: quay.io/ansible/awx-ee:latest
+          pull: missing
+        - name: Cloud EE
+          description: Cloud operations execution environment
+          image: quay.io/ansible/awx-ee:latest
+          pull: missing
+      register: ee_result
+      ignore_errors: true
+      tags: [execution_environments]
+
+    # Create 5 Organizations with detailed configurations
+    - name: Create Organizations with Details
+      awx.awx.organization:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        max_hosts: "{{ item.max_hosts }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Global Engineering
+          description: Global engineering and development organization
+          max_hosts: 1000
+
+        - name: IT Operations
+          description: IT operations and infrastructure management
+          max_hosts: 2000
+
+        - name: Security & Compliance
+          description: Security operations and compliance team
+          max_hosts: 500
+
+        - name: Cloud Services
+          description: Multi-cloud infrastructure and services
+          max_hosts: 1500
+
+        - name: DevOps Platform
+          description: DevOps and CI/CD platform team
+          max_hosts: 800
+      tags: [organizations]
+
+    # Set default EE for organizations
+    - name: Get Organization IDs
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/organizations/?name={{ item.org_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - org_name: Global Engineering
+          ee_name: Engineering EE
+        - org_name: IT Operations
+          ee_name: Operations EE
+        - org_name: Security & Compliance
+          ee_name: Security EE
+        - org_name: Cloud Services
+          ee_name: Cloud EE
+        - org_name: DevOps Platform
+          ee_name: Default EE
+      register: org_lookup
+      tags: [organizations]
+
+    - name: Get EE IDs
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/execution_environments/?name={{ item.ee_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - org_name: Global Engineering
+          ee_name: Engineering EE
+        - org_name: IT Operations
+          ee_name: Operations EE
+        - org_name: Security & Compliance
+          ee_name: Security EE
+        - org_name: Cloud Services
+          ee_name: Cloud EE
+        - org_name: DevOps Platform
+          ee_name: Default EE
+      register: ee_lookup
+      tags: [organizations]
+
+    - name: Set Default Execution Environment for Organizations
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/organizations/{{ item.0.json.results[0].id }}/"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          default_environment: "{{ item.1.json.results[0].id }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [200, 400]
+      loop: "{{ org_lookup.results | zip(ee_lookup.results) | list }}"
+      when:
+        - item.0.json.count > 0
+        - item.1.json.count > 0
+      ignore_errors: true
+      tags: [organizations]
+
+    # Create 20 Users with varied attributes
+    - name: Create Users
+      awx.awx.user:
+        username: "{{ item.username }}"
+        password: "{{ item.password }}"
+        email: "{{ item.email }}"
+        first_name: "{{ item.first_name }}"
+        last_name: "{{ item.last_name }}"
+        is_superuser: "{{ item.is_superuser | default(false) }}"
+        is_system_auditor: "{{ item.is_system_auditor | default(false) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        # Global Engineering Users
+        - username: sarah.engineering
+          password: Password123!
+          email: sarah.engineering@example.com
+          first_name: Sarah
+          last_name: Johnson
+
+        - username: mike.developer
+          password: Password123!
+          email: mike.developer@example.com
+          first_name: Mike
+          last_name: Chen
+
+        - username: lisa.architect
+          password: Password123!
+          email: lisa.architect@example.com
+          first_name: Lisa
+          last_name: Rodriguez
+
+        - username: james.backend
+          password: Password123!
+          email: james.backend@example.com
+          first_name: James
+          last_name: Wilson
+
+        # IT Operations Users
+        - username: robert.ops
+          password: Password123!
+          email: robert.ops@example.com
+          first_name: Robert
+          last_name: Martinez
+
+        - username: emily.sysadmin
+          password: Password123!
+          email: emily.sysadmin@example.com
+          first_name: Emily
+          last_name: Davis
+
+        - username: david.infra
+          password: Password123!
+          email: david.infra@example.com
+          first_name: David
+          last_name: Anderson
+
+        - username: maria.network
+          password: Password123!
+          email: maria.network@example.com
+          first_name: Maria
+          last_name: Garcia
+
+        # Security & Compliance Users
+        - username: john.security
+          password: Password123!
+          email: john.security@example.com
+          first_name: John
+          last_name: Thompson
+
+        - username: jennifer.compliance
+          password: Password123!
+          email: jennifer.compliance@example.com
+          first_name: Jennifer
+          last_name: Lee
+
+        - username: kevin.audit
+          password: Password123!
+          email: kevin.audit@example.com
+          first_name: Kevin
+          last_name: Brown
+          is_system_auditor: true
+
+        - username: amanda.pentest
+          password: Password123!
+          email: amanda.pentest@example.com
+          first_name: Amanda
+          last_name: White
+
+        # Cloud Services Users
+        - username: chris.cloud
+          password: Password123!
+          email: chris.cloud@example.com
+          first_name: Chris
+          last_name: Taylor
+
+        - username: stephanie.aws
+          password: Password123!
+          email: stephanie.aws@example.com
+          first_name: Stephanie
+          last_name: Moore
+
+        - username: brian.azure
+          password: Password123!
+          email: brian.azure@example.com
+          first_name: Brian
+          last_name: Jackson
+
+        - username: michelle.gcp
+          password: Password123!
+          email: michelle.gcp@example.com
+          first_name: Michelle
+          last_name: Harris
+
+        # DevOps Platform Users
+        - username: daniel.devops
+          password: Password123!
+          email: daniel.devops@example.com
+          first_name: Daniel
+          last_name: Clark
+
+        - username: ashley.cicd
+          password: Password123!
+          email: ashley.cicd@example.com
+          first_name: Ashley
+          last_name: Lewis
+
+        - username: matthew.platform
+          password: Password123!
+          email: matthew.platform@example.com
+          first_name: Matthew
+          last_name: Walker
+
+        - username: jessica.sre
+          password: Password123!
+          email: jessica.sre@example.com
+          first_name: Jessica
+          last_name: Hall
+      tags: [users]
+
+    # Create 10 Teams across organizations
+    - name: Create Teams
+      awx.awx.team:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        organization: "{{ item.organization }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        # Global Engineering Teams
+        - name: Backend Development
+          description: Backend developers and API engineers
+          organization: Global Engineering
+
+        - name: Frontend Development
+          description: Frontend and UI/UX developers
+          organization: Global Engineering
+
+        # IT Operations Teams
+        - name: Infrastructure Team
+          description: Infrastructure and systems administrators
+          organization: IT Operations
+
+        - name: Network Operations
+          description: Network engineers and administrators
+          organization: IT Operations
+
+        # Security & Compliance Teams
+        - name: Security Operations
+          description: Security operations center team
+          organization: Security & Compliance
+
+        - name: Compliance Team
+          description: Compliance and audit specialists
+          organization: Security & Compliance
+
+        # Cloud Services Teams
+        - name: Cloud Infrastructure
+          description: Multi-cloud infrastructure team
+          organization: Cloud Services
+
+        - name: Cloud Automation
+          description: Cloud automation and orchestration
+          organization: Cloud Services
+
+        # DevOps Platform Teams
+        - name: Platform Engineering
+          description: Platform and tooling engineers
+          organization: DevOps Platform
+
+        - name: Site Reliability Engineering
+          description: SRE and production operations
+          organization: DevOps Platform
+      tags: [teams]
+
+    # Assign users to teams
+    - name: Add Users to Teams
+      awx.awx.role:
+        user: "{{ item.user }}"
+        target_team: "{{ item.team }}"
+        role: "{{ item.role }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        # Backend Development Team
+        - user: sarah.engineering
+          team: Backend Development
+          role: admin
+        - user: mike.developer
+          team: Backend Development
+          role: member
+        - user: james.backend
+          team: Backend Development
+          role: member
+
+        # Frontend Development Team
+        - user: lisa.architect
+          team: Frontend Development
+          role: admin
+
+        # Infrastructure Team
+        - user: robert.ops
+          team: Infrastructure Team
+          role: admin
+        - user: emily.sysadmin
+          team: Infrastructure Team
+          role: member
+        - user: david.infra
+          team: Infrastructure Team
+          role: member
+
+        # Network Operations Team
+        - user: maria.network
+          team: Network Operations
+          role: admin
+
+        # Security Operations Team
+        - user: john.security
+          team: Security Operations
+          role: admin
+        - user: amanda.pentest
+          team: Security Operations
+          role: member
+
+        # Compliance Team
+        - user: jennifer.compliance
+          team: Compliance Team
+          role: admin
+        - user: kevin.audit
+          team: Compliance Team
+          role: member
+
+        # Cloud Infrastructure Team
+        - user: chris.cloud
+          team: Cloud Infrastructure
+          role: admin
+        - user: stephanie.aws
+          team: Cloud Infrastructure
+          role: member
+        - user: brian.azure
+          team: Cloud Infrastructure
+          role: member
+
+        # Cloud Automation Team
+        - user: michelle.gcp
+          team: Cloud Automation
+          role: admin
+
+        # Platform Engineering Team
+        - user: daniel.devops
+          team: Platform Engineering
+          role: admin
+        - user: ashley.cicd
+          team: Platform Engineering
+          role: member
+        - user: matthew.platform
+          team: Platform Engineering
+          role: member
+
+        # Site Reliability Engineering Team
+        - user: jessica.sre
+          team: Site Reliability Engineering
+          role: admin
+      tags: [team_membership]
+
+    # Assign organization-level roles to users
+    - name: Assign Organization Admin Roles
+      awx.awx.role:
+        user: "{{ item.user }}"
+        organization: "{{ item.organization }}"
+        role: admin
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - user: sarah.engineering
+          organization: Global Engineering
+        - user: robert.ops
+          organization: IT Operations
+        - user: john.security
+          organization: Security & Compliance
+        - user: chris.cloud
+          organization: Cloud Services
+        - user: daniel.devops
+          organization: DevOps Platform
+      tags: [org_roles]
+
+    - name: Assign Organization Member Roles
+      awx.awx.role:
+        user: "{{ item.user }}"
+        organization: "{{ item.organization }}"
+        role: member
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        # Global Engineering members
+        - user: mike.developer
+          organization: Global Engineering
+        - user: lisa.architect
+          organization: Global Engineering
+        - user: james.backend
+          organization: Global Engineering
+
+        # IT Operations members
+        - user: emily.sysadmin
+          organization: IT Operations
+        - user: david.infra
+          organization: IT Operations
+        - user: maria.network
+          organization: IT Operations
+
+        # Security & Compliance members
+        - user: jennifer.compliance
+          organization: Security & Compliance
+        - user: kevin.audit
+          organization: Security & Compliance
+        - user: amanda.pentest
+          organization: Security & Compliance
+
+        # Cloud Services members
+        - user: stephanie.aws
+          organization: Cloud Services
+        - user: brian.azure
+          organization: Cloud Services
+        - user: michelle.gcp
+          organization: Cloud Services
+
+        # DevOps Platform members
+        - user: ashley.cicd
+          organization: DevOps Platform
+        - user: matthew.platform
+          organization: DevOps Platform
+        - user: jessica.sre
+          organization: DevOps Platform
+      tags: [org_roles]
+
+    - name: Assign Organization Auditor Roles
+      awx.awx.role:
+        user: "{{ item.user }}"
+        organization: "{{ item.organization }}"
+        role: auditor
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - user: kevin.audit
+          organization: Global Engineering
+        - user: kevin.audit
+          organization: IT Operations
+        - user: kevin.audit
+          organization: Cloud Services
+        - user: kevin.audit
+          organization: DevOps Platform
+      tags: [org_roles]
+
+    - name: Display Summary
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "✓ Organizations, Teams, and Users created successfully!"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "ORGANIZATIONS (5):"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "1. Global Engineering"
+          - "   - Max Hosts: 1000"
+          - "   - Default EE: Engineering EE"
+          - "   - Admin: sarah.engineering"
+          - "   - Teams: Backend Development, Frontend Development"
+          - "   - Members: 4 users"
+          - ""
+          - "2. IT Operations"
+          - "   - Max Hosts: 2000"
+          - "   - Default EE: Operations EE"
+          - "   - Admin: robert.ops"
+          - "   - Teams: Infrastructure Team, Network Operations"
+          - "   - Members: 4 users"
+          - ""
+          - "3. Security & Compliance"
+          - "   - Max Hosts: 500"
+          - "   - Default EE: Security EE"
+          - "   - Admin: john.security"
+          - "   - Teams: Security Operations, Compliance Team"
+          - "   - Members: 4 users"
+          - ""
+          - "4. Cloud Services"
+          - "   - Max Hosts: 1500"
+          - "   - Default EE: Cloud EE"
+          - "   - Admin: chris.cloud"
+          - "   - Teams: Cloud Infrastructure, Cloud Automation"
+          - "   - Members: 4 users"
+          - ""
+          - "5. DevOps Platform"
+          - "   - Max Hosts: 800"
+          - "   - Default EE: Default EE"
+          - "   - Admin: daniel.devops"
+          - "   - Teams: Platform Engineering, Site Reliability Engineering"
+          - "   - Members: 4 users"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "TEAMS (10):"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "Global Engineering:"
+          - "  • Backend Development (3 members, admin: sarah.engineering)"
+          - "  • Frontend Development (1 member, admin: lisa.architect)"
+          - ""
+          - "IT Operations:"
+          - "  • Infrastructure Team (3 members, admin: robert.ops)"
+          - "  • Network Operations (1 member, admin: maria.network)"
+          - ""
+          - "Security & Compliance:"
+          - "  • Security Operations (2 members, admin: john.security)"
+          - "  • Compliance Team (2 members, admin: jennifer.compliance)"
+          - ""
+          - "Cloud Services:"
+          - "  • Cloud Infrastructure (3 members, admin: chris.cloud)"
+          - "  • Cloud Automation (1 member, admin: michelle.gcp)"
+          - ""
+          - "DevOps Platform:"
+          - "  • Platform Engineering (3 members, admin: daniel.devops)"
+          - "  • Site Reliability Engineering (1 member, admin: jessica.sre)"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "USERS (20):"
+          - "═══════════════════════════════════════════════════════════════"
+          - ""
+          - "Organization Admins (5):"
+          - "  • sarah.engineering - Global Engineering"
+          - "  • robert.ops - IT Operations"
+          - "  • john.security - Security & Compliance"
+          - "  • chris.cloud - Cloud Services"
+          - "  • daniel.devops - DevOps Platform"
+          - ""
+          - "Team Admins (10 total across all teams)"
+          - ""
+          - "Team Members (15 users with member role)"
+          - ""
+          - "System Auditor:"
+          - "  • kevin.audit (auditor across multiple orgs)"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "EXECUTION ENVIRONMENTS (5):"
+          - "═══════════════════════════════════════════════════════════════"
+          - "  • Default EE - quay.io/ansible/awx-ee:latest"
+          - "  • Engineering EE - quay.io/ansible/creator-ee:latest"
+          - "  • Operations EE - quay.io/ansible/awx-ee:latest"
+          - "  • Security EE - quay.io/ansible/awx-ee:latest"
+          - "  • Cloud EE - quay.io/ansible/awx-ee:latest"
+          - ""
+          - "═══════════════════════════════════════════════════════════════"
+          - "RBAC SUMMARY:"
+          - "═══════════════════════════════════════════════════════════════"
+          - "  • 5 Organization Admins"
+          - "  • 15 Organization Members"
+          - "  • 1 System Auditor (kevin.audit)"
+          - "  • 10 Team Admins"
+          - "  • Multiple team member assignments"
+          - ""
+          - "All users password: Password123!"
+          - ""
+          - "Next steps:"
+          - "  1. Verify: ansible-playbook -i inventory.yml playbooks/99_verify_environment.yml"
+          - "  2. Test login with any user (e.g., sarah.engineering / Password123!)"
+          - "  3. Run migration: cd .. && aap-bridge migrate full"

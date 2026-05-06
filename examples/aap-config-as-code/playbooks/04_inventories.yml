@@ -1,0 +1,305 @@
+---
+- name: Create Inventories with Hosts and Groups
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    - name: Create Inventories
+      awx.awx.inventory:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        organization: "{{ item.organization }}"
+        variables: "{{ item.variables | default(omit) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Development Servers
+          description: Development environment servers
+          organization: Engineering
+          variables:
+            env: development
+            datacenter: us-east-1
+
+        - name: Production Servers
+          description: Production environment servers
+          organization: Operations
+          variables:
+            env: production
+            datacenter: us-west-2
+
+        - name: QA Servers
+          description: QA and testing servers
+          organization: QA
+          variables:
+            env: qa
+            datacenter: us-east-1
+
+        - name: Cloud Infrastructure
+          description: Cloud-based resources
+          organization: Operations
+          variables:
+            env: multi
+            cloud_provider: aws
+
+        - name: Network Devices
+          description: Network switches and routers
+          organization: Operations
+          variables:
+            device_type: network
+      tags: [inventories]
+
+    - name: Create Inventory Groups
+      awx.awx.group:
+        name: "{{ item.name }}"
+        description: "{{ item.description | default(omit) }}"
+        inventory: "{{ item.inventory }}"
+        variables: "{{ item.variables | default(omit) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        # Development Servers groups
+        - name: web_servers
+          description: Web application servers
+          inventory: Development Servers
+          variables:
+            ansible_port: 22
+            app_type: web
+
+        - name: db_servers
+          description: Database servers
+          inventory: Development Servers
+          variables:
+            ansible_port: 22
+            app_type: database
+
+        - name: app_servers
+          description: Application servers
+          inventory: Development Servers
+          variables:
+            ansible_port: 22
+            app_type: application
+
+        # Production Servers groups
+        - name: prod_web
+          description: Production web servers
+          inventory: Production Servers
+          variables:
+            ansible_port: 22
+            tier: frontend
+
+        - name: prod_api
+          description: Production API servers
+          inventory: Production Servers
+          variables:
+            ansible_port: 22
+            tier: backend
+
+        - name: prod_db
+          description: Production database servers
+          inventory: Production Servers
+          variables:
+            ansible_port: 22
+            tier: database
+
+        # Cloud Infrastructure groups
+        - name: ec2_instances
+          description: AWS EC2 instances
+          inventory: Cloud Infrastructure
+          variables:
+            cloud: aws
+            instance_type: ec2
+
+        - name: rds_instances
+          description: AWS RDS databases
+          inventory: Cloud Infrastructure
+          variables:
+            cloud: aws
+            instance_type: rds
+      tags: [groups]
+
+    - name: Create Hosts
+      awx.awx.host:
+        name: "{{ item.name }}"
+        description: "{{ item.description | default(omit) }}"
+        inventory: "{{ item.inventory }}"
+        variables: "{{ item.variables | default(omit) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        # Development Servers
+        - name: dev-web-01.example.com
+          description: Development web server 1
+          inventory: Development Servers
+          variables:
+            ansible_host: 192.168.1.10
+            server_role: web
+
+        - name: dev-web-02.example.com
+          description: Development web server 2
+          inventory: Development Servers
+          variables:
+            ansible_host: 192.168.1.11
+            server_role: web
+
+        - name: dev-db-01.example.com
+          description: Development database server
+          inventory: Development Servers
+          variables:
+            ansible_host: 192.168.1.20
+            server_role: database
+
+        - name: dev-app-01.example.com
+          description: Development application server
+          inventory: Development Servers
+          variables:
+            ansible_host: 192.168.1.30
+            server_role: application
+
+        # Production Servers
+        - name: prod-web-01.example.com
+          description: Production web server 1
+          inventory: Production Servers
+          variables:
+            ansible_host: 10.0.1.10
+            server_role: web
+            high_availability: true
+
+        - name: prod-web-02.example.com
+          description: Production web server 2
+          inventory: Production Servers
+          variables:
+            ansible_host: 10.0.1.11
+            server_role: web
+            high_availability: true
+
+        - name: prod-api-01.example.com
+          description: Production API server 1
+          inventory: Production Servers
+          variables:
+            ansible_host: 10.0.1.20
+            server_role: api
+
+        - name: prod-api-02.example.com
+          description: Production API server 2
+          inventory: Production Servers
+          variables:
+            ansible_host: 10.0.1.21
+            server_role: api
+
+        - name: prod-db-01.example.com
+          description: Production database primary
+          inventory: Production Servers
+          variables:
+            ansible_host: 10.0.1.30
+            server_role: database
+            db_role: primary
+
+        - name: prod-db-02.example.com
+          description: Production database replica
+          inventory: Production Servers
+          variables:
+            ansible_host: 10.0.1.31
+            server_role: database
+            db_role: replica
+
+        # QA Servers
+        - name: qa-test-01.example.com
+          description: QA test server 1
+          inventory: QA Servers
+          variables:
+            ansible_host: 192.168.2.10
+            test_type: functional
+
+        - name: qa-test-02.example.com
+          description: QA test server 2
+          inventory: QA Servers
+          variables:
+            ansible_host: 192.168.2.11
+            test_type: integration
+
+        # Cloud Infrastructure
+        - name: aws-ec2-web-01
+          description: AWS EC2 web instance
+          inventory: Cloud Infrastructure
+          variables:
+            cloud: aws
+            region: us-east-1
+            instance_id: i-1234567890abcdef0
+
+        - name: aws-ec2-app-01
+          description: AWS EC2 app instance
+          inventory: Cloud Infrastructure
+          variables:
+            cloud: aws
+            region: us-east-1
+            instance_id: i-0987654321fedcba0
+      tags: [hosts]
+
+    - name: Associate Hosts with Groups
+      awx.awx.group:
+        name: "{{ item.group }}"
+        inventory: "{{ item.inventory }}"
+        hosts: "{{ item.hosts }}"
+        state: present
+        preserve_existing_hosts: true
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - group: web_servers
+          inventory: Development Servers
+          hosts:
+            - dev-web-01.example.com
+            - dev-web-02.example.com
+
+        - group: db_servers
+          inventory: Development Servers
+          hosts:
+            - dev-db-01.example.com
+
+        - group: app_servers
+          inventory: Development Servers
+          hosts:
+            - dev-app-01.example.com
+
+        - group: prod_web
+          inventory: Production Servers
+          hosts:
+            - prod-web-01.example.com
+            - prod-web-02.example.com
+
+        - group: prod_api
+          inventory: Production Servers
+          hosts:
+            - prod-api-01.example.com
+            - prod-api-02.example.com
+
+        - group: prod_db
+          inventory: Production Servers
+          hosts:
+            - prod-db-01.example.com
+            - prod-db-02.example.com
+
+        - group: ec2_instances
+          inventory: Cloud Infrastructure
+          hosts:
+            - aws-ec2-web-01
+            - aws-ec2-app-01
+      tags: [group_associations]

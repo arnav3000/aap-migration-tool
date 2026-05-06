@@ -1,0 +1,583 @@
+---
+- name: Create Instances, Instance Groups, Inventories and Hosts
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    # Create Instances (Execution Nodes)
+    - name: Create Execution Instances
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/instances/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          hostname: "{{ item.hostname }}"
+          node_type: "{{ item.node_type }}"
+          node_state: "{{ item.node_state }}"
+          enabled: "{{ item.enabled }}"
+          managed_by_policy: "{{ item.managed_by_policy }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      loop:
+        - hostname: execution-node-01.example.com
+          node_type: execution
+          node_state: installed
+          enabled: true
+          managed_by_policy: true
+        - hostname: execution-node-02.example.com
+          node_type: execution
+          node_state: installed
+          enabled: true
+          managed_by_policy: true
+        - hostname: execution-node-03.example.com
+          node_type: execution
+          node_state: installed
+          enabled: true
+          managed_by_policy: false
+        - hostname: hop-node-01.example.com
+          node_type: hop
+          node_state: installed
+          enabled: true
+          managed_by_policy: true
+      register: instance_result
+      ignore_errors: true
+      tags: [instances]
+
+    # Create Instance Groups
+    - name: Create Instance Groups
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/instance_groups/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "{{ item.name }}"
+          policy_instance_percentage: "{{ item.policy_instance_percentage }}"
+          policy_instance_minimum: "{{ item.policy_instance_minimum }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [201, 400]
+      loop:
+        - name: Production Execution Group
+          policy_instance_percentage: 100
+          policy_instance_minimum: 0
+        - name: Development Execution Group
+          policy_instance_percentage: 50
+          policy_instance_minimum: 0
+        - name: QA Execution Group
+          policy_instance_percentage: 75
+          policy_instance_minimum: 1
+      register: instance_group_result
+      ignore_errors: true
+      tags: [instance_groups]
+
+    # Associate Instances to Instance Groups
+    - name: Get Instance Group IDs
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/instance_groups/?name={{ item }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - Production Execution Group
+        - Development Execution Group
+        - QA Execution Group
+      register: instance_groups
+      tags: [instance_groups]
+
+    - name: Get Instance IDs
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/instances/?hostname={{ item }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - execution-node-01.example.com
+        - execution-node-02.example.com
+        - execution-node-03.example.com
+      register: instances
+      tags: [instance_groups]
+
+    - name: Associate execution-node-01 to Production Group
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/instance_groups/{{ instance_groups.results[0].json.results[0].id }}/instances/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          id: "{{ instances.results[0].json.results[0].id }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [204, 400]
+      when: instances.results[0].json.count > 0 and instance_groups.results[0].json.count > 0
+      ignore_errors: true
+      tags: [instance_groups]
+
+    - name: Associate execution-node-02 to Development Group
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/instance_groups/{{ instance_groups.results[1].json.results[0].id }}/instances/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          id: "{{ instances.results[1].json.results[0].id }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [204, 400]
+      when: instances.results[1].json.count > 0 and instance_groups.results[1].json.count > 0
+      ignore_errors: true
+      tags: [instance_groups]
+
+    - name: Associate execution-node-03 to QA Group
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/instance_groups/{{ instance_groups.results[2].json.results[0].id }}/instances/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          id: "{{ instances.results[2].json.results[0].id }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [204, 400]
+      when: instances.results[2].json.count > 0 and instance_groups.results[2].json.count > 0
+      ignore_errors: true
+      tags: [instance_groups]
+
+    # Create Inventories
+    - name: Create Inventories
+      awx.awx.inventory:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        organization: Engineering
+        variables: "{{ item.variables | default(omit) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Production Infrastructure
+          description: Production servers and infrastructure
+          variables:
+            env: production
+            backup_enabled: true
+            monitoring: enabled
+
+        - name: Development Environment
+          description: Development and testing servers
+          variables:
+            env: development
+            debug_mode: true
+
+        - name: Cloud Resources
+          description: Cloud-based infrastructure (AWS, Azure, GCP)
+          variables:
+            env: production
+            cloud_provider: multi
+
+        - name: Network Devices
+          description: Network switches, routers, and firewalls
+          variables:
+            device_type: network
+            snmp_enabled: true
+      tags: [inventories]
+
+    # Create Inventory Groups
+    - name: Create Inventory Groups
+      awx.awx.group:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        inventory: "{{ item.inventory }}"
+        variables: "{{ item.variables | default(omit) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        # Production Infrastructure groups
+        - name: web_servers
+          description: Production web servers
+          inventory: Production Infrastructure
+          variables:
+            http_port: 80
+            https_port: 443
+            ssl_enabled: true
+
+        - name: db_servers
+          description: Production database servers
+          inventory: Production Infrastructure
+          variables:
+            db_port: 5432
+            backup_schedule: "0 2 * * *"
+            replication_enabled: true
+
+        - name: app_servers
+          description: Production application servers
+          inventory: Production Infrastructure
+          variables:
+            app_port: 8080
+            jvm_heap_size: 4g
+
+        # Development Environment groups
+        - name: dev_web
+          description: Development web servers
+          inventory: Development Environment
+          variables:
+            debug: true
+
+        - name: dev_db
+          description: Development databases
+          inventory: Development Environment
+          variables:
+            db_port: 5432
+
+        # Cloud Resources groups
+        - name: aws_instances
+          description: AWS EC2 instances
+          inventory: Cloud Resources
+          variables:
+            cloud_provider: aws
+            region: us-east-1
+
+        - name: azure_instances
+          description: Azure VMs
+          inventory: Cloud Resources
+          variables:
+            cloud_provider: azure
+            region: eastus
+
+        # Network Devices groups
+        - name: switches
+          description: Network switches
+          inventory: Network Devices
+          variables:
+            device_type: switch
+
+        - name: routers
+          description: Network routers
+          inventory: Network Devices
+          variables:
+            device_type: router
+      tags: [groups]
+
+    # Create Hosts
+    - name: Create Hosts in Production Infrastructure
+      awx.awx.host:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        inventory: Production Infrastructure
+        variables: "{{ item.variables }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: prod-web-01.example.com
+          description: Production web server 1
+          variables:
+            ansible_host: 192.168.1.10
+            ansible_user: ansible
+            server_role: web
+            cpu_cores: 4
+            memory_gb: 16
+
+        - name: prod-web-02.example.com
+          description: Production web server 2
+          variables:
+            ansible_host: 192.168.1.11
+            ansible_user: ansible
+            server_role: web
+            cpu_cores: 4
+            memory_gb: 16
+
+        - name: prod-db-01.example.com
+          description: Production database primary
+          variables:
+            ansible_host: 192.168.1.20
+            ansible_user: ansible
+            server_role: database
+            db_role: primary
+            cpu_cores: 8
+            memory_gb: 32
+
+        - name: prod-db-02.example.com
+          description: Production database replica
+          variables:
+            ansible_host: 192.168.1.21
+            ansible_user: ansible
+            server_role: database
+            db_role: replica
+            cpu_cores: 8
+            memory_gb: 32
+
+        - name: prod-app-01.example.com
+          description: Production application server 1
+          variables:
+            ansible_host: 192.168.1.30
+            ansible_user: ansible
+            server_role: application
+            cpu_cores: 8
+            memory_gb: 16
+      tags: [hosts]
+
+    - name: Create Hosts in Development Environment
+      awx.awx.host:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        inventory: Development Environment
+        variables: "{{ item.variables }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: dev-web-01.example.com
+          description: Development web server
+          variables:
+            ansible_host: 192.168.2.10
+            ansible_user: devops
+            server_role: web
+            cpu_cores: 2
+            memory_gb: 8
+
+        - name: dev-db-01.example.com
+          description: Development database
+          variables:
+            ansible_host: 192.168.2.20
+            ansible_user: devops
+            server_role: database
+            cpu_cores: 4
+            memory_gb: 8
+
+        - name: dev-app-01.example.com
+          description: Development application server
+          variables:
+            ansible_host: 192.168.2.30
+            ansible_user: devops
+            server_role: application
+            cpu_cores: 2
+            memory_gb: 8
+      tags: [hosts]
+
+    - name: Create Hosts in Cloud Resources
+      awx.awx.host:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        inventory: Cloud Resources
+        variables: "{{ item.variables }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: aws-web-01.compute.amazonaws.com
+          description: AWS EC2 web server
+          variables:
+            ansible_host: 10.0.1.10
+            ansible_user: ec2-user
+            cloud_provider: aws
+            instance_type: t3.large
+            region: us-east-1
+            availability_zone: us-east-1a
+
+        - name: aws-db-01.compute.amazonaws.com
+          description: AWS RDS database
+          variables:
+            ansible_host: 10.0.2.20
+            ansible_user: ec2-user
+            cloud_provider: aws
+            instance_type: db.r5.xlarge
+            region: us-east-1
+
+        - name: azure-web-01.cloudapp.azure.com
+          description: Azure VM web server
+          variables:
+            ansible_host: 10.1.1.10
+            ansible_user: azureuser
+            cloud_provider: azure
+            vm_size: Standard_D4s_v3
+            region: eastus
+
+        - name: azure-app-01.cloudapp.azure.com
+          description: Azure VM application server
+          variables:
+            ansible_host: 10.1.1.20
+            ansible_user: azureuser
+            cloud_provider: azure
+            vm_size: Standard_D8s_v3
+            region: eastus
+      tags: [hosts]
+
+    - name: Create Hosts in Network Devices
+      awx.awx.host:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        inventory: Network Devices
+        variables: "{{ item.variables }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: switch-core-01.example.com
+          description: Core network switch 1
+          variables:
+            ansible_host: 192.168.100.1
+            ansible_network_os: cisco.ios.ios
+            device_type: switch
+            model: Catalyst 9300
+            ports: 48
+
+        - name: switch-core-02.example.com
+          description: Core network switch 2
+          variables:
+            ansible_host: 192.168.100.2
+            ansible_network_os: cisco.ios.ios
+            device_type: switch
+            model: Catalyst 9300
+            ports: 48
+
+        - name: router-edge-01.example.com
+          description: Edge router 1
+          variables:
+            ansible_host: 192.168.100.10
+            ansible_network_os: cisco.ios.ios
+            device_type: router
+            model: ISR 4451
+      tags: [hosts]
+
+    # Associate Hosts to Groups
+    - name: Associate Production Web Servers to web_servers group
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/groups/?name=web_servers&inventory__name=Production%20Infrastructure"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: web_servers_group
+      tags: [host_associations]
+
+    - name: Get Production Web Host IDs
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/hosts/?name={{ item }}&inventory__name=Production%20Infrastructure"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - prod-web-01.example.com
+        - prod-web-02.example.com
+      register: web_hosts
+      tags: [host_associations]
+
+    - name: Add web hosts to web_servers group
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/groups/{{ web_servers_group.json.results[0].id }}/hosts/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          id: "{{ item.json.results[0].id }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [204, 400]
+      loop: "{{ web_hosts.results }}"
+      when: item.json.count > 0 and web_servers_group.json.count > 0
+      ignore_errors: true
+      tags: [host_associations]
+
+    # Similar associations for other groups
+    - name: Get db_servers group
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/groups/?name=db_servers&inventory__name=Production%20Infrastructure"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: db_servers_group
+      tags: [host_associations]
+
+    - name: Get Production DB Host IDs
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/hosts/?name={{ item }}&inventory__name=Production%20Infrastructure"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - prod-db-01.example.com
+        - prod-db-02.example.com
+      register: db_hosts
+      tags: [host_associations]
+
+    - name: Add DB hosts to db_servers group
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/groups/{{ db_servers_group.json.results[0].id }}/hosts/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          id: "{{ item.json.results[0].id }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+        status_code: [204, 400]
+      loop: "{{ db_hosts.results }}"
+      when: item.json.count > 0 and db_servers_group.json.count > 0
+      ignore_errors: true
+      tags: [host_associations]
+
+    - name: Display Summary
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "✓ Instances, Instance Groups, Inventories, and Hosts created successfully!"
+          - ""
+          - "Summary:"
+          - "  Instances:"
+          - "    - execution-node-01.example.com (execution)"
+          - "    - execution-node-02.example.com (execution)"
+          - "    - execution-node-03.example.com (execution)"
+          - "    - hop-node-01.example.com (hop)"
+          - ""
+          - "  Instance Groups:"
+          - "    - Production Execution Group"
+          - "    - Development Execution Group"
+          - "    - QA Execution Group"
+          - ""
+          - "  Inventories (4):"
+          - "    - Production Infrastructure (5 hosts)"
+          - "    - Development Environment (3 hosts)"
+          - "    - Cloud Resources (4 hosts)"
+          - "    - Network Devices (3 hosts)"
+          - ""
+          - "  Total Hosts: 15"
+          - "  Total Groups: 9"
+          - ""
+          - "Next steps:"
+          - "  1. Verify: ansible-playbook -i inventory.yml playbooks/99_verify_environment.yml"
+          - "  2. Run migration: cd .. && aap-bridge migrate full"

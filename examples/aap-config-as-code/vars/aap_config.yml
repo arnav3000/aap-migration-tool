@@ -1,0 +1,15 @@
+---
+# AAP 2.4 Connection Details
+controller_hostname: localhost:8443
+controller_username: admin
+controller_password: "{{ lookup('env', 'SOURCE_PASSWORD') | default('admin', true) }}"
+controller_validate_certs: false
+controller_oauthtoken: "{{ lookup('env', 'SOURCE__TOKEN') | default('', true) }}"
+
+# Use token if available, otherwise username/password
+controller_auth:
+  controller_host: "https://{{ controller_hostname }}"
+  controller_username: "{{ controller_username if not controller_oauthtoken else omit }}"
+  controller_password: "{{ controller_password if not controller_oauthtoken else omit }}"
+  controller_oauthtoken: "{{ controller_oauthtoken if controller_oauthtoken else omit }}"
+  validate_certs: "{{ controller_validate_certs }}"

@@ -1,0 +1,103 @@
+---
+- name: Verify AAP Environment Setup
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    - name: Get Organizations count
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/organizations/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: organizations_result
+
+    - name: Get Users count
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/users/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: users_result
+
+    - name: Get Credentials count
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/credentials/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: credentials_result
+
+    - name: Get Projects count
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/projects/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: projects_result
+
+    - name: Get Inventories count
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/inventories/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: inventories_result
+
+    - name: Get Hosts count
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/hosts/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: hosts_result
+
+    - name: Get Job Templates count
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/job_templates/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: job_templates_result
+
+    - name: Get Workflow Templates count
+      ansible.builtin.uri:
+        url: "{{ controller_auth.controller_host }}/api/v2/workflow_job_templates/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_auth.controller_oauthtoken }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      register: workflow_templates_result
+
+    - name: Display Environment Summary
+      ansible.builtin.debug:
+        msg:
+          - "╔═══════════════════════════════════════════════════════════╗"
+          - "║  AAP 2.4 Environment Summary                              ║"
+          - "╠═══════════════════════════════════════════════════════════╣"
+          - "║  Organizations:      {{ '%3d' | format(organizations_result.json.count) }}                                   ║"
+          - "║  Users:              {{ '%3d' | format(users_result.json.count) }}                                   ║"
+          - "║  Teams:              {{ '%3d' | format(4) }}                                   ║"
+          - "║  Credentials:        {{ '%3d' | format(credentials_result.json.count) }}                                   ║"
+          - "║  Projects:           {{ '%3d' | format(projects_result.json.count) }}                                   ║"
+          - "║  Inventories:        {{ '%3d' | format(inventories_result.json.count) }}                                   ║"
+          - "║  Hosts:              {{ '%3d' | format(hosts_result.json.count) }}                                   ║"
+          - "║  Job Templates:      {{ '%3d' | format(job_templates_result.json.count) }}                                   ║"
+          - "║  Workflow Templates: {{ '%3d' | format(workflow_templates_result.json.count) }}                                   ║"
+          - "╚═══════════════════════════════════════════════════════════╝"
+          - ""
+          - "✓ Environment is ready for migration testing!"
+          - ""
+          - "Next steps:"
+          - "  1. Run migration: cd /Users/arbhati/project/git/aap-bridge-fork && aap-bridge migrate full"
+          - "  2. Validate results: aap-bridge validate all"

@@ -1,0 +1,220 @@
+---
+- name: Create Focused Test Data for Migration Testing
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    # Create 1 Organization first
+    - name: Create Test Organization
+      awx.awx.organization:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Engineering
+          description: Software development and engineering teams
+      tags: [organizations]
+
+    # Create 5 Credentials (2 machine, 3 git)
+    - name: Create SSH Machine Credentials (username only - keys to be added manually)
+      awx.awx.credential:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        organization: Engineering
+        credential_type: Machine
+        inputs:
+          username: "{{ item.username }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Production SSH Key
+          description: SSH key for production servers (placeholder - add key manually)
+          username: ansible
+        - name: Development SSH Key
+          description: SSH key for development servers (placeholder - add key manually)
+          username: devops
+      tags: [credentials]
+
+    - name: Create Git Source Control Credentials
+      awx.awx.credential:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        organization: Engineering
+        credential_type: Source Control
+        inputs:
+          username: "{{ item.username }}"
+          password: "{{ item.password }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: GitHub Main Repository
+          description: GitHub credentials for main repository
+          username: git-user-main
+          password: ghp_token123456789
+        - name: GitHub Backup Repository
+          description: GitHub credentials for backup repository
+          username: git-user-backup
+          password: ghp_token987654321
+        - name: GitLab Enterprise
+          description: GitLab credentials for enterprise repos
+          username: gitlab-user
+          password: glpat_tokenABC123
+      tags: [credentials]
+
+    # Create 5 Projects
+    - name: Create Git-based Projects
+      awx.awx.project:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        organization: Engineering
+        scm_type: git
+        scm_url: "{{ item.scm_url }}"
+        scm_branch: "{{ item.scm_branch | default('main') }}"
+        scm_update_on_launch: true
+        scm_credential: "{{ item.scm_credential | default(omit) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Web Application Deployment
+          description: Main web application deployment playbooks
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+          scm_credential: GitHub Main Repository
+
+        - name: Infrastructure Configuration
+          description: Infrastructure as code playbooks
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+          scm_credential: GitHub Main Repository
+
+        - name: Database Management
+          description: Database provisioning and management
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+          scm_credential: GitHub Backup Repository
+
+        - name: Security Hardening
+          description: Security compliance and hardening playbooks
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+          scm_credential: GitLab Enterprise
+
+        - name: Application Monitoring
+          description: Monitoring and observability setup
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+          scm_credential: GitHub Main Repository
+      tags: [projects]
+
+    # Create a simple inventory
+    - name: Create Test Inventory
+      awx.awx.inventory:
+        name: Test Servers
+        description: Test servers for migration validation
+        organization: Engineering
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      tags: [inventories]
+
+    # Create 6 Job Templates
+    - name: Create Job Templates
+      awx.awx.job_template:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        job_type: run
+        inventory: Test Servers
+        project: "{{ item.project }}"
+        playbook: "{{ item.playbook }}"
+        credentials: "{{ item.credentials }}"
+        ask_variables_on_launch: "{{ item.ask_variables_on_launch | default(false) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Deploy Web Application
+          description: Deploy web application to target servers
+          project: Web Application Deployment
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Production SSH Key
+
+        - name: Configure Infrastructure
+          description: Configure infrastructure components
+          project: Infrastructure Configuration
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Production SSH Key
+
+        - name: Database Backup and Restore
+          description: Backup and restore database operations
+          project: Database Management
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Development SSH Key
+
+        - name: Security Compliance Scan
+          description: Run security compliance checks
+          project: Security Hardening
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Production SSH Key
+          ask_variables_on_launch: true
+
+        - name: Setup Monitoring Stack
+          description: Deploy monitoring and alerting infrastructure
+          project: Application Monitoring
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Production SSH Key
+
+        - name: Infrastructure Health Check
+          description: Verify infrastructure health and connectivity
+          project: Infrastructure Configuration
+          playbook: lamp_simple/site.yml
+          credentials:
+            - Development SSH Key
+          ask_variables_on_launch: true
+      tags: [job_templates]
+
+    - name: Display Summary
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "✓ Test data created successfully!"
+          - ""
+          - "Summary:"
+          - "  - 1 Organization: Engineering"
+          - "  - 5 Credentials: 2 Machine (SSH), 3 Source Control (Git)"
+          - "  - 5 Projects: Web App, Infrastructure, Database, Security, Monitoring"
+          - "  - 6 Job Templates: Using projects and credentials"
+          - ""
+          - "Next steps:"
+          - "  1. Verify: ./setup.sh (option 8)"
+          - "  2. Run migration: cd .. && aap-bridge migrate full"

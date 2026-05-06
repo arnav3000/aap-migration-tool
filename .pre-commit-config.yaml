@@ -1,0 +1,112 @@
+# Pre-commit hooks for AAP Bridge
+# https://pre-commit.com/
+#
+# Installation:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Usage:
+#   pre-commit run --all-files
+
+repos:
+  # Security: Secret detection
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+        name: Detect secrets with gitleaks
+        args:
+          - --config=.gitleaks.toml
+          - --verbose
+          - --no-banner
+          - --redact
+
+  # Code formatting and linting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.8
+    hooks:
+      # Run the linter
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      # Run the formatter
+      - id: ruff-format
+
+  # Security: Python security linting
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.9
+    hooks:
+      - id: bandit
+        args: ['-c', 'pyproject.toml']
+        additional_dependencies: ['bandit[toml]']
+        exclude: ^tests/
+
+  # Type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - types-PyYAML
+          - types-requests
+          - types-python-dateutil
+        args: [--ignore-missing-imports]
+
+  # General code quality
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ['--unsafe']  # Allow custom tags in YAML
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  # Python-specific checks
+  - repo: https://github.com/pre-commit/pygrep-hooks
+    rev: v1.10.0
+    hooks:
+      - id: python-check-blanket-noqa
+      - id: python-check-blanket-type-ignore
+      - id: python-no-eval
+      - id: python-use-type-annotations
+      - id: text-unicode-replacement-char
+
+  # Security: dependency vulnerability check
+  - repo: https://github.com/Lucas-C/pre-commit-hooks-safety
+    rev: v1.3.3
+    hooks:
+      - id: python-safety-dependencies-check
+        files: requirements.txt
+
+  # Markdown linting
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.41.0
+    hooks:
+      - id: markdownlint
+        args: ['--fix']
+
+  # YAML formatting
+  - repo: https://github.com/macisamuele/language-formatters-pre-commit-hooks
+    rev: v2.14.0
+    hooks:
+      - id: pretty-format-yaml
+        args: [--autofix, --indent, '2']
+
+# CI configuration
+ci:
+  autofix_commit_msg: 'fix: auto fixes from pre-commit hooks'
+  autofix_prs: true
+  autoupdate_commit_msg: 'chore: pre-commit autoupdate'
+  autoupdate_schedule: weekly
+  skip: []
+  submodules: false

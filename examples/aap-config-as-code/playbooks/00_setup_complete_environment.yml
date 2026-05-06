@@ -1,0 +1,34 @@
+---
+- name: Setup Complete AAP 2.4 Test Environment
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    - name: Display setup information
+      ansible.builtin.debug:
+        msg:
+          - "Setting up AAP 2.4 test environment"
+          - "Controller: https://{{ controller_hostname }}"
+          - "This will create organizations, credentials, projects, inventories, job templates, and workflows"
+
+    - name: Run all setup playbooks
+      ansible.builtin.include_tasks: "{{ item }}"
+      loop:
+        - 01_organizations_users.yml
+        - 02_credentials.yml
+        - 03_projects.yml
+        - 04_inventories.yml
+        - 05_job_templates.yml
+        - 06_workflow_templates.yml
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg:
+          - "✓ AAP 2.4 environment setup complete!"
+          - "Next steps:"
+          - "  1. Verify data: ansible-playbook playbooks/99_verify_environment.yml"
+          - "  2. Run migration: aap-bridge migrate full"
+          - "  3. Validate migration: aap-bridge validate all"

@@ -1,0 +1,2202 @@
+"""
+Export and import commands.
+
+This module provides commands for exporting resources from source AAP
+and importing them to target AAP independently.
+"""
+
+import asyncio
+import json
+from pathlib import Path
+
+import click
+
+from aap_migration.cli.commands.migrate import PHASE1_RESOURCE_TYPES, PHASE3_RESOURCE_TYPES
+from aap_migration.cli.commands.patch_projects import patch_project_scm_details
+from aap_migration.cli.context import MigrationContext
+from aap_migration.cli.decorators import handle_errors, pass_context, requires_config
+from aap_migration.cli.utils import (
+    echo_error,
+    echo_info,
+    echo_success,
+    echo_warning,
+    format_count,
+    step_progress,
+)
+from aap_migration.migration.database import get_session
+from aap_migration.migration.exporter import create_exporter
+from aap_migration.migration.importer import create_importer
+from aap_migration.migration.parallel_exporter import ParallelExportCoordinator
+from aap_migration.migration.state import MigrationProgress, MigrationState
+from aap_migration.reporting.live_progress import MigrationProgressDisplay
+from aap_migration.resources import (
+    MANUAL_MIGRATION_ENDPOINTS,
+    ORGANIZATION_SCOPED_RESOURCES,
+    PARENT_SCOPED_RESOURCES,
+    READ_ONLY_ENDPOINTS,
+    RESOURCE_REGISTRY,
+    RUNTIME_DATA_ENDPOINTS,
+    get_endpoint,
+    get_exportable_types,
+    has_discovered_endpoints,
+    normalize_resource_type,
+)
+from aap_migration.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+# ============================================
+# Auto-Dependency Resolution Helper Functions
+# ============================================
+
+
+def get_importer_dependencies(resource_type: str) -> dict[str, str]:
+    """Get the DEPENDENCIES dictionary from an importer class.
+
+    Args:
+        resource_type: Type of resource (e.g., 'inventory_sources')
+
+    Returns:
+        Dictionary mapping field names to resource types
+        (e.g., {"organization": "organizations", "credential": "credentials"})
+        Returns empty dict if importer has no dependencies or doesn't exist.
+
+    Example:
+        >>> get_importer_dependencies('inventory_sources')
+        {'inventory': 'inventories', 'source_project': 'projects', 'credential': 'credentials'}
+    """
+    try:
+        # Create a dummy importer instance to access class-level DEPENDENCIES
+        # We don't need a real client/state here, just the class metadata
+        # But create_importer requires them, so we'll import the class directly
+        from aap_migration.migration.importer import (
+            CredentialImporter,
+            CredentialTypeImporter,
+            ExecutionEnvironmentImporter,
+            HostImporter,
+            InventoryGroupImporter,
+            InventoryImporter,
+            InventorySourceImporter,
+            JobTemplateImporter,
+            LabelImporter,
+            NotificationTemplateImporter,
+            ApplicationImporter,
+            SettingsImporter,
+            OrganizationImporter,
+            ProjectImporter,
+            RBACImporter,
+            ScheduleImporter,
+            TeamImporter,
+            UserImporter,
+            WorkflowImporter,
+        )
+
+        # Map resource types to importer classes
+        importer_classes = {
+            "organizations": OrganizationImporter,
+            "labels": LabelImporter,
+            "users": UserImporter,
+            "teams": TeamImporter,
+            "credential_types": CredentialTypeImporter,
+            "credentials": CredentialImporter,
+            "projects": ProjectImporter,
+            "execution_environments": ExecutionEnvironmentImporter,
+            "inventories": InventoryImporter,
+            "inventory_sources": InventorySourceImporter,
+            "inventory_groups": InventoryGroupImporter,
+            "hosts": HostImporter,
+            "job_templates": JobTemplateImporter,
+            "workflow_job_templates": WorkflowImporter,
+            "schedules": ScheduleImporter,
+            "notification_templates": NotificationTemplateImporter,
+            "applications": ApplicationImporter,
+            "settings": SettingsImporter,
+            "rbac": RBACImporter,
+        }
+
+        importer_class = importer_classes.get(resource_type)
+        if importer_class:
+            return importer_class.DEPENDENCIES.copy()
+        else:
+            logger.warning(f"Unknown resource type '{resource_type}', no dependencies found")
+            return {}
+    except Exception as e:
+        logger.warning(f"Failed to get dependencies for {resource_type}: {e}")
+        return {}
+
+
+def build_dependency_closure(
+    requested_types: list[str], all_available_types: list[str]
+) -> list[str]:
+    """Build complete ordered list of resource types including all dependencies.
+
+    Uses transitive closure to find all nested dependencies. Results are
+    sorted by migration_order to ensure dependencies are imported first.
+
+    Args:
+        requested_types: Resource types user wants to import
+        all_available_types: All resource types available in export directory
+
+    Returns:
+        Ordered list of resource types (dependencies first, then requested types)
+
+    Example:
+        >>> build_dependency_closure(['inventory_sources'], ['organizations', ...])
+        ['organizations', 'credential_types', 'credentials', 'projects', 'inventories', 'inventory_sources']
+    """
+    # Track all types we need to import (set for deduplication)
+    needed_types = set()
+
+    # Queue for BFS traversal
+    queue = list(requested_types)
+    visited = set()
+
+    while queue:
+        current_type = queue.pop(0)
+
+        if current_type in visited:
+            continue
+        visited.add(current_type)
+
+        # Add this type to needed set (if it's available)
+        if current_type in all_available_types:
+            needed_types.add(current_type)
+
+        # Get dependencies for this type
+        deps = get_importer_dependencies(current_type)
+
+        # Add dependency resource types to queue
+        for dep_resource_type in deps.values():
+            if dep_resource_type not in visited:
+                queue.append(dep_resource_type)
+
+    # Sort by migration_order to ensure dependencies come first
+    sorted_types = sorted(
+        needed_types,
+        key=lambda t: RESOURCE_REGISTRY.get(t).migration_order if t in RESOURCE_REGISTRY else 999,
+    )
+
+    return sorted_types
+
+
+def get_missing_dependencies(
+    types_to_check: list[str], migration_state: MigrationState
+) -> list[str]:
+    """Check which resource types haven't been imported yet.
+
+    Args:
+        types_to_check: Resource types to check import status for
+        migration_state: Migration state manager
+
+    Returns:
+        List of resource types that haven't been imported (total_imported == 0)
+
+    Example:
+        >>> get_missing_dependencies(['organizations', 'inventories'], state)
+        ['inventories']  # organizations already imported
+    """
+    missing = []
+
+    for resource_type in types_to_check:
+        try:
+            stats = migration_state.get_import_stats(resource_type)
+            # Consider it "missing" if:
+            # 1. Nothing imported yet (total_imported == 0)
+            #
+            # FIXED: Don't re-import if we've already attempted this resource type
+            # (some imported or skipped). If total_imported > 0, it means we already
+            # processed this type in a previous phase, so don't re-import.
+            #
+            # This prevents duplicate import attempts when Phase 3 (Automation)
+            # tries to import job_templates which depend on credentials that were
+            # already imported in Phase 1 (Infrastructure).
+            #
+            # Note: We removed the "or stats['pending'] > 0" check because:
+            # - Pending resources may be intentionally skipped (already exist in target)
+            # - Re-importing will cause all skipped resources to fail again
+            # - If a resource type was attempted (total_imported > 0), don't retry
+            if stats["total_imported"] == 0:
+                missing.append(resource_type)
+        except Exception as e:
+            logger.warning(f"Failed to get import stats for {resource_type}: {e}")
+            # If we can't check, assume it's missing (safer to re-import)
+            missing.append(resource_type)
+
+    return missing
+
+
+@click.command(name="export")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output directory path for exported files (default: exports/)",
+)
+@click.option(
+    "--resource-type",
+    "-r",
+    multiple=True,
+    type=str,
+    help="Resource types to export (default: all discovered or exportable)",
+)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Overwrite output directory if it exists",
+)
+@click.option(
+    "--records-per-file",
+    type=int,
+    default=None,
+    help="Maximum records per file (default: 1000)",
+)
+@click.option(
+    "--resume",
+    is_flag=True,
+    help="Resume from last checkpoint (skips already-exported resources via API filtering)",
+)
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    help="Automatically confirm prompts (skip confirmation)",
+)
+@pass_context
+@requires_config
+@handle_errors
+def export(
+    ctx: MigrationContext,
+    output: Path | None,
+    resource_type: tuple,
+    force: bool,
+    records_per_file: int | None,
+    resume: bool,
+    yes: bool,
+) -> None:
+    """Export RAW resources from source AAP 2.3 to directory structure.
+
+    Exports RAW resources from the source AAP instance to a directory with separate
+    files for each resource type. Data is saved without transformation to preserve
+    all original fields. Large resource types are automatically split into multiple
+    files to keep file sizes manageable.
+
+    NOTE: This command saves RAW data. Use 'transform' command to prepare data for import.
+
+    Three-phase workflow:
+        1. aap-bridge export (RAW data → exports/)
+        2. aap-bridge transform (exports/ → xformed/)
+        3. aap-bridge import (xformed/ → AAP 2.6)
+
+    Examples:
+
+        \b
+        # Export all resources (uses default: exports/)
+        aap-bridge export
+
+        \b
+        # Export specific resources
+        aap-bridge export --resource-type organizations --resource-type inventories
+
+        \b
+        # Custom output directory
+        aap-bridge export --output /custom/path/exports/
+
+        \b
+        # Custom records per file (default: 1000)
+        aap-bridge export --records-per-file 500
+
+        \b
+        # Force overwrite
+        aap-bridge export --force
+
+        \b
+        # Resume from checkpoint (skips API calls for already-exported resources)
+        aap-bridge export --resume
+    """
+    # Use defaults from config if not provided
+    if output is None:
+        output = Path(ctx.config.paths.export_dir)
+    else:
+        output = Path(output)
+
+    if records_per_file is None:
+        records_per_file = ctx.config.export.records_per_file
+
+    # Check if directory exists
+    if output.exists() and not force:
+        if not yes and not click.confirm(f"Directory {output} exists. Overwrite?"):
+            raise click.exceptions.Exit(0)
+
+    # Create directory structure
+    output.mkdir(parents=True, exist_ok=True)
+
+    # Determine resource types to export
+    # Use discovered endpoints if available, otherwise fall back to hardcoded list
+    if resource_type:
+        # User specified types - normalize them
+        types_to_export = [normalize_resource_type(rt) for rt in resource_type]
+    else:
+        # No types specified - use discovered or hardcoded, then normalize
+        discovered_types = get_exportable_types(use_discovered=True)
+        types_to_export = [normalize_resource_type(rt) for rt in discovered_types]
+
+    # Check if parallel resource type export is enabled
+    parallel_types_enabled = ctx.config.performance.parallel_resource_types
+
+    # Log export configuration to file only (use debug to avoid console output)
+    logger.debug(
+        "export_starting",
+        using_discovered=has_discovered_endpoints(),
+        resource_type_count=len(types_to_export),
+        resource_types=types_to_export,
+        resume=resume,
+        parallel_types=parallel_types_enabled,
+    )
+
+    async def run_export():
+        import logging
+        from datetime import datetime
+
+        # Suppress console logging for cleaner output (Live progress display will handle it)
+        root_logger = logging.getLogger()
+        original_handlers = root_logger.handlers[:]
+        for handler in root_logger.handlers[:]:
+            if hasattr(handler, "__class__") and "RichHandler" in handler.__class__.__name__:
+                root_logger.removeHandler(handler)
+
+        total_resources = 0
+        export_stats = {}
+
+        # Track skipped types (categorized)
+        skipped_readonly = []
+        skipped_runtime = []
+        skipped_manual = []
+        skipped_no_exporter = []
+        exported_successfully = []
+
+        try:
+            # Step 1: Pre-fetch counts for all resource types (before progress display)
+            # Silently fetch counts - will be shown in the Live progress display
+            phases = []
+            for rtype in types_to_export:
+                # Skip read-only endpoints
+                if rtype in READ_ONLY_ENDPOINTS:
+                    logger.debug(
+                        "skipping_readonly_endpoint",
+                        resource_type=rtype,
+                        reason="Read-only endpoint, not migrated",
+                    )
+                    skipped_readonly.append(rtype)
+                    continue
+
+                # Skip runtime/historical data endpoints
+                if rtype in RUNTIME_DATA_ENDPOINTS:
+                    logger.debug(
+                        "skipping_runtime_endpoint",
+                        resource_type=rtype,
+                        reason="Runtime/historical data, not migrated",
+                    )
+                    skipped_runtime.append(rtype)
+                    continue
+
+                # Skip manual migration endpoints
+                if rtype in MANUAL_MIGRATION_ENDPOINTS:
+                    logger.debug(
+                        "skipping_manual_endpoint",
+                        resource_type=rtype,
+                        reason="Requires manual migration",
+                    )
+                    skipped_manual.append(rtype)
+                    continue
+
+                try:
+                    endpoint = get_endpoint(rtype)
+                except KeyError:
+                    logger.warning("unknown_resource_type", resource_type=rtype)
+                    continue
+
+                # Create exporter using factory
+                try:
+                    temp_exporter = create_exporter(
+                        rtype,
+                        ctx.source_client,
+                        ctx.migration_state,
+                        ctx.config.performance,
+                    )
+                except NotImplementedError as e:
+                    # Exporter not implemented yet
+                    logger.warning("exporter_not_implemented", resource_type=rtype, message=str(e))
+                    skipped_no_exporter.append(rtype)
+                    continue
+
+                # Apply skip flags to temp exporter (before getting count)
+                if rtype == "hosts" and ctx.config.export.skip_dynamic_hosts:
+                    if hasattr(temp_exporter, "set_skip_dynamic_hosts"):
+                        temp_exporter.set_skip_dynamic_hosts(True)
+
+                if rtype == "inventories" and ctx.config.export.skip_smart_inventories:
+                    if hasattr(temp_exporter, "set_skip_smart_inventories"):
+                        temp_exporter.set_skip_smart_inventories(True)
+
+                # Build filters dict for count query
+                count_filters: dict[str, str] = {}
+                if rtype == "hosts" and ctx.config.export.skip_dynamic_hosts:
+                    count_filters["inventory_sources__isnull"] = "true"
+                    logger.info(
+                        "export_count_applying_dynamic_host_filter",
+                        resource_type=rtype,
+                        filter="inventory_sources__isnull=true (exclude dynamic hosts)",
+                    )
+                if rtype == "inventories" and ctx.config.export.skip_smart_inventories:
+                    count_filters["inventory_sources__isnull"] = "true"
+                    count_filters["not__pending_deletion"] = "true"
+                    count_filters["kind"] = ""
+                    logger.info(
+                        "export_count_applying_smart_inventory_filter",
+                        resource_type=rtype,
+                        filter="inventory_sources__isnull=true&not__pending_deletion=true",
+                    )
+
+                # Get count from API WITH FILTERS
+                count = await temp_exporter.get_count(
+                    endpoint, filters=count_filters if count_filters else None
+                )
+                description = rtype.replace("_", " ").title()
+                phases.append((rtype, description, count))
+                logger.debug(f"Fetched count for {description}: {count} resources")
+
+            # Filter out resources with 0 count - no value showing empty phases
+            phases = [(rtype, desc, count) for rtype, desc, count in phases if count > 0]
+
+            # Log export mode to file
+            logger.info("export_mode", mode="RAW", transformation=False)
+
+            # Step 3: Use the new Live progress display with all phases initialized upfront
+            with MigrationProgressDisplay(
+                title="🚀 AAP Export Progress (RAW Data)", enabled=True
+            ) as progress:
+                # Set total phases BEFORE initialize_phases to avoid jitter
+                progress.set_total_phases(len(phases))
+                # Initialize all phases upfront (guidellm pattern - like demo)
+                progress.initialize_phases(phases)
+
+                # Step 4: Export and transform each resource type
+                # Check if parallel resource type export is enabled
+                if parallel_types_enabled:
+                    # Use parallel export coordinator for concurrent resource type export
+                    coordinator = ParallelExportCoordinator(
+                        source_client=ctx.source_client,
+                        migration_state=ctx.migration_state,
+                        performance_config=ctx.config.performance,
+                        output_dir=output,
+                        records_per_file=records_per_file,
+                        export_config=ctx.config.export,
+                    )
+
+                    # Create progress callback to update display
+                    def progress_callback(rtype: str, stats: dict):
+                        phase_id = rtype  # We use resource_type as phase_id
+                        progress.update_phase(
+                            phase_id, stats.get("exported", 0), stats.get("failed", 0)
+                        )
+
+                    # Start all phases before parallel export begins
+                    # This transitions tasks from "pending" to "running" status
+                    for rtype, description, total_count in phases:
+                        progress.start_phase(rtype, description, total_count)
+
+                    # Get list of resource types to export
+                    resource_types_list = [rtype for rtype, _, _ in phases]
+
+                    # Export all resource types in parallel
+                    parallel_results = await coordinator.export_all_parallel(
+                        resource_types=resource_types_list,
+                        resume=resume,
+                        progress_callback=progress_callback,
+                    )
+
+                    # Aggregate results
+                    for rtype, stats in parallel_results.items():
+                        total_resources += stats.get("exported", 0)
+                        export_stats[rtype] = {
+                            "count": stats.get("exported", 0),
+                            "files": stats.get("files_written", 0),
+                        }
+                        # Complete phase in progress display
+                        progress.complete_phase(rtype)
+
+                else:
+                    # Sequential export (original behavior)
+                    for rtype, description, total_count in phases:
+                        # Create directory for this resource type
+                        resource_dir = output / rtype
+                        resource_dir.mkdir(parents=True, exist_ok=True)
+
+                        exporter = create_exporter(
+                            rtype,
+                            ctx.source_client,
+                            ctx.migration_state,
+                            ctx.config.performance,
+                        )
+
+                        # Apply skip_dynamic_hosts filter for hosts
+                        if rtype == "hosts" and ctx.config.export.skip_dynamic_hosts:
+                            if hasattr(exporter, "set_skip_dynamic_hosts"):
+                                exporter.set_skip_dynamic_hosts(True)
+                                logger.info(
+                                    "filtering_hosts",
+                                    message="Skipping hosts from dynamic inventory sources",
+                                )
+
+                        # Apply skip_smart_inventories filter for inventories
+                        if rtype == "inventories" and ctx.config.export.skip_smart_inventories:
+                            if hasattr(exporter, "set_skip_smart_inventories"):
+                                exporter.set_skip_smart_inventories(True)
+                                logger.info(
+                                    "filtering_inventories",
+                                    message="Skipping smart inventories (only exporting static inventories)",
+                                )
+
+                        # Set resume checkpoint if resume mode is enabled
+                        if resume:
+                            max_exported_id = ctx.migration_state.get_max_exported_id(rtype)
+                            if max_exported_id is not None:
+                                exporter.set_resume_checkpoint(max_exported_id)
+                                logger.info(
+                                    "resume_checkpoint_applied",
+                                    resource_type=rtype,
+                                    resume_from_id=max_exported_id,
+                                )
+
+                        # Export and transform resources with file splitting
+                        resource_count = 0
+                        failed_count = 0
+                        file_count = 0
+                        current_batch = []
+                        pending_mappings = []  # Batch mappings for DB writes
+                        mapping_batch_size = ctx.config.performance.mapping_batch_size
+
+                        # Start phase (we already know the total count from pre-fetch)
+                        phase_id = progress.start_phase(rtype, description, total_count)
+
+                        # Get endpoint for this resource type
+                        endpoint = get_endpoint(rtype)
+
+                        # Use parallel page fetching for faster export
+                        max_concurrent_pages = ctx.config.performance.max_concurrent_pages
+                        page_size = ctx.config.performance.batch_sizes.get(rtype, 200)
+
+                        async for resource in exporter.export_parallel(
+                            resource_type=rtype,
+                            endpoint=endpoint,
+                            page_size=page_size,
+                            max_concurrent_pages=max_concurrent_pages,
+                        ):
+                            try:
+                                # Store ID mapping in database BEFORE transformation
+                                source_id = resource.get("id")
+                                source_name = resource.get("name", "")
+
+                                # Queue mapping for batch insert (instead of individual write)
+                                # Settings don't have IDs, skip mapping for settings
+                                if source_id is not None:
+                                    pending_mappings.append(
+                                        {
+                                            "resource_type": rtype,
+                                            "source_id": source_id,
+                                            "target_id": None,  # Will be set during import
+                                            "source_name": source_name,
+                                        }
+                                    )
+
+                                # Batch commit mappings to reduce DB overhead
+                                if len(pending_mappings) >= mapping_batch_size:
+                                    ctx.migration_state.batch_create_mappings(
+                                        pending_mappings, batch_size=mapping_batch_size
+                                    )
+                                    pending_mappings = []
+
+                                # Save RAW resource data (NO transformation)
+                                # Only add source ID for tracking (if present)
+                                if source_id is not None:
+                                    resource["_source_id"] = source_id
+                                current_batch.append(resource)
+                                resource_count += 1
+                            except Exception as e:
+                                logger.warning(
+                                    "export_failed",
+                                    resource_type=rtype,
+                                    resource_id=resource.get("id"),
+                                    error=str(e),
+                                )
+                                failed_count += 1
+                                resource_count += 1
+
+                            # Update progress (including failures)
+                            progress.update_phase(phase_id, resource_count, failed_count)
+
+                            # Write batch when it reaches the limit
+                            if len(current_batch) >= records_per_file:
+                                file_count += 1
+                                file_path = resource_dir / f"{rtype}_{file_count:04d}.json"
+                                with open(file_path, "w") as f:
+                                    json.dump(current_batch, f, indent=2)
+
+                                logger.debug(
+                                    "export_file_written",
+                                    resource_type=rtype,
+                                    file_number=file_count,
+                                    records=len(current_batch),
+                                )
+
+                                current_batch = []
+
+                        # Commit remaining mappings
+                        if pending_mappings:
+                            ctx.migration_state.batch_create_mappings(
+                                pending_mappings, batch_size=mapping_batch_size
+                            )
+
+                        # Write remaining batch
+                        if current_batch:
+                            file_count += 1
+                            file_path = resource_dir / f"{rtype}_{file_count:04d}.json"
+                            with open(file_path, "w") as f:
+                                json.dump(current_batch, f, indent=2)
+
+                        total_resources += resource_count
+                        export_stats[rtype] = {
+                            "count": resource_count,
+                            "files": file_count,
+                        }
+
+                        logger.info(
+                            "exported_resources",
+                            resource_type=rtype,
+                            count=resource_count,
+                            files=file_count,
+                        )
+
+                        # Complete this phase
+                        progress.complete_phase(phase_id)
+
+                        # Track successful export
+                        exported_successfully.append(rtype)
+
+            # Write metadata file
+            metadata = {
+                "export_timestamp": datetime.utcnow().isoformat(),
+                "source_url": ctx.config.source.url,
+                "total_resources": total_resources,
+                "records_per_file": records_per_file,
+                "resource_types": export_stats,
+            }
+
+            with open(output / "metadata.json", "w") as f:
+                json.dump(metadata, f, indent=2)
+
+            # Log detailed export info to file
+            logger.info(
+                "export_completed",
+                total_resources=total_resources,
+                exported_types=exported_successfully,
+                skipped_readonly=skipped_readonly,
+                skipped_runtime=skipped_runtime,
+                skipped_manual=skipped_manual,
+                skipped_no_exporter=skipped_no_exporter,
+            )
+
+            # Show concise export summary
+            click.echo()
+            echo_info("Export Summary:")
+            click.echo(f"  Resources exported: {format_count(total_resources)}")
+            click.echo(f"  Resource types: {len(exported_successfully)}")
+            click.echo(
+                f"  Skipped (read-only/runtime): {len(skipped_readonly) + len(skipped_runtime)}"
+            )
+            if skipped_manual:
+                click.echo(f"  Requires manual migration: {len(skipped_manual)}")
+            if skipped_no_exporter:
+                click.echo(f"  Missing exporter: {len(skipped_no_exporter)}")
+                for rtype in skipped_no_exporter:
+                    click.echo(f"    - {rtype}")
+
+        except Exception as e:
+            echo_error(f"Export failed: {e}")
+            logger.error("export_failed", error=str(e), exc_info=True)
+            raise click.ClickException(str(e)) from e
+        finally:
+            # Restore original logging handlers
+            for handler in original_handlers:
+                if handler not in root_logger.handlers:
+                    root_logger.addHandler(handler)
+
+    try:
+        asyncio.run(run_export())
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(run_export())
+
+
+def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tuple[bool, dict]:
+    """Validate database state before import to prevent duplicates.
+
+    Checks for missing ID mappings that could cause duplicate resource creation.
+
+    Args:
+        input_dir: Directory containing transformed files
+        state: Migration state object
+        yes: Auto-confirm prompts
+
+    Returns:
+        Tuple of (should_continue, validation_stats)
+    """
+    validation_stats = {
+        "transformed_count": 0,
+        "mapped_count": 0,
+        "missing_mappings": 0,
+        "resource_details": {},
+    }
+
+    try:
+        # Count resources in transformed files
+        for resource_dir in input_dir.iterdir():
+            if not resource_dir.is_dir():
+                continue
+
+            resource_type = resource_dir.name
+            resource_count = 0
+
+            # Count resources in JSON files
+            for json_file in resource_dir.glob("*.json"):
+                try:
+                    with open(json_file) as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            resource_count += len(data)
+                        else:
+                            resource_count += 1
+                except Exception:
+                    continue
+
+            if resource_count > 0:
+                validation_stats["transformed_count"] += resource_count
+
+                # Count existing mappings in database
+                try:
+                    mapped_count = state.count_mapped_resources(resource_type)
+                except Exception:
+                    mapped_count = 0
+
+                validation_stats["mapped_count"] += mapped_count
+
+                missing = resource_count - mapped_count
+                if missing > 0:
+                    validation_stats["missing_mappings"] += missing
+                    validation_stats["resource_details"][resource_type] = {
+                        "transformed": resource_count,
+                        "mapped": mapped_count,
+                        "missing": missing,
+                    }
+
+        # If missing mappings found, warn user
+        if validation_stats["missing_mappings"] > 0:
+            echo_warning(
+                f"\n⚠️  Pre-Import Validation Warning:\n"
+                f"   Found {validation_stats['missing_mappings']} resources without ID mappings in database.\n"
+                f"   Re-importing these may create DUPLICATE resources in target AAP!\n"
+            )
+
+            echo_info("\nMissing mappings by resource type:")
+            for rtype, details in validation_stats["resource_details"].items():
+                if details["missing"] > 0:
+                    echo_warning(
+                        f"   {rtype}: {details['missing']} missing "
+                        f"({details['mapped']}/{details['transformed']} mapped)"
+                    )
+
+            echo_info(
+                "\n💡 Recommendations:\n"
+                "   1. Run 'aap-bridge migration-report' to check import status\n"
+                "   2. If first import failed, clean target AAP and re-import\n"
+                "   3. If resources exist in target, duplicate detection will prevent duplicates\n"
+            )
+
+            if not yes:
+                if not click.confirm(
+                    "\n⚠️  Continue with import? (Duplicate detection is enabled)",
+                    default=False,
+                ):
+                    echo_warning("Import cancelled by user.")
+                    return False, validation_stats
+
+        return True, validation_stats
+
+    except Exception as e:
+        logger.warning(f"Pre-import validation failed: {e}")
+        # Don't block import if validation fails
+        return True, validation_stats
+
+
+@click.command(name="import")
+@click.option(
+    "--input",
+    "-i",
+    "input_dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Input directory path containing transformed files (default: xformed/)",
+)
+@click.option(
+    "--resource-type",
+    "-r",
+    multiple=True,
+    type=str,
+    help="Resource types to import (default: all discovered or importable)",
+)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Skip confirmation and proceed with import",
+)
+@click.option(
+    "--resume",
+    is_flag=True,
+    help="Resume import from checkpoint (skip already-imported resources)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Perform dry run without making changes",
+)
+@click.option(
+    "--skip-dependencies",
+    is_flag=True,
+    help="Skip automatic dependency resolution (for testing/debugging only)",
+)
+@click.option(
+    "--check-dependencies",
+    is_flag=True,
+    help="Show what would be imported (including dependencies) and exit",
+)
+@click.option(
+    "--force-reimport",
+    is_flag=True,
+    help="Clear import progress for requested types (allows re-import after failures)",
+)
+@click.option(
+    "--phase",
+    type=click.Choice(["phase1", "phase2", "phase3", "all"], case_sensitive=False),
+    default="all",
+    help="Import phase: phase1 (up to projects), phase2 (patch projects and automation), phase3 (automation definitions), all (complete)",
+)
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    help="Automatically confirm prompts (skip confirmation)",
+)
+@pass_context
+@requires_config
+@handle_errors
+def import_cmd(
+    ctx: MigrationContext,
+    input_dir: Path | None,
+    resource_type: tuple,
+    force: bool,
+    resume: bool,
+    dry_run: bool,
+    skip_dependencies: bool,
+    check_dependencies: bool,
+    force_reimport: bool,
+    phase: str,
+    yes: bool,
+) -> None:
+    """Import TRANSFORMED resources to target AAP 2.6.
+
+    Imports transformed resources from xformed/ directory to the target AAP
+    instance. Data must be pre-transformed using the 'transform' command.
+    Automatically handles multi-file resource types and resolves
+    dependencies.
+
+    NOTE: This command expects data from xformed/ directory (already transformed).
+    Do NOT point it at exports/ (raw data). Use the transform command first.
+
+    Three-phase workflow:
+        1. aap-bridge export (RAW data → exports/)
+        2. aap-bridge transform (exports/ → xformed/)
+        3. aap-bridge import (xformed/ → AAP 2.6)
+
+    Dependencies are automatically resolved and imported. For example,
+    importing inventory_sources will automatically import organizations,
+    credential_types, credentials, projects, and inventories first.
+
+    Examples:
+
+        \b
+        # Import all resources (uses default: xformed/)
+        aap-bridge import
+
+        \b
+        # Import specific resources (dependencies auto-imported)
+        aap-bridge import --resource-type inventory_sources
+
+        \b
+        # Check what would be imported (including dependencies)
+        aap-bridge import --resource-type inventory_sources --check-dependencies
+
+        \b
+        # Custom input directory
+        aap-bridge import --input /custom/xformed/
+
+        \b
+        # Skip dependency resolution (for testing - will likely fail)
+        aap-bridge import --resource-type inventory_sources --skip-dependencies
+
+        \b
+        # Resume interrupted import (skip already-imported)
+        aap-bridge import --resume
+
+        \b
+        # Force import without confirmation
+        aap-bridge import --force
+
+        \b
+        # Dry run
+        aap-bridge import --dry-run
+
+        \b
+        # Three-phase import workflow:
+        # Phase 1: Import up to projects (Manual SCM)
+        aap-bridge import --phase phase1
+
+        \b
+        # Phase 2: Patch projects to activate SCM sync (controlled batching)
+        aap-bridge import --phase phase2
+
+        \b
+        # Phase 3: Import job_templates and automation definitions
+        aap-bridge import --phase phase3
+    """
+    import logging
+
+    # Use defaults from config if not provided
+    if input_dir is None:
+        input_dir = Path(ctx.config.paths.transform_dir)
+    else:
+        input_dir = Path(input_dir)
+
+    # Suppress console logging for cleaner output (Live progress display will handle it)
+    root_logger = logging.getLogger()
+    original_handlers = root_logger.handlers[:]
+    for handler in root_logger.handlers[:]:
+        if hasattr(handler, "__class__") and "RichHandler" in handler.__class__.__name__:
+            root_logger.removeHandler(handler)
+
+    # Reinitialize HTTP client before import
+    # The client may have been created outside an event loop context,
+    # making its AsyncClient and asyncio.Lock invalid. We need a fresh
+    # client for this asyncio.run() context.
+    from aap_migration.client.aap_target_client import AAPTargetClient
+
+    ctx._target_client = AAPTargetClient(
+        config=ctx.config.target,
+        rate_limit=ctx.config.performance.rate_limit,
+        log_payloads=ctx.config.logging.log_payloads,
+        max_payload_size=ctx.config.logging.max_payload_size,
+        max_connections=ctx.config.performance.http_max_connections,
+        max_keepalive_connections=ctx.config.performance.http_max_keepalive_connections,
+    )
+
+    # Load metadata with inline progress (:: → ✓)
+    metadata_file = input_dir / "metadata.json"
+    if not metadata_file.exists():
+        echo_error(f"Metadata file not found: {metadata_file}")
+        raise click.ClickException("Invalid export directory - metadata.json missing")
+
+    try:
+        with step_progress("Loading transformed files"):
+            with open(metadata_file) as f:
+                metadata = json.load(f)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        echo_error(f"Failed to load metadata: {e}")
+        raise click.ClickException(str(e)) from e
+
+    # Validate that data is transformed (from xformed/ not exports/)
+    if "transform_timestamp" not in metadata:
+        echo_error("❌ Input directory contains RAW export data, not transformed data")
+        echo_info("")
+        echo_info("This directory appears to contain RAW exports from AAP 2.3.")
+        echo_info("Import requires transformed data. Please run:")
+        echo_info("")
+        echo_info(f"  aap-bridge transform --input {input_dir} --output xformed/")
+        echo_info("  aap-bridge import --input xformed/")
+        echo_info("")
+        raise click.ClickException("Import requires transformed data from xformed/ directory")
+
+    # Handle Phase 2 (Patch Projects) merged with Phase 3
+    if phase == "phase2":
+        echo_info(
+            "Phase 2: Patching Projects + Importing Automation (Job Templates, Schedules, etc.)"
+        )
+        # Proceed to import Phase 3 resources after patching (logic handled in run_import)
+
+    # Determine resource types to import
+    available_types = list(metadata.get("resource_types", {}).keys())
+    requested_types = list(resource_type) if resource_type else available_types
+
+    # Dependency resolution (always enabled unless --skip-dependencies or importing all)
+    if check_dependencies:
+        # Pre-flight dependency validation
+        from aap_migration.validation import DependencyValidator
+
+        validator = DependencyValidator(ctx.migration_state, input_dir)
+        validation = validator.validate_all(requested_types if requested_types != available_types else None)
+        validator.display_validation_report(validation)
+
+        # Exit after showing validation report
+        return
+        types_with_deps = build_dependency_closure(requested_types, available_types)
+        missing_deps = get_missing_dependencies(types_with_deps, ctx.migration_state)
+
+        click.echo()
+        echo_info("Dependency Check:")
+        click.echo(f"  Requested types: {', '.join(requested_types)}")
+        click.echo(f"  Full dependency closure: {', '.join(types_with_deps)}")
+
+        if missing_deps:
+            echo_warning(f"  Missing (need to import): {', '.join(missing_deps)}")
+            click.echo()
+            echo_info(
+                "To import with dependencies, run:\n"
+                f"  aap-bridge import --input {input_dir} "
+                f"--resource-type {' --resource-type '.join(requested_types)}"
+            )
+        else:
+            echo_success("  All dependencies already imported!")
+
+        raise click.exceptions.Exit(0)
+
+    elif not skip_dependencies and requested_types != available_types:
+        # Auto-dependency resolution (enabled by default)
+        # Build dependency closure (includes dependencies + requested types)
+        types_with_deps = build_dependency_closure(requested_types, available_types)
+
+        # Check which ones are missing (not yet imported)
+        missing_deps = get_missing_dependencies(types_with_deps, ctx.migration_state)
+
+        # Show what will be imported
+        click.echo()
+        echo_info("Automatic Dependency Resolution:")
+        click.echo(f"  Requested types: {', '.join(requested_types)}")
+        click.echo(f"  With dependencies: {', '.join(types_with_deps)}")
+
+        if missing_deps:
+            echo_warning(f"  Missing (will import): {', '.join(missing_deps)}")
+            types_to_import = missing_deps
+        else:
+            echo_success("  All dependencies already imported!")
+            types_to_import = requested_types
+        click.echo()
+
+    else:
+        # Skip dependency resolution (--skip-dependencies flag or importing all types)
+        if skip_dependencies and requested_types != available_types:
+            echo_warning(
+                "Dependency resolution skipped (--skip-dependencies). "
+                "Import may fail if dependencies are missing."
+            )
+        # Always sort types_to_import by migration_order to ensure dependencies come first
+        # This is critical for credential_types to be imported before credentials, etc.
+        types_to_import = sorted(
+            requested_types,
+            key=lambda t: RESOURCE_REGISTRY.get(t).migration_order
+            if t in RESOURCE_REGISTRY
+            else 999,
+        )
+
+    # Filter by phase if specified
+    if phase == "phase1":
+        types_to_import = [t for t in types_to_import if t in PHASE1_RESOURCE_TYPES]
+        echo_info("Phase 1 import: credential_types/credentials will be PATCHed (pre-created)")
+    elif phase == "phase2":
+        # Phase 2 includes Phase 3 resources (merged)
+        types_to_import = [t for t in types_to_import if t in PHASE3_RESOURCE_TYPES]
+    elif phase == "phase3":
+        # Phase 3: Automation definitions (job templates, schedules, etc.)
+        types_to_import = [t for t in types_to_import if t in PHASE3_RESOURCE_TYPES]
+
+    # Force re-import: Clear import progress and reset target_ids
+    # IMPORTANT: Only clear requested types, NOT their dependencies
+    # Dependencies may already be imported and should not be cleared
+    if force_reimport:
+        click.echo()
+        echo_warning("Force re-import enabled - clearing import progress...")
+
+        for rtype in requested_types:  # Only clear explicitly requested types
+            # Clear migration_progress records (removes import status tracking)
+            cleared_count = ctx.migration_state.clear_progress(rtype)
+
+            # Reset target_id to NULL in id_mappings (preserves source_id from export)
+            reset_count = ctx.migration_state.reset_target_ids(rtype)
+
+            echo_info(
+                f"  {rtype}: Cleared {cleared_count} progress records, reset {reset_count} mappings"
+            )
+
+        click.echo()
+
+    if dry_run:
+        echo_warning("DRY RUN MODE - No changes will be made")
+
+    # Show import progress statistics if resume mode
+    if resume:
+        echo_info("Resume mode enabled - checking import progress...")
+        has_pending = False
+        for rtype in types_to_import:
+            stats = ctx.migration_state.get_import_stats(rtype)
+            if stats["total_exported"] > 0:
+                has_pending = stats["pending"] > 0 or has_pending
+                click.echo(
+                    f"  {rtype}: {format_count(stats['total_imported'])}\
+/{format_count(stats['total_exported'])} "
+                    f"({stats['percent_complete']:.1f}% complete, "
+                    f"{format_count(stats['pending'])} pending)"
+                )
+        if not has_pending:
+            echo_warning("No pending imports found. All resources already imported.")
+            return
+        click.echo()
+
+    # Log import details to file only
+    import_details = []
+    total_resources_to_import = 0
+    for rtype in types_to_import:
+        stats = metadata.get("resource_types", {}).get(rtype, {})
+        count = stats.get("count", 0)
+        files = stats.get("files", 0)
+        total_resources_to_import += count
+        import_details.append({"type": rtype, "count": count, "files": files})
+
+    logger.debug(
+        "import_starting",
+        resource_type_count=len(types_to_import),
+        resource_types=types_to_import,
+        total_resources=total_resources_to_import,
+        details=import_details,
+    )
+
+    # Confirmation check (unless --force, --yes, or --dry-run)
+    if not force and not yes and not dry_run:
+        click.echo()
+        echo_info(
+            f"Importing {len(types_to_import)} resource types ({format_count(total_resources_to_import)} resources)"
+        )
+        if not click.confirm("Proceed with import?"):
+            echo_info("Import cancelled")
+            raise click.exceptions.Exit(0)
+
+    async def batch_precheck_resources(
+        resource_type: str,
+        resources: list[dict],
+        importer,
+        client,
+        state,
+        progress,
+        phase_id: str,
+    ) -> list[dict]:
+        """
+        Proactively check which resources already exist in target environment.
+
+        User's architecture:
+        1. Clear all target_ids for resource type (start fresh)
+        2. Batch query target environment by identifier (parallel)
+        3. Update id_mappings for resources found in target
+        4. Filter resources that still need importing (target_id is NULL)
+        5. Update progress for pre-existing resources
+
+        Args:
+            resource_type: Type of resource (e.g., "users", "organizations")
+            resources: All resources to check
+            importer: Importer instance (provides IDENTIFIER_FIELD)
+            client: Target AAP client
+            state: Migration state manager
+            progress: Progress display
+            phase_id: Progress phase identifier
+
+        Returns:
+            List of resources that need to be imported (don't exist in target)
+        """
+        from aap_migration.utils.logging import get_logger
+
+        logger = get_logger(__name__)
+
+        if not resources:
+            return []
+
+        # Step 1: Clear target_ids to ensure we don't trust stale data
+        cleared_count = state.reset_target_ids(resource_type)
+        logger.info("cleared_target_ids", resource_type=resource_type, count=cleared_count)
+
+        # Step 2: Get identifier field from importer
+        identifier_field = getattr(importer, "IDENTIFIER_FIELD", "name")
+
+        # Extract identifiers from resources
+        # Track duplicates to report them in migration report
+        resource_identifiers = []
+        resource_by_identifier = {}
+        duplicates_skipped = []  # Track duplicates for reporting
+
+        for resource in resources:
+            identifier = resource.get(identifier_field)
+            source_id = resource.get("_source_id")
+            org = None  # Initialize org for all resources (prevents UnboundLocalError)
+            parent_id = None  # Initialize parent_id for parent-scoped resources
+            if identifier and source_id:
+                # Use composite key for organization-scoped resources to avoid duplicates
+                if resource_type in ORGANIZATION_SCOPED_RESOURCES:
+                    org = resource.get("organization")
+                    # For credentials, include credential_type in uniqueness check
+                    # AAP constraint: (name, organization, credential_type) must be unique
+                    if resource_type == "credentials":
+                        cred_type = resource.get("credential_type")
+                        dict_key = (identifier, org, cred_type)
+                    else:
+                        # Other org-scoped resources: (name, org) is unique
+                        dict_key = (identifier, org) if org is not None else identifier
+                elif resource_type in PARENT_SCOPED_RESOURCES:
+                    # Parent-scoped resources: unique within parent (e.g., inventory_sources scoped to inventory)
+                    parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+                    parent_id = resource.get(parent_field)
+                    dict_key = (identifier, parent_id) if parent_id is not None else identifier
+                else:
+                    # Use name only for globally unique resources
+                    dict_key = identifier
+
+                # Check if this key already exists (duplicate name in same org)
+                if dict_key in resource_by_identifier:
+                    # DUPLICATE DETECTED: Mark as skipped in database
+                    existing_source_id = resource_by_identifier[dict_key]["source_id"]
+
+                    # Determine which one to keep (keep the first one)
+                    # Mark the current (duplicate) as skipped
+                    # Build scope string for error message
+                    if org is not None:
+                        scope_str = f"organization {org}"
+                    elif parent_id is not None and resource_type in PARENT_SCOPED_RESOURCES:
+                        parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+                        scope_str = f"{parent_field} {parent_id}"
+                    else:
+                        scope_str = "no specific scope"
+
+                    # Build reason message - for credentials include credential_type
+                    if resource_type == "credentials":
+                        cred_type = resource.get("credential_type")
+                        reason = (
+                            f"Duplicate credential: name '{identifier}', {scope_str}, credential_type {cred_type}. "
+                            f"Another credential with source_id={existing_source_id} has the same name, organization, and credential_type. "
+                            f"Source AAP has true duplicate credentials (same name, org, and type). "
+                            f"Only the first occurrence (source_id={existing_source_id}) will be imported. "
+                            f"Please delete or rename this duplicate credential in source AAP."
+                        )
+                    else:
+                        reason = (
+                            f"Duplicate {resource_type} name '{identifier}' in {scope_str}. "
+                            f"Another {resource_type[:-1] if resource_type.endswith('s') else resource_type} with source_id={existing_source_id} has the same name. "
+                            f"Source AAP has multiple {resource_type} with identical names in the same organization. "
+                            f"Only the first occurrence (source_id={existing_source_id}) will be imported. "
+                            f"Please rename this {resource_type[:-1] if resource_type.endswith('s') else resource_type} in source AAP and re-export, or manually create it in target AAP."
+                        )
+
+                    # Create progress record first, then mark as skipped
+                    state.mark_in_progress(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        source_name=identifier,
+                        phase="import",
+                    )
+                    state.mark_skipped(
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        reason=reason,
+                    )
+
+                    duplicates_skipped.append({
+                        "source_id": source_id,
+                        "name": identifier,
+                        "organization": org,
+                        "parent_id": parent_id,
+                        "kept_source_id": existing_source_id,
+                    })
+
+                    logger.warning(
+                        "duplicate_resource_skipped",
+                        resource_type=resource_type,
+                        skipped_source_id=source_id,
+                        kept_source_id=existing_source_id,
+                        name=identifier,
+                        organization=org,
+                        parent_id=parent_id,
+                        reason="Duplicate name in same scope",
+                    )
+                    # Skip this duplicate, keep the first one
+                    continue
+
+                # Not a duplicate - add to tracking lists
+                resource_identifiers.append(identifier)
+                resource_by_identifier[dict_key] = {"source_id": source_id, "data": resource}
+
+        if duplicates_skipped:
+            logger.warning(
+                "duplicates_detected_and_skipped",
+                resource_type=resource_type,
+                total_duplicates=len(duplicates_skipped),
+                message=f"Skipped {len(duplicates_skipped)} duplicate {resource_type}. Check migration report for details.",
+            )
+
+        if not resource_identifiers:
+            logger.warning(
+                "no_identifiers_found",
+                resource_type=resource_type,
+                identifier_field=identifier_field,
+            )
+            return resources
+
+        logger.info(
+            "batch_checking_existing_resources",
+            resource_type=resource_type,
+            total=len(resource_identifiers),
+            identifier_field=identifier_field,
+        )
+
+        # Step 3: Batch query target environment with URI length limit
+        # Use character-based batching to avoid 414 URI Too Large errors
+        # Long resource names (e.g., inventories) can cause URI to exceed 8KB limit
+        MAX_QUERY_CHARS = 4000  # Safe limit for query parameters
+        existing_by_identifier = {}
+
+        # Build batches based on character count, not fixed count
+        current_batch: list[str] = []
+        current_length = 0
+        batches: list[list[str]] = []
+
+        for identifier in resource_identifiers:
+            # Account for identifier length + comma separator
+            identifier_length = len(identifier) + 1
+
+            if current_length + identifier_length > MAX_QUERY_CHARS and current_batch:
+                # Current batch is full, start new one
+                batches.append(current_batch)
+                current_batch = [identifier]
+                current_length = identifier_length
+            else:
+                current_batch.append(identifier)
+                current_length += identifier_length
+
+        # Don't forget the last batch
+        if current_batch:
+            batches.append(current_batch)
+
+        logger.info(
+            "batch_precheck_batches_created",
+            resource_type=resource_type,
+            total_identifiers=len(resource_identifiers),
+            num_batches=len(batches),
+            max_query_chars=MAX_QUERY_CHARS,
+        )
+
+        for batch_idx, batch_identifiers in enumerate(batches):
+            # Query target: GET /api/v2/{resource_type}/?{field}__in=val1,val2,val3
+            filter_key = f"{identifier_field}__in"
+            filters = {filter_key: ",".join(batch_identifiers)}
+
+            try:
+                existing_batch = await client.list_resources(
+                    resource_type=resource_type, filters=filters
+                )
+
+                # Index by identifier for fast lookup
+                # For organization-scoped resources, use composite key (name, organization)
+                # For credentials, also include credential_type to match AAP's uniqueness constraint
+                # For parent-scoped resources (inventory_sources, hosts, groups), use (name, parent_id)
+                for existing_resource in existing_batch:
+                    if resource_type in ORGANIZATION_SCOPED_RESOURCES:
+                        name = existing_resource.get("name")
+                        org = existing_resource.get("organization")
+                        if name is not None:
+                            # For credentials: (name, org, credential_type)
+                            if resource_type == "credentials":
+                                cred_type = existing_resource.get("credential_type")
+                                key = (name, org, cred_type)
+                            else:
+                                # Other resources: (name, org)
+                                key = (name, org) if org is not None else name
+                            existing_by_identifier[key] = existing_resource
+                    elif resource_type in PARENT_SCOPED_RESOURCES:
+                        # Parent-scoped: (name, parent_id) - e.g., (source_name, inventory_id)
+                        name = existing_resource.get("name")
+                        parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+                        parent_id = existing_resource.get(parent_field)
+                        if name is not None:
+                            key = (name, parent_id) if parent_id is not None else name
+                            existing_by_identifier[key] = existing_resource
+                    else:
+                        # Use name only for globally unique resources
+                        existing_identifier = existing_resource.get(identifier_field)
+                        if existing_identifier:
+                            existing_by_identifier[existing_identifier] = existing_resource
+
+            except Exception as e:
+                logger.error(
+                    "batch_query_failed",
+                    resource_type=resource_type,
+                    batch_idx=batch_idx,
+                    batch_size=len(batch_identifiers),
+                    error=str(e),
+                )
+                # Continue with next batch
+
+        # Step 4: Update id_mappings for resources found in target
+        found_count = 0
+        to_import = []
+
+        for dict_key, resource_info in resource_by_identifier.items():
+            source_id = resource_info["source_id"]
+            resource_data = resource_info["data"]
+
+            # Build lookup key based on resource scope
+            # For org-scoped resources, dict_key is (name, org) or (name, org, cred_type) tuple
+            # For parent-scoped resources, dict_key is (name, parent_id) tuple
+            # For globally unique resources, dict_key is just the name
+            if resource_type in ORGANIZATION_SCOPED_RESOURCES:
+                # dict_key is already (name, org) or (name, org, cred_type) or name
+                lookup_key = dict_key
+                # Extract identifier (name) for logging
+                identifier = dict_key[0] if isinstance(dict_key, tuple) else dict_key
+            elif resource_type in PARENT_SCOPED_RESOURCES:
+                # dict_key is already (name, parent_id) or name
+                lookup_key = dict_key
+                # Extract identifier (name) for logging
+                identifier = dict_key[0] if isinstance(dict_key, tuple) else dict_key
+            else:
+                # dict_key is the identifier (name)
+                lookup_key = dict_key
+                identifier = dict_key
+
+            # Debug: Log lookup key being used
+            logger.debug(
+                "checking_resource_existence",
+                resource_type=resource_type,
+                source_id=source_id,
+                lookup_key=str(lookup_key),
+                scoped=resource_type in ORGANIZATION_SCOPED_RESOURCES
+                or resource_type in PARENT_SCOPED_RESOURCES,
+            )
+
+            if lookup_key in existing_by_identifier:
+                # Resource exists in target - create/update id_mapping
+                existing = existing_by_identifier[lookup_key]
+
+                state.save_id_mapping(
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    target_id=existing["id"],
+                    source_name=identifier,
+                    target_name=existing.get(identifier_field),
+                )
+                # FIX: Mark as skipped (not completed) - resource already exists in target
+                # This matches console "Skipped: X" output and prevents report mismatch
+                state.mark_skipped(
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    reason=f"Pre-existing in target (found in batch precheck)",
+                    target_id=existing["id"],
+                    target_name=existing.get(identifier_field),
+                    source_name=identifier,
+                )
+
+                found_count += 1
+
+                logger.debug(
+                    "resource_exists_in_target",
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    target_id=existing["id"],
+                    lookup_key=str(lookup_key),
+                )
+            else:
+                # Resource does NOT exist - needs to be imported
+                to_import.append(resource_data)
+
+        # Step 5: Update progress for pre-existing resources (they are skipped, not imported)
+        if found_count > 0:
+            # Pre-existing resources count as skipped (completed=0, failed=0, skipped=found_count)
+            progress.update_phase(phase_id, 0, 0, found_count)
+            logger.info(
+                "pre_existing_resources_found",
+                resource_type=resource_type,
+                already_existing=found_count,
+                to_import=len(to_import),
+                total=len(resources),
+            )
+
+        return to_import
+
+    async def run_import():
+        # PRE-IMPORT VALIDATION: Check for missing mappings to prevent duplicates
+        should_continue, validation_stats = validate_pre_import_state(
+            input_dir, ctx.migration_state, yes
+        )
+        if not should_continue:
+            return  # User cancelled import
+
+        if validation_stats["missing_mappings"] > 0:
+            echo_info(
+                f"\n✓ Duplicate detection enabled - will prevent creating duplicates for "
+                f"{validation_stats['missing_mappings']} unmapped resources\n"
+            )
+
+        total_imported = 0
+        total_failed = 0
+        total_skipped = 0
+        skipped_no_importer = []
+
+        # Track detailed stats per resource type
+        run_stats = {}
+
+        # Initialize phases
+        phases = []
+
+        # Scan for projects that need SCM patching (needed for both phase2 and all)
+        patch_count = 0
+        if not dry_run:
+            projects_dir = input_dir / "projects"
+            if projects_dir.exists():
+                json_files = sorted(projects_dir.glob("projects_*.json"))
+                # Silent scan (no step_progress)
+                for json_file in json_files:
+                    try:
+                        with open(json_file) as f:
+                            resources = json.load(f)
+                            for resource in resources:
+                                if "_deferred_scm_details" in resource:
+                                    patch_count += 1
+                    except Exception:
+                        pass
+
+        # Build phases list based on import phase
+        if phase == "phase2":
+            # Phase 2: Patching first, then automation resources
+            if patch_count > 0:
+                phases.append(("patching", "Patching Projects", patch_count))
+            for rtype in types_to_import:
+                stats = metadata.get("resource_types", {}).get(rtype, {})
+                count = stats.get("count", 0)
+                description = rtype.replace("_", " ").title()
+                phases.append((rtype, description, count))
+
+        elif phase == "all":
+            # Phase "all": Import Phase1 resources, patch projects, then import Phase3 resources
+            # This ensures projects are synced before job templates and schedules are imported
+            for rtype in types_to_import:
+                stats = metadata.get("resource_types", {}).get(rtype, {})
+                count = stats.get("count", 0)
+                description = rtype.replace("_", " ").title()
+                phases.append((rtype, description, count))
+
+                # Insert patching phase after projects (if projects exist and have deferred SCM)
+                if rtype == "projects" and patch_count > 0:
+                    phases.append(("patching", "Patching Projects", patch_count))
+
+        else:
+            # Phase1 or Phase3: Just import the requested types
+            for rtype in types_to_import:
+                stats = metadata.get("resource_types", {}).get(rtype, {})
+                count = stats.get("count", 0)
+                description = rtype.replace("_", " ").title()
+                phases.append((rtype, description, count))
+
+        # Filter out resources with 0 count - no value showing empty phases
+        phases = [(rtype, desc, count) for rtype, desc, count in phases if count > 0]
+
+        try:
+            # Track skipped resource types (no importer available)
+            skipped_no_importer = []
+
+            with MigrationProgressDisplay(title="🚀 AAP Import Progress", enabled=True) as progress:
+                # Set total phases BEFORE initialize_phases to avoid jitter
+                progress.set_total_phases(len(phases))
+                # Initialize all phases upfront (guidellm pattern - like demo)
+                progress.initialize_phases(phases)
+
+                for rtype, description, total_count in phases:
+                    # Handle patching phase (Phase 2 logic)
+                    if rtype == "patching":
+                        # Call patch logic using existing progress display
+                        # Note: patch_project_scm_details handles start_phase/update/complete internally
+                        await patch_project_scm_details(
+                            ctx,
+                            input_dir,
+                            batch_size=ctx.config.performance.project_patch_batch_size,
+                            interval=ctx.config.performance.project_patch_batch_interval,
+                            progress_display=progress,
+                        )
+                        continue
+
+                    # Start phase
+                    phase_id = progress.start_phase(rtype, description, total_count)
+
+                    # Load resume cache if resume mode is enabled
+                    imported_source_ids_cache = set()
+                    if resume:
+                        imported_source_ids_cache = ctx.migration_state.get_imported_source_ids(
+                            rtype
+                        )
+                        if imported_source_ids_cache:
+                            logger.info(
+                                "import_resume_cache_loaded",
+                                resource_type=rtype,
+                                already_imported=len(imported_source_ids_cache),
+                            )
+
+                    # Load all files for this resource type
+                    resource_dir = input_dir / rtype
+                    if not resource_dir.exists():
+                        echo_warning(f"No directory for {rtype}, skipping")
+                        progress.complete_phase(phase_id)
+                        continue
+
+                    # Find all JSON files for this resource type
+                    json_files = sorted(resource_dir.glob(f"{rtype}_*.json"))
+
+                    if not json_files:
+                        echo_warning(f"No files found for {rtype}, skipping")
+                        progress.complete_phase(phase_id)
+                        continue
+
+                    # Load resources from all files
+                    all_resources = []
+                    for json_file in json_files:
+                        try:
+                            with open(json_file) as f:
+                                file_resources = json.load(f)
+                                all_resources.extend(file_resources)
+                        except Exception as e:
+                            echo_error(f"Failed to load {json_file}: {e}")
+                            continue
+
+                    resources = all_resources
+                    if not resources:
+                        echo_warning(f"No {rtype} to import, skipping")
+                        progress.complete_phase(phase_id)
+                        continue
+
+                    imported_count = 0
+                    failed_count = 0
+                    skipped_count = 0
+
+                    # Import expects pre-transformed data from xformed/ directory
+                    # Ensure _source_id is set (fallback to database lookup if missing)
+                    transformed_resources = []
+                    for resource in resources:
+                        source_id = resource.get("_source_id")
+
+                        # Fallback: Look up source_id from database by name if missing
+                        if source_id is None:
+                            resource_name = resource.get("name", "")
+                            mapping = ctx.migration_state.get_mapping_by_name(rtype, resource_name)
+                            if mapping:
+                                source_id = mapping.source_id
+                                resource["_source_id"] = source_id
+                                logger.info(
+                                    "recovered_source_id_from_database",
+                                    resource_type=rtype,
+                                    name=resource_name,
+                                    source_id=source_id,
+                                )
+                            else:
+                                logger.warning(
+                                    "missing_source_id",
+                                    resource_type=rtype,
+                                    name=resource_name,
+                                    message="No _source_id in JSON and no database mapping found",
+                                )
+
+                        transformed_resources.append(resource)
+
+                    if not dry_run:
+                        # Create appropriate importer using factory
+                        try:
+                            importer = create_importer(
+                                rtype,
+                                ctx.target_client,
+                                ctx.migration_state,
+                                ctx.config.performance,
+                                ctx.config.resource_mappings,
+                            )
+                        except NotImplementedError:
+                            logger.info(
+                                "skipping_no_importer",
+                                resource_type=rtype,
+                                message=f"No importer available for {rtype}",
+                            )
+                            skipped_no_importer.append(rtype)
+                            # Mark phase as complete (all skipped - pass 0 completed, 0 failed, total_count skipped)
+                            progress.update_phase(phase_id, 0, 0, total_count)
+                            progress.complete_phase(phase_id)
+                            continue
+
+                        # Import based on resource type
+                        # Map resource type names to their importer method names
+                        # Note: 'hosts' is handled separately below (line-by-line import)
+                        method_map = {
+                            # Foundation resources
+                            "organizations": "import_organizations",
+                            "instances": "import_instances",
+                            "instance_groups": "import_instance_groups",
+                            "labels": "import_labels",
+                            # Identity and access
+                            "users": "import_users",
+                            "teams": "import_teams",
+                            # Credentials
+                            "credential_types": "import_credential_types",
+                            "credentials": "import_credentials",
+                            # Projects and execution
+                            "projects": "import_projects",
+                            "execution_environments": "import_execution_environments",
+                            # Inventory resources
+                            "inventories": "import_inventories",
+                            "inventory_sources": "import_inventory_sources",
+                            "inventory_groups": "import_inventory_groups",
+                            # Job templates and workflows
+                            "job_templates": "import_job_templates",
+                            "workflow_job_templates": "import_workflow_job_templates",
+                            "schedules": "import_schedules",
+                            # Notifications
+                            "notification_templates": "import_notification_templates",
+                            # OAuth and Configuration
+                            "applications": "import_applications",
+                            "settings": "import_settings",
+                            # RBAC
+                            "rbac": "import_rbac_assignments",
+                        }
+
+                        method_name = method_map.get(rtype)
+                        echo_info(f"📋 Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}")
+                        if method_name and hasattr(importer, method_name):
+                            # TEMPORARY FIX: Skip batch precheck for automation resources to avoid hang
+                            # TODO: Investigate why batch_precheck_resources blocks for these types
+                            if rtype in ("job_templates", "workflow_job_templates", "schedules"):
+                                echo_warning(f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using database check)")
+                                logger.warning(
+                                    "batch_precheck_skipped_temporary_fix",
+                                    resource_type=rtype,
+                                    message="Skipping batch precheck due to known hang issue, using database check instead"
+                                )
+
+                                # Database check to avoid re-importing already completed resources
+                                # This prevents "already exists" errors on re-runs while avoiding the API hang
+                                # CRITICAL FIX: Also verify target_id still exists in target AAP
+
+                                # Step 1: Query database for completed/skipped resources (sync)
+                                resources_needing_validation = []
+                                resources_to_import = []
+                                already_completed_count = 0
+
+                                with get_session(ctx.migration_state.database_url) as session:
+                                    for resource in transformed_resources:
+                                        source_id = resource.get("_source_id")
+
+                                        # Check if already successfully completed or intentionally skipped
+                                        existing = session.query(MigrationProgress).filter_by(
+                                            resource_type=rtype,
+                                            source_id=source_id
+                                        ).first()
+
+                                        # If completed/skipped, need to validate target still exists
+                                        if existing and existing.status in ("completed", "skipped") and existing.target_id:
+                                            resources_needing_validation.append({
+                                                "resource": resource,
+                                                "source_id": source_id,
+                                                "target_id": existing.target_id,
+                                                "status": existing.status,
+                                            })
+                                        elif existing and existing.status in ("completed", "skipped"):
+                                            # No target_id but marked completed/skipped (shouldn't happen)
+                                            # Skip anyway to be safe
+                                            already_completed_count += 1
+                                            logger.info(
+                                                "resource_already_processed_skip",
+                                                resource_type=rtype,
+                                                source_id=source_id,
+                                                status=existing.status,
+                                                target_id=None,
+                                                verified="no_target_id"
+                                            )
+                                        else:
+                                            # Not completed/skipped (pending, failed, or no record)
+                                            resources_to_import.append(resource)
+
+                                # Step 2: Validate target resources exist (async, outside session)
+                                endpoint = get_endpoint(rtype)
+                                for item in resources_needing_validation:
+                                    target_id = item["target_id"]
+                                    source_id = item["source_id"]
+                                    resource = item["resource"]
+
+                                    try:
+                                        # Quick existence check (will raise if not found)
+                                        await ctx.target_client.get(f"{endpoint}{target_id}/")
+                                        # Target exists - safe to skip
+                                        # Mark as skipped in database for accurate reporting
+                                        ctx.migration_state.mark_skipped(
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            reason=f"Pre-existing in target (validated via database check)",
+                                            target_id=target_id,
+                                            target_name=resource.get("name"),
+                                            source_name=resource.get("name"),
+                                        )
+                                        already_completed_count += 1
+                                        logger.info(
+                                            "resource_already_processed_skip",
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            target_id=target_id,
+                                            status=item["status"],
+                                            verified="target_exists"
+                                        )
+                                    except Exception as e:
+                                        # Target deleted from AAP - need to re-import
+                                        logger.warning(
+                                            "target_deleted_re_importing",
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            target_id=target_id,
+                                            error=str(e),
+                                            action="clearing_status_and_reimporting"
+                                        )
+                                        # Add to import list
+                                        resources_to_import.append(resource)
+
+                                        # Clear database status (new session)
+                                        with get_session(ctx.migration_state.database_url) as session:
+                                            existing = session.query(MigrationProgress).filter_by(
+                                                resource_type=rtype,
+                                                source_id=source_id
+                                            ).first()
+                                            if existing:
+                                                existing.status = "pending"
+                                                existing.target_id = None
+                                                session.commit()
+
+                                logger.info(
+                                    "database_check_result",
+                                    resource_type=rtype,
+                                    total=len(transformed_resources),
+                                    already_completed=already_completed_count,
+                                    to_import=len(resources_to_import)
+                                )
+                            else:
+                                # Proactive batch pre-check: query target to find existing resources
+                                # This avoids "already exists" errors and shows accurate progress
+                                resources_to_import = await batch_precheck_resources(
+                                    resource_type=rtype,
+                                    resources=transformed_resources,
+                                    importer=importer,
+                                    client=ctx.target_client,
+                                    state=ctx.migration_state,
+                                    progress=progress,
+                                    phase_id=phase_id,
+                                )
+
+                            # Calculate skipped count (resources that already exist)
+                            skipped_count = len(transformed_resources) - len(resources_to_import)
+
+                            if resources_to_import:
+                                echo_info(f"🔄 Starting import for {rtype}: {len(resources_to_import)} resources")
+                                # Create progress callback for live updates
+                                def update_progress(
+                                    success: int, failed: int, skipped: int, phase_id=phase_id
+                                ) -> None:
+                                    """Update progress display in real-time."""
+                                    progress.update_phase(phase_id, success, failed, skipped)
+
+                                method = getattr(importer, method_name)
+                                echo_info(f"⏳ Calling {method_name}...")
+                                results = await method(
+                                    resources_to_import, progress_callback=update_progress
+                                )
+                                echo_info(f"✅ {method_name} completed: {len(results) if results else 0} results")
+
+                                # Calculate actual imported, failed, and skipped from results
+                                imported_count = len(
+                                    [r for r in results if r and not r.get("_skipped")]
+                                )
+                                skipped_in_import = len(
+                                    [r for r in results if r and r.get("_skipped")]
+                                )
+                                failed_count = (
+                                    len(resources_to_import) - imported_count - skipped_in_import
+                                )
+
+                                # Final progress update
+                                # Include both skipped_in_import (found by importer) and skipped_count (found by batch_precheck)
+                                progress.update_phase(
+                                    phase_id,
+                                    completed=imported_count + failed_count + skipped_in_import,
+                                    failed=failed_count,
+                                    skipped=skipped_in_import + skipped_count,
+                                )
+
+                                # Aggregate this phase's skips into total_skipped
+                                total_skipped += skipped_in_import
+                            else:
+                                imported_count = 0
+                                skipped_in_import = 0  # All resources were skipped by pre-check and counted in skipped_count
+                                total_skipped += skipped_in_import
+                                logger.info(
+                                    "all_resources_exist",
+                                    resource_type=rtype,
+                                    total=len(transformed_resources),
+                                )
+
+                            # NOTE: SCM sync waiting has been removed from automatic flow.
+                            # With two-phase import, users run phase1 (up to projects),
+                            # then manually wait for project sync, then run phase2.
+                            # The wait_for_project_sync() function is still available
+                            # for manual use if needed.
+
+                        elif rtype == "hosts":
+                            # Hosts are imported using bulk API for performance
+                            # Group hosts by inventory for bulk import
+                            hosts_by_inventory: dict[int, list[dict]] = {}
+                            hosts_without_inventory = 0
+
+                            for host in transformed_resources:
+                                source_id = host.get("_source_id")
+
+                                # Skip if already imported (resume mode)
+                                if resume and source_id in imported_source_ids_cache:
+                                    skipped_count += 1
+                                    continue
+
+                                inv_id = host.get("inventory")
+                                if inv_id:
+                                    hosts_by_inventory.setdefault(inv_id, []).append(host)
+                                else:
+                                    hosts_without_inventory += 1
+
+                            if hosts_without_inventory > 0:
+                                logger.warning(
+                                    "hosts_without_inventory",
+                                    count=hosts_without_inventory,
+                                    message="Hosts skipped - no inventory field",
+                                )
+
+                            # Track totals across all inventories
+                            total_created = 0
+                            total_failed = hosts_without_inventory
+                            total_skipped_hosts_bulk = 0
+
+                            # Import each inventory's hosts in bulk
+                            for inv_source_id, inv_hosts in hosts_by_inventory.items():
+                                # Resolve source inventory ID to target inventory ID
+                                target_inv_id = ctx.migration_state.get_mapped_id(
+                                    "inventories", inv_source_id
+                                )
+                                if not target_inv_id:
+                                    logger.warning(
+                                        "inventory_not_mapped",
+                                        source_inventory_id=inv_source_id,
+                                        host_count=len(inv_hosts),
+                                        message="Skipping hosts - inventory not in id_mappings",
+                                    )
+                                    # These are skipped (not failed) since inventory wasn't migrated
+                                    total_skipped_hosts_bulk += len(inv_hosts)
+                                    progress.update_phase(
+                                        phase_id,
+                                        total_created + total_failed,
+                                        total_failed,
+                                        total_skipped_hosts_bulk,
+                                    )
+                                    continue
+
+                                # Create progress callback that captures current totals
+                                # Using default args to capture current values
+                                def bulk_progress(
+                                    created: int,
+                                    failed: int,
+                                    skipped: int,  # Accept skipped from bulk importer
+                                    _phase_id: str = phase_id,
+                                    base_created: int = total_created,
+                                    base_failed: int = total_failed,
+                                    base_skipped: int = total_skipped_hosts_bulk,  # Pass base skipped
+                                ) -> None:
+                                    # completed = created + failed (NOT skipped - it's passed separately)
+                                    # Progress bar will calculate: completed + skipped = total processed
+                                    progress.update_phase(
+                                        _phase_id,
+                                        completed=base_created + created + base_failed + failed,
+                                        failed=base_failed + failed,
+                                        skipped=base_skipped + skipped,
+                                    )
+
+                                result = await importer.import_hosts_bulk(
+                                    inventory_id=target_inv_id,
+                                    hosts=inv_hosts,
+                                    progress_callback=bulk_progress,
+                                )
+
+                                batch_created = result.get("total_created", 0)
+                                batch_failed = result.get("total_failed", 0)
+                                batch_skipped = result.get(
+                                    "total_skipped", 0
+                                )  # Get skipped from bulk import
+                                total_created += batch_created
+                                total_failed += batch_failed
+                                total_skipped_hosts_bulk += batch_skipped
+
+                            imported_count = total_created
+                            failed_count = total_failed
+                            skipped_in_import = (
+                                total_skipped_hosts_bulk  # Update skipped count for this phase
+                            )
+                        else:
+                            # No import method available for this resource type
+                            logger.info(
+                                "skipping_no_import_method",
+                                resource_type=rtype,
+                                message=f"No import method available for {rtype}",
+                            )
+                            skipped_no_importer.append(rtype)
+                            # Mark as complete (all skipped - pass 0 completed, 0 failed, total_count skipped)
+                            progress.update_phase(phase_id, 0, 0, total_count)
+                            progress.complete_phase(phase_id)
+                            continue
+
+                        total_imported += imported_count
+                        final_skipped_for_phase = (
+                            skipped_in_import + skipped_count
+                        )  # Combine skips from importer and pre-check
+                        total_skipped += final_skipped_for_phase
+                        final_failed_for_phase = (
+                            len(resources) - imported_count - final_skipped_for_phase
+                        )
+                        total_failed += final_failed_for_phase
+
+                        # Store stats for summary
+                        run_stats[rtype] = {
+                            "imported": imported_count,
+                            "skipped": final_skipped_for_phase,
+                            "failed": final_failed_for_phase,
+                            "total": len(resources),
+                        }
+
+                        # Update final progress
+                        progress.update_phase(
+                            phase_id,
+                            imported_count,
+                            final_failed_for_phase,
+                            final_skipped_for_phase,
+                        )
+                        logger.info(
+                            "imported_resources",
+                            resource_type=rtype,
+                            imported=imported_count,
+                            skipped=skipped_count,
+                            failed=failed_count,
+                        )
+
+                    # Complete this phase
+                    progress.complete_phase(phase_id)
+
+            click.echo()
+            if dry_run:
+                total_resources = sum(count for _, _, count in phases)
+                echo_info(f"DRY RUN: Would import {format_count(total_resources)} resources")
+            else:
+                echo_success(f"Successfully imported {format_count(total_imported)} resources")
+                if total_skipped > 0:
+                    echo_info(f"Skipped {format_count(total_skipped)} already-imported resources")
+                if total_failed > 0:
+                    echo_warning(f"Failed to import {format_count(total_failed)} resources")
+
+            # Show summary
+            click.echo()
+            echo_info("Import Summary:")
+            for rtype, description, _count in phases:
+                stats = run_stats.get(rtype, {"imported": 0, "skipped": 0, "failed": 0, "total": 0})
+                imported = stats["imported"]
+                skipped = stats["skipped"]
+                failed = stats["failed"]
+
+                status_parts = []
+                if imported > 0:
+                    status_parts.append(f"{format_count(imported)} imported")
+                if skipped > 0:
+                    status_parts.append(f"{format_count(skipped)} skipped")
+                if failed > 0:
+                    status_parts.append(f"{format_count(failed)} failed")
+
+                status_str = ", ".join(status_parts) if status_parts else "0 resources processed"
+
+                if rtype in skipped_no_importer:
+                    # Fetch total count from metadata for skipped items
+                    total_in_export = (
+                        metadata.get("resource_types", {}).get(rtype, {}).get("count", 0)
+                    )
+                    click.echo(
+                        f"  {description}: {format_count(total_in_export)} resources (⚠️  SKIPPED - no importer)"
+                    )
+                else:
+                    click.echo(f"  {description}: {status_str}")
+
+            # Show helpful message if there are failures
+            if total_failed > 0:
+                click.echo()
+                click.echo("=" * 80)
+                echo_error(f"⚠️  {total_failed} resources failed to import")
+                click.echo()
+                echo_warning("💡 For detailed failure analysis, run:")
+                click.echo()
+                if len([r for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0]) == 1:
+                    # Single resource type failed
+                    failed_rtype = next(r[0] for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0)
+                    click.echo(click.style(f"   aap-bridge migration-report --resource-type {failed_rtype}", fg="yellow", bold=True))
+                else:
+                    # Multiple resource types failed
+                    click.echo(click.style("   aap-bridge migration-report", fg="yellow", bold=True))
+                click.echo()
+                click.echo("=" * 80)
+
+            # Show skipped resources if any
+            if skipped_no_importer:
+                click.echo()
+                echo_warning(
+                    f"⚠️  {len(skipped_no_importer)} resource type(s) skipped (no importer available):"
+                )
+                for rtype in skipped_no_importer:
+                    echo_warning(f"   • {rtype}")
+
+        except Exception as e:
+            echo_error(f"Import failed: {e}")
+            logger.error("import_failed", error=str(e), exc_info=True)
+            raise click.ClickException(str(e)) from e
+        finally:
+            # Restore original logging handlers
+            for handler in original_handlers:
+                if handler not in root_logger.handlers:
+                    root_logger.addHandler(handler)
+
+    try:
+        asyncio.run(run_import())
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(run_import())

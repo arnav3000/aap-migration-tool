@@ -1,0 +1,99 @@
+# Gitleaks configuration for AAP Bridge
+# https://github.com/gitleaks/gitleaks
+
+title = "AAP Bridge Gitleaks Config"
+
+[extend]
+# Use default Gitleaks rules
+useDefault = true
+
+[allowlist]
+description = "Allowlist for test fixtures and examples"
+
+# Allow test/example tokens that are clearly not real
+regexes = [
+    '''test[_-]?token''',
+    '''example[_-]?key''',
+    '''fake[_-]?secret''',
+    '''dummy[_-]?password''',
+    '''placeholder''',
+    # AAP-specific placeholder patterns
+    '''<your-source-token>''',
+    '''<your-target-token>''',
+    '''<placeholder.*>''',
+    '''"<.*-token>"''',
+    '''SOURCE__TOKEN="<.*>"''',
+    '''TARGET__TOKEN="<.*>"''',
+    '''VAULT__.*="<.*>"''',
+    '''\*\*\*REMOVED\*\*\*''',  # Redacted tokens in container/.env.container
+]
+
+# Paths to ignore - test fixtures, examples, documentation
+paths = [
+    '''tests/fixtures/.*''',
+    '''tests/test_data/.*''',
+    '''exports/.*''',
+    '''xformed/.*''',
+    '''backup-.*''',
+    '''.*\.backup.*''',
+    '''.*\.bak$''',
+    '''.*\.db$''',
+    '''scripts/.*test.*\.py''',
+    '''scripts/.*fix.*\.sh''',
+    '''.*test.*\.sh''',
+    '''.*test.*\.py''',
+    '''.*SUMMARY\.md$''',
+    '''.*REPORT\.md$''',
+    '''.*INSTRUCTIONS\.md$''',
+    '''.*RESULTS\.md$''',
+    '''container/\.env\.container$''',  # Template file with placeholders
+    '''CRITICAL-RULES\.md$''',  # Documentation
+]
+
+# Specific commits to ignore (if needed)
+# commits = [
+#     "commit-hash-here",
+# ]
+
+# Stopwords - common false positives in code
+stopwords = [
+    '''localhost''',
+    '''127\.0\.0\.1''',
+    '''0\.0\.0\.0''',
+]
+
+[[rules]]
+id = "aap-token"
+description = "Ansible Automation Platform API Token"
+regex = '''(?i)(aap|awx|controller|tower)[_-]?(api[_-]?)?token['\"]?\s*[:=]\s*['\"]?[a-zA-Z0-9]{40,}'''
+tags = ["aap", "token", "api"]
+
+[[rules]]
+id = "vault-token"
+description = "HashiCorp Vault Token"
+regex = '''(?i)vault[_-]?token['\"]?\s*[:=]\s*['\"]?(hvs\.[a-zA-Z0-9_-]{90,})'''
+tags = ["vault", "token"]
+
+[[rules]]
+id = "ssh-private-key"
+description = "SSH Private Key"
+regex = '''-----BEGIN( RSA| OPENSSH| DSA| EC| PGP)? PRIVATE KEY( BLOCK)?-----'''
+tags = ["ssh", "private-key"]
+
+[[rules]]
+id = "generic-credential"
+description = "Generic credential pattern in AAP context"
+regex = '''(?i)(password|passwd|secret|credential)['\"]?\s*[:=]\s*['\"][^'\"]{8,}['\"]'''
+tags = ["credential", "password"]
+# More permissive entropy to reduce false positives
+entropy = 4.0
+
+# Allowlist for this rule - skip variable declarations and examples
+[rules.allowlist]
+regexes = [
+    '''(password|secret)['\"]?\s*[:=]\s*['\"](\*{4,}|x{4,}|changeme|password123|admin)''',
+    '''PASSWORD[_-]FIELD''',
+    '''SECRET[_-]KEY[_-]NAME''',
+    '''\[1;3;m.*\[0m''',  # AAP encrypted credentials with ANSI codes
+    '''\$encrypted\$''',  # AAP encrypted credential marker
+]

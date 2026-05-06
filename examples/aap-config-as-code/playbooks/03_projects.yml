@@ -1,0 +1,93 @@
+---
+- name: Create Projects
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/aap_config.yml
+
+  tasks:
+    - name: Create Git-based Projects
+      awx.awx.project:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        organization: "{{ item.organization }}"
+        scm_type: git
+        scm_url: "{{ item.scm_url }}"
+        scm_branch: "{{ item.scm_branch | default('main') }}"
+        scm_update_on_launch: "{{ item.scm_update_on_launch | default(true) }}"
+        scm_update_cache_timeout: "{{ item.scm_update_cache_timeout | default(0) }}"
+        credential: "{{ item.credential | default(omit) }}"
+        state: present
+        controller_host: "{{ controller_auth.controller_host }}"
+        controller_username: "{{ controller_auth.controller_username | default(omit) }}"
+        controller_password: "{{ controller_auth.controller_password | default(omit) }}"
+        controller_oauthtoken: "{{ controller_auth.controller_oauthtoken | default(omit) }}"
+        validate_certs: "{{ controller_auth.validate_certs }}"
+      loop:
+        - name: Web Application Deployment
+          description: Ansible playbooks for web app deployment
+          organization: Engineering
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+
+        - name: Infrastructure as Code
+          description: Infrastructure automation playbooks
+          organization: Operations
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+
+        - name: Database Management
+          description: Database provisioning and management
+          organization: Operations
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+
+        - name: Network Automation
+          description: Network device configuration playbooks
+          organization: Operations
+          scm_url: https://github.com/ansible/test-playbooks
+          scm_branch: master
+
+        - name: Security Compliance
+          description: Security scanning and compliance checks
+          organization: QA
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+
+        - name: Cloud Provisioning
+          description: Multi-cloud resource provisioning
+          organization: Engineering
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+
+        - name: Container Platform
+          description: Container orchestration and management
+          organization: Operations
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+
+        - name: Monitoring and Logging
+          description: Monitoring stack deployment
+          organization: Operations
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+
+        - name: Backup and Recovery
+          description: Backup and disaster recovery playbooks
+          organization: Operations
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+
+        - name: CI/CD Pipeline
+          description: Continuous integration and deployment
+          organization: Engineering
+          scm_url: https://github.com/ansible/ansible-examples
+          scm_branch: master
+      tags: [projects]
+
+    - name: Wait for projects to sync
+      ansible.builtin.pause:
+        seconds: 10
+        prompt: "Waiting for projects to complete initial sync..."
+      tags: [projects]
