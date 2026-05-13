@@ -3,14 +3,15 @@
 # Format: organization_name=api_token
 #
 # Example:
-# org1=AbCdEf123456789
-# org2=XyZ987654321abc
+# Engineering=$ENGINEERING_TOKEN
+# Marketing=$MARKETING_TOKEN
 #
 # Usage:
 #   cp org.txt.example org.txt
 #   Edit org.txt with your organization names and tokens
-#   Run: ./org-migration.sh --organization org1 migrate -r organizations
+#   Run: ./org-migration.sh --organization Engineering
 
-# Add your organizations below
-# org1=YOUR_TOKEN_HERE
-# org2=YOUR_TOKEN_HERE
+# Add your organizations below (one per line)
+# Engineering=<your-engineering-token-here>
+# Marketing=<your-marketing-token-here>
+# Sales=<your-sales-token-here>

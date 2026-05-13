@@ -3,14 +3,14 @@
 # Organization-specific migration wrapper
 #
 # This script reads organization-to-token mappings from org.txt,
-# updates the .env file with the appropriate token, and runs aap-bridge.
+# updates the .env file with the appropriate token, and starts the container.
 #
 # Usage:
-#   ./org-migration.sh --organization org1 [additional aap-bridge args]
+#   ./org-migration.sh --organization <org_name> [--env-file <path>]
 #
 # Example:
-#   ./org-migration.sh --organization org1 migrate -r organizations
-#   ./org-migration.sh --organization org2 migration-report
+#   ./org-migration.sh --organization Cloud_Services --env-file container/cto-test/.env
+#   # Inside container, run your commands manually
 #
 
 set -e
@@ -26,9 +26,8 @@ NC='\033[0m'
 ORG_TOKEN_FILE="org.txt"
 ENV_FILE=".env"
 
-# Parse --organization argument
+# Parse arguments
 ORGANIZATION=""
-AAP_BRIDGE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -36,10 +35,18 @@ while [[ $# -gt 0 ]]; do
             ORGANIZATION="$2"
             shift 2
             ;;
+        --env-file|-e)
+            ENV_FILE="$2"
+            shift 2
+            ;;
+        --org-file)
+            ORG_TOKEN_FILE="$2"
+            shift 2
+            ;;
         *)
-            # Collect remaining arguments for aap-bridge
-            AAP_BRIDGE_ARGS+=("$1")
-            shift
+            echo -e "${RED}❌ Unknown argument: $1${NC}"
+            echo "Usage: $0 --organization <org_name> [--env-file <path>] [--org-file <path>]"
+            exit 1
             ;;
     esac
 done
@@ -48,11 +55,11 @@ done
 if [[ -z "$ORGANIZATION" ]]; then
     echo -e "${RED}❌ Error: --organization is required${NC}"
     echo ""
-    echo "Usage: $0 --organization <org_name> [aap-bridge args]"
+    echo "Usage: $0 --organization <org_name> [--env-file <path>]"
     echo ""
     echo "Example:"
-    echo "  $0 --organization org1 migrate -r organizations"
-    echo "  $0 -o org2 migration-report"
+    echo "  $0 --organization Cloud_Services"
+    echo "  $0 -o Engineering --env-file container/cto-test/.env"
     exit 1
 fi
 
@@ -90,6 +97,8 @@ echo -e "${BLUE}========================================${NC}"
 echo ""
 echo -e "${GREEN}✓${NC} Organization: ${ORGANIZATION}"
 echo -e "${GREEN}✓${NC} Token loaded: ${TOKEN:0:8}... (${#TOKEN} chars)"
+echo -e "${GREEN}✓${NC} Token file: ${ORG_TOKEN_FILE}"
+echo -e "${GREEN}✓${NC} ENV file: ${ENV_FILE}"
 echo ""
 
 # Backup .env if not already backed up
@@ -114,39 +123,80 @@ else
 fi
 
 echo ""
+
+# Filter exports by organization if exports directory exists
+EXPORTS_DIR="exports"
+ORG_SANITIZED=$(echo "$ORGANIZATION" | sed 's/[^a-zA-Z0-9]/_/g')
+FILTERED_EXPORTS_DIR="exports-${ORG_SANITIZED}"
+
+if [[ -d "$EXPORTS_DIR" ]]; then
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}Filtering Exports${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
+
+    echo -e "${YELLOW}→${NC} Full exports found: ${EXPORTS_DIR}"
+    echo -e "${YELLOW}→${NC} Filtering for organization: ${ORGANIZATION}"
+    echo ""
+
+    # Get script directory to find filter script
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    if [[ ! -f "${SCRIPT_DIR}/filter-org-exports.sh" ]]; then
+        echo -e "${RED}❌ Error: filter-org-exports.sh not found in ${SCRIPT_DIR}${NC}"
+        exit 1
+    fi
+
+    # Run filter script
+    "${SCRIPT_DIR}/filter-org-exports.sh" --organization "$ORGANIZATION" --exports-dir "$EXPORTS_DIR"
+
+    echo -e "${GREEN}✓${NC} Using filtered exports: ${FILTERED_EXPORTS_DIR}"
+    EXPORTS_TO_MOUNT="${FILTERED_EXPORTS_DIR}"
+else
+    echo -e "${YELLOW}ℹ${NC} No exports directory found - will export inside container"
+    EXPORTS_TO_MOUNT="${EXPORTS_DIR}"
+fi
+
+echo ""
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}Running aap-bridge${NC}"
+echo -e "${BLUE}Starting Container${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
-# Run aap-bridge with remaining arguments
-if [[ ${#AAP_BRIDGE_ARGS[@]} -eq 0 ]]; then
-    echo -e "${YELLOW}⚠️  No aap-bridge arguments provided${NC}"
-    echo ""
-    echo "Examples:"
-    echo "  $0 --organization $ORGANIZATION migrate -r organizations"
-    echo "  $0 --organization $ORGANIZATION migration-report"
-    echo ""
-    echo "Run 'aap-bridge --help' for available commands"
-else
-    echo -e "${GREEN}→${NC} Command: aap-bridge ${AAP_BRIDGE_ARGS[*]}"
-    echo ""
+# Container image name
+CONTAINER_NAME="${CONTAINER_NAME:-localhost/cto-final-test}"
 
-    # Check if we're in a container or host
-    if command -v aap-bridge &> /dev/null; then
-        # aap-bridge is available - run directly
-        aap-bridge "${AAP_BRIDGE_ARGS[@]}"
-    else
-        echo -e "${YELLOW}⚠️  aap-bridge not found in PATH${NC}"
-        echo ""
-        echo "If using containerized setup:"
-        echo "  1. Start container: podman run -v .env:/app/aap-bridge/.env ..."
-        echo "  2. Enter container: podman exec -it <container> /bin/bash"
-        echo "  3. Run: aap-bridge ${AAP_BRIDGE_ARGS[*]}"
-        echo ""
-        echo "Or activate virtual environment:"
-        echo "  source .venv/bin/activate"
-        echo "  aap-bridge ${AAP_BRIDGE_ARGS[*]}"
-        exit 1
-    fi
+# Check if image exists locally
+if ! podman image exists "$CONTAINER_NAME"; then
+    echo -e "${RED}❌ Container image not found: ${CONTAINER_NAME}${NC}"
+    echo ""
+    echo "Available local images:"
+    podman images | grep -E "(magnus|aap-bridge)" || echo "  (none found)"
+    echo ""
+    echo "Build the image first or set CONTAINER_NAME environment variable:"
+    echo "  export CONTAINER_NAME=<your_image_name>"
+    exit 1
 fi
+
+echo -e "${GREEN}→${NC} Container image: ${CONTAINER_NAME}"
+echo -e "${YELLOW}→${NC} Starting container with volume mounts..."
+echo ""
+
+# Get absolute path to ENV_FILE
+ENV_FILE_ABS=$(realpath "$ENV_FILE")
+
+# Get absolute path to exports directory
+EXPORTS_TO_MOUNT_ABS=$(realpath "$EXPORTS_TO_MOUNT")
+
+echo -e "${GREEN}✓${NC} Mounting exports: ${EXPORTS_TO_MOUNT}"
+echo ""
+
+# Run podman container with all volume mounts
+exec podman run \
+    -v $(pwd)/logs:/app/aap-bridge/logs:z \
+    -v "$EXPORTS_TO_MOUNT_ABS":/app/aap-bridge/exports:z \
+    -v $(pwd)/xformed:/app/aap-bridge/xformed:z \
+    -v $(pwd)/database:/app/aap-bridge/database:z \
+    -v "$ENV_FILE_ABS":/app/aap-bridge/.env:z \
+    -v $(pwd)/credential_decrypt:/app/aap-bridge/credential_decrypt:z \
+    -it $CONTAINER_NAME /bin/bash

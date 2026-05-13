@@ -18,9 +18,9 @@ Edit `org.txt` with your organization names and tokens:
 
 ```
 # org.txt
-prod-org=AbCdEf123456789XyZ
-staging-org=XyZ987654321AbC
-dev-org=123456789AbCdEf
+prod-org=$PROD_ORG_TOKEN
+staging-org=$STAGING_ORG_TOKEN
+dev-org=$DEV_ORG_TOKEN
 ```
 
 **Important:** `org.txt` is gitignored to prevent accidental token commits.
