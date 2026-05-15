@@ -63,16 +63,13 @@ def topological_sort(graph: dict[str, list[str]]) -> list[str]:
     # Check for circular dependencies
     if len(result) != len(in_degree):
         remaining = set(in_degree.keys()) - set(result)
-        raise ValueError(
-            f"Circular dependencies detected among organizations: {remaining}"
-        )
+        raise ValueError(f"Circular dependencies detected among organizations: {remaining}")
 
     return result
 
 
 def group_into_phases(
-    graph: dict[str, list[str]],
-    migration_order: list[str]
+    graph: dict[str, list[str]], migration_order: list[str]
 ) -> list[dict[str, list[str]]]:
     """Group organizations into migration phases.
 
@@ -122,11 +119,13 @@ def group_into_phases(
         else:
             description = f"Organizations dependent on Phase {len(phases)} migrations"
 
-        phases.append({
-            "phase": len(phases) + 1,
-            "orgs": sorted(phase_orgs),  # Sort for deterministic output
-            "description": description
-        })
+        phases.append(
+            {
+                "phase": len(phases) + 1,
+                "orgs": sorted(phase_orgs),  # Sort for deterministic output
+                "description": description,
+            }
+        )
 
         processed.update(phase_orgs)
 

@@ -7,7 +7,6 @@ No external dependencies, CDNs, or internet connection required.
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -66,41 +65,45 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                         for usage in dep.required_by:
                             if usage["id"] == item.get("id") and usage["type"] == rtype:
                                 has_cross_org_dep = True
-                                dep_details.append({
-                                    "org": dep_org,
-                                    "resource_type": dep.resource_type,
-                                    "resource_name": dep.resource_name,
-                                    "resource_id": dep.resource_id,
-                                })
+                                dep_details.append(
+                                    {
+                                        "org": dep_org,
+                                        "resource_type": dep.resource_type,
+                                        "resource_name": dep.resource_name,
+                                        "resource_id": dep.resource_id,
+                                    }
+                                )
 
                 if has_cross_org_dep:
                     resource_info["cross_org_deps"] = dep_details
 
                 resource_tree[type_display_name].append(resource_info)
 
-        orgs_data.append({
-            "name": org_name,
-            "id": org_report.org_id,
-            "total_resources": org_report.resource_count,
-            "has_dependencies": org_report.has_cross_org_deps,
-            "required_before": org_report.required_migrations_before,
-            "resource_tree": resource_tree,
-            "dependencies": [
-                {
-                    "org": dep_org,
-                    "resources": [
-                        {
-                            "type": dep.resource_type,
-                            "name": dep.resource_name,
-                            "id": dep.resource_id,
-                            "used_by": dep.required_by,
-                        }
-                        for dep in deps
-                    ],
-                }
-                for dep_org, deps in org_report.dependencies.items()
-            ],
-        })
+        orgs_data.append(
+            {
+                "name": org_name,
+                "id": org_report.org_id,
+                "total_resources": org_report.resource_count,
+                "has_dependencies": org_report.has_cross_org_deps,
+                "required_before": org_report.required_migrations_before,
+                "resource_tree": resource_tree,
+                "dependencies": [
+                    {
+                        "org": dep_org,
+                        "resources": [
+                            {
+                                "type": dep.resource_type,
+                                "name": dep.resource_name,
+                                "id": dep.resource_id,
+                                "used_by": dep.required_by,
+                            }
+                            for dep in deps
+                        ],
+                    }
+                    for dep_org, deps in org_report.dependencies.items()
+                ],
+            }
+        )
 
     # Build org-to-org edges for overview graph
     edges_data = []
@@ -111,11 +114,13 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
     # Build phases
     phases_data = []
     for phase in report.migration_phases:
-        phases_data.append({
-            "phase": phase["phase"],
-            "description": phase["description"],
-            "orgs": phase["orgs"],
-        })
+        phases_data.append(
+            {
+                "phase": phase["phase"],
+                "description": phase["description"],
+                "orgs": phase["orgs"],
+            }
+        )
 
     # Serialize data to JSON for embedding
     orgs_json = json.dumps(orgs_data, indent=2)
@@ -123,7 +128,7 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
     phases_json = json.dumps(phases_data, indent=2)
 
     # Generate HTML
-    html = f'''<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1343,6 +1348,6 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
         }});
     </script>
 </body>
-</html>'''
+</html>"""
 
     return html
