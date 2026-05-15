@@ -68,8 +68,8 @@ async def migration_preview(
                 if not info:
                     continue
                 try:
-                    data = await src_client.get_paginated(info.endpoint, page_size=1)
-                    count = len(data) if data else 0
+                    resp = await src_client.get(info.endpoint, params={"page_size": 1, "page": 1})
+                    count = resp.get("count", 0)
                 except Exception:
                     count = 0
                 preview["resource_types"][rtype] = {

@@ -436,8 +436,12 @@ class CrossOrgDependencyAnalyzer:
         )
 
         graph = {org: report.required_migrations_before for org, report in org_reports.items()}
-        migration_order = topological_sort(graph)
-        migration_phases = group_into_phases(graph, migration_order)
+        try:
+            migration_order = topological_sort(graph)
+            migration_phases = group_into_phases(graph, migration_order)
+        except ValueError:
+            migration_order = sorted(graph.keys())
+            migration_phases = [migration_order]
 
         # Calculate quality summary
         total_duplicates = sum(

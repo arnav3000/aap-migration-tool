@@ -26,6 +26,7 @@ class Job:
         "completed_at",
         "_task",
         "_subscribers",
+        "_html_report",
     )
 
     def __init__(self, job_id: str, name: str, job_type: str):
@@ -41,6 +42,7 @@ class Job:
         self.completed_at: datetime | None = None
         self._task: asyncio.Task | None = None
         self._subscribers: list[asyncio.Queue] = []
+        self._html_report: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -20,21 +21,19 @@ async def list_resource_types(conn_id: str, db: Session = Depends(get_db)) -> li
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 
-    result: list[dict[str, Any]] = []
-    client = ConnectionService.build_source_client(conn)
-    try:
+    async def _fetch_types() -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        client = ConnectionService.build_source_client(conn)
         async with client:
             for rtype, info in sorted(
                 RESOURCE_REGISTRY.items(), key=lambda x: x[1].migration_order
             ):
                 try:
-                    data = await client.get_paginated(info.endpoint, page_size=1)
-                    count = len(data) if data else 0
-                    if hasattr(client, "_last_count"):
-                        count = client._last_count
+                    resp = await client.get(info.endpoint, params={"page_size": 1, "page": 1})
+                    count = resp.get("count", 0)
                 except Exception:
                     count = 0
-                result.append(
+                items.append(
                     {
                         "name": rtype,
                         "label": info.description or rtype.replace("_", " ").title(),
@@ -42,16 +41,22 @@ async def list_resource_types(conn_id: str, db: Session = Depends(get_db)) -> li
                         "count": count,
                     }
                 )
-    except Exception:
-        for rtype, info in sorted(RESOURCE_REGISTRY.items(), key=lambda x: x[1].migration_order):
-            result.append(
-                {
-                    "name": rtype,
-                    "label": info.description or rtype.replace("_", " ").title(),
-                    "api_path": info.endpoint,
-                    "count": -1,
-                }
+        return items
+
+    try:
+        result = await asyncio.wait_for(_fetch_types(), timeout=15.0)
+    except (asyncio.TimeoutError, Exception):
+        result = [
+            {
+                "name": rtype,
+                "label": info.description or rtype.replace("_", " ").title(),
+                "api_path": info.endpoint,
+                "count": -1,
+            }
+            for rtype, info in sorted(
+                RESOURCE_REGISTRY.items(), key=lambda x: x[1].migration_order
             )
+        ]
 
     return result
 

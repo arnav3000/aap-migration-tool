@@ -155,8 +155,11 @@ async def run_analysis(body: AnalysisRunRequest, db: Session = Depends(get_db)) 
         )
         client = AAPSourceClient(config)
 
-        def progress_cb(msg: object) -> None:
-            log(str(msg))
+        def progress_cb(current: object, total: object = None, msg: object = None) -> None:
+            if msg:
+                log(f"[{current}/{total}] {msg}")
+            else:
+                log(str(current))
 
         async with client:
             analyzer = CrossOrgDependencyAnalyzer(
