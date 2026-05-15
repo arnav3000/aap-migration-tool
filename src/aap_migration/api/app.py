@@ -1,132 +1,54 @@
+"""FastAPI application factory."""
+
+from __future__ import annotations
+
 import asyncio
-import logging
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
-from aap_migration.api.dependencies import set_app_state
-from aap_migration.api.models import Base, Connection
-from aap_migration.api.routers import (
-    analysis,
-    connections,
-    jobs,
-    migration,
-    operations,
-    resources,
-    sizing,
-)
-from aap_migration.api.schemas import ConnectionCreate
-from aap_migration.api.services.connection_service import ConnectionService
+from aap_migration.api.dependencies import AppState, set_app_state
+from aap_migration.api.models import Connection  # noqa: F401 — registers table
 from aap_migration.api.services.job_service import JobService
-from aap_migration.api.websocket import router as ws_router
-
-logger = logging.getLogger(__name__)
-
-_db_url: str = ""
+from aap_migration.migration.database import create_database_engine
+from aap_migration.migration.models import Base
 
 
-@dataclass
-class AppState:
-    db_session_factory: sessionmaker[Session] = field(init=False)
-    job_service: JobService = field(init=False)
-    loop: asyncio.AbstractEventLoop = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.job_service = JobService()
-
-
-_PLACEHOLDER_PATTERNS = ("<source_aap_url>", "<target_aap_url>", "xxxxx", "xxxxxx")
-
-
-def _detect_type(url: str, version: str) -> str:
-    """Infer 'aap' vs 'awx' from the URL path or version string."""
-    if "/api/controller/" in url:
-        return "aap"
-    if version and version.startswith("2.") and version != "2.x":
-        return "aap"
-    return "awx"
-
-
-def _seed_connections_from_env(db: Session) -> None:
-    existing = db.query(Connection).count()
-    if existing:
-        return
-
-    svc = ConnectionService(db)
-    seeded: list[str] = []
-
-    for prefix, role in (("SOURCE", "source"), ("TARGET", "destination")):
-        url = os.environ.get(f"{prefix}__URL", "").strip().strip('"')
-        token = os.environ.get(f"{prefix}__TOKEN", "").strip().strip('"')
-        version = os.environ.get(f"{prefix}__VERSION", "").strip().strip('"')
-        verify_ssl_raw = os.environ.get(f"{prefix}__VERIFY_SSL", "true").strip().strip('"')
-        verify_ssl = verify_ssl_raw.lower() not in ("false", "0", "no")
-
-        if not url or any(p in url for p in _PLACEHOLDER_PATTERNS):
-            continue
-        if not token or any(p == token for p in _PLACEHOLDER_PATTERNS):
-            continue
-
-        conn_type = _detect_type(url, version)
-        name = f"{role.title()} (from .env)"
-
-        svc.create(
-            ConnectionCreate(
-                name=name,
-                type=conn_type,
-                role=role,
-                url=url,
-                token=token,
-                verify_ssl=verify_ssl,
-            )
-        )
-        seeded.append(f"{role} ({conn_type}) -> {url}")
-
-    if seeded:
-        logger.info("Seeded %d connection(s) from .env: %s", len(seeded), "; ".join(seeded))
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    engine = create_engine(_db_url, pool_pre_ping=True)
-    Base.metadata.create_all(engine)
-
-    from aap_migration.migration.models import Base as MigrationBase
-
-    MigrationBase.metadata.create_all(engine)
-
-    from aap_migration.analysis.models import (
-        AnalyzedOrganization,  # noqa: F401 — triggers table registration
+def create_app(db_url: str | None = None) -> FastAPI:
+    effective_url: str = (
+        db_url
+        or os.environ.get("MIGRATION_STATE_DB_PATH", "sqlite:///aap_bridge.db")
+        or "sqlite:///aap_bridge.db"
     )
 
-    MigrationBase.metadata.create_all(engine)
+    if not effective_url.startswith(("sqlite", "postgresql", "mysql")):
+        effective_url = f"sqlite:///{effective_url}"
 
-    state = AppState()
-    state.db_session_factory = sessionmaker(bind=engine)
-    state.loop = asyncio.get_running_loop()
-    set_app_state(state)
+    engine = create_database_engine(effective_url)
+    Base.metadata.create_all(engine)
 
-    with state.db_session_factory() as db:
-        _seed_connections_from_env(db)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    job_service = JobService()
 
-    yield
-    engine.dispose()
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        loop = asyncio.get_running_loop()
+        state = AppState(session_factory, job_service, loop)
+        set_app_state(state)
 
+        _seed_connections_from_env(session_factory)
 
-def create_app(db_url: str = "") -> FastAPI:
-    global _db_url
-    _db_url = db_url or os.environ.get("MIGRATION_STATE_DB_PATH", "")
+        yield
+
+        engine.dispose()
 
     app = FastAPI(
-        title="AAP Bridge",
-        description="Web API for AAP Bridge migration tool",
-        version="0.1.0",
+        title="AAP Bridge API",
+        version="0.5.4",
         lifespan=lifespan,
     )
 
@@ -138,13 +60,51 @@ def create_app(db_url: str = "") -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(connections.router, prefix="/api")
-    app.include_router(resources.router, prefix="/api")
-    app.include_router(operations.router, prefix="/api")
-    app.include_router(migration.router, prefix="/api")
-    app.include_router(jobs.router, prefix="/api")
-    app.include_router(analysis.router, prefix="/api")
-    app.include_router(sizing.router, prefix="/api")
-    app.include_router(ws_router)
+    from aap_migration.api import websocket
+    from aap_migration.api.routers import (
+        analysis,
+        connections,
+        jobs,
+        migration,
+        operations,
+        resources,
+        sizing,
+    )
+
+    app.include_router(connections.router, prefix="/api", tags=["connections"])
+    app.include_router(resources.router, prefix="/api", tags=["resources"])
+    app.include_router(operations.router, prefix="/api", tags=["operations"])
+    app.include_router(migration.router, prefix="/api", tags=["migration"])
+    app.include_router(jobs.router, prefix="/api", tags=["jobs"])
+    app.include_router(analysis.router, prefix="/api", tags=["analysis"])
+    app.include_router(sizing.router, prefix="/api", tags=["sizing"])
+    app.include_router(websocket.router)
 
     return app
+
+
+def _seed_connections_from_env(session_factory: sessionmaker) -> None:
+    """Auto-create connections from SOURCE__*/TARGET__* env vars if DB is empty."""
+    session = session_factory()
+    try:
+        if session.query(Connection).count() > 0:
+            return
+
+        for role, prefix in [("source", "SOURCE__"), ("target", "TARGET__")]:
+            url = os.environ.get(f"{prefix}URL")
+            token = os.environ.get(f"{prefix}TOKEN")
+            if url and token:
+                conn = Connection(
+                    name=f"{role.capitalize()} AAP",
+                    url=url,
+                    token=token,
+                    role=role,
+                    verify_ssl=os.environ.get(f"{prefix}VERIFY_SSL", "true").lower() == "true",
+                    timeout=int(os.environ.get(f"{prefix}TIMEOUT", "30")),
+                )
+                session.add(conn)
+        session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()

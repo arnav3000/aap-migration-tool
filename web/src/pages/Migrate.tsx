@@ -15,13 +15,18 @@ import {
   FormGroup,
   FormSelect,
   FormSelectOption,
+  Tabs,
+  Tab,
+  TabTitleText,
 } from '@patternfly/react-core';
 import TimesIcon from '@patternfly/react-icons/dist/esm/icons/times-icon';
 import ExternalLinkAltIcon from '@patternfly/react-icons/dist/esm/icons/external-link-alt-icon';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { LogViewer } from '../components/LogViewer';
+import { MigrationProgressView } from '../components/MigrationProgressView';
 import { MigrationPreview } from '../components/MigrationPreview';
+import { useJobLogs } from '../hooks/useJobLogs';
 import type { Connection } from '../types/connection';
 import type { MigrationPreviewData } from '../types/resources';
 
@@ -41,7 +46,10 @@ export function Migrate() {
   const [cancelling, setCancelling] = useState(false);
   const [migrationDone, setMigrationDone] = useState(false);
   const [clearMsg, setClearMsg] = useState('');
+  const [runActiveTab, setRunActiveTab] = useState<string>('output');
   const navigate = useNavigate();
+
+  const jobLogs = useJobLogs(runJobId);
 
   const loadConnections = useCallback(async () => {
     const conns = await api.listConnections() as Connection[];
@@ -127,6 +135,7 @@ export function Migrate() {
     setExclude({});
     setCancelling(false);
     setMigrationDone(false);
+    setRunActiveTab('output');
   };
 
   const handleLogClose = (status: string) => {
@@ -135,6 +144,17 @@ export function Migrate() {
       setCancelling(false);
     }
   };
+
+  const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
+
+  useEffect(() => {
+    if (!runJobId) return;
+    const s = jobLogs.status;
+    if (TERMINAL_STATUSES.includes(s)) {
+      setMigrationDone(true);
+      if (s === 'cancelled') setCancelling(false);
+    }
+  }, [runJobId, jobLogs.status]);
 
   const sourceConn = connections.find(c => c.id === sourceId);
   const destConn = connections.find(c => c.id === destId);
@@ -330,10 +350,10 @@ export function Migrate() {
           </Card>
 
           {runJobId && (
-            <div style={{ marginBottom: 16 }}>
-              <Split hasGutter>
+            <div style={{ marginBottom: 16, display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+              <Split hasGutter style={{ marginBottom: 12 }}>
                 <SplitItem isFilled>
-                  <Title headingLevel="h3">Migration Log</Title>
+                  <Title headingLevel="h3">Migration Output</Title>
                 </SplitItem>
                 <SplitItem>
                   {!migrationDone && (
@@ -362,7 +382,21 @@ export function Migrate() {
                   </Button>
                 </SplitItem>
               </Split>
-              <LogViewer jobId={runJobId} onClose={handleLogClose} />
+              <Tabs activeKey={runActiveTab} onSelect={(_e, k) => setRunActiveTab(k as string)} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                <Tab eventKey="output" title={<TabTitleText>Output</TabTitleText>} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                  <div style={{ padding: '16px 0', flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                    <MigrationProgressView
+                      events={jobLogs.events}
+                      jobStatus={jobLogs.status}
+                    />
+                  </div>
+                </Tab>
+                <Tab eventKey="logs" title={<TabTitleText>Logs</TabTitleText>}>
+                  <div style={{ padding: '16px 0', flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                    <LogViewer jobId={runJobId} externalLines={jobLogs.textLines} externalStatus={jobLogs.status} onClose={handleLogClose} fullPage />
+                  </div>
+                </Tab>
+              </Tabs>
             </div>
           )}
 

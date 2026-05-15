@@ -4,6 +4,11 @@ export interface ResourceType {
   api_path: string;
 }
 
+export interface JobMetadata {
+  events?: Record<string, unknown>[];
+  [key: string]: unknown;
+}
+
 export interface Job {
   id: string;
   type: string;
@@ -13,7 +18,7 @@ export interface Job {
   finished_at?: string;
   error?: string;
   output: string[];
-  job_metadata?: Record<string, unknown>;
+  job_metadata?: JobMetadata;
 }
 
 export interface MigrationResource {

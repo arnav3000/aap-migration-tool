@@ -20,8 +20,10 @@ import {
 } from '@patternfly/react-core';
 import ArrowLeftIcon from '@patternfly/react-icons/dist/esm/icons/arrow-left-icon';
 import { LogViewer } from '../components/LogViewer';
+import { MigrationProgressView } from '../components/MigrationProgressView';
 import { AnalysisResults } from '../components/AnalysisResults';
 import type { AnalysisData } from '../components/AnalysisResults';
+import { useJobLogs } from '../hooks/useJobLogs';
 import { api } from '../api/client';
 import type { Job } from '../types/resources';
 
@@ -35,6 +37,8 @@ export function JobDetail() {
   const [activeTab, setActiveTab] = useState<string>('results');
   const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+
+  const jobLogs = useJobLogs(id ?? '');
 
   const loadJob = useCallback(async () => {
     if (!id) return;
@@ -71,6 +75,14 @@ export function JobDetail() {
       finally { setAnalysisLoading(false); }
     })();
   }, [id, job?.type, job?.status]);
+
+  useEffect(() => {
+    if (!job || job.type !== 'migration-run') return;
+    const s = jobLogs.status;
+    if (s && !['streaming', 'connecting'].includes(s)) {
+      setJob(prev => prev ? { ...prev, status: s as Job['status'] } : prev);
+    }
+  }, [job?.type, jobLogs.status]);
 
   const handleCancel = async () => {
     if (!id || cancelling) return;
@@ -135,6 +147,7 @@ export function JobDetail() {
 
   const isRunning = job.status === 'running';
   const hasAnalysisResults = job.type === 'analysis' && analysisData != null;
+  const isMigrationRun = job.type === 'migration-run';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -214,7 +227,23 @@ export function JobDetail() {
         </CardBody>
       </Card>
 
-      {hasAnalysisResults ? (
+      {isMigrationRun ? (
+        <Tabs activeKey={activeTab} onSelect={(_e, k) => setActiveTab(k as string)} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <Tab eventKey="results" title={<TabTitleText>Output</TabTitleText>} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <div style={{ padding: '16px 0', flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+              <MigrationProgressView
+                events={jobLogs.events}
+                jobStatus={jobLogs.status}
+              />
+            </div>
+          </Tab>
+          <Tab eventKey="logs" title={<TabTitleText>Logs</TabTitleText>}>
+            <div style={{ padding: '16px 0', flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+              <LogViewer jobId={job.id} externalLines={jobLogs.textLines} externalStatus={jobLogs.status} fullPage />
+            </div>
+          </Tab>
+        </Tabs>
+      ) : hasAnalysisResults ? (
         <Tabs activeKey={activeTab} onSelect={(_e, k) => setActiveTab(k as string)} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <Tab eventKey="results" title={<TabTitleText>Results</TabTitleText>}>
             <div style={{ padding: '16px 0' }}>

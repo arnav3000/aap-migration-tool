@@ -18,6 +18,8 @@ import './LogViewer.css';
 
 interface Props {
   jobId: string;
+  externalLines?: string[];
+  externalStatus?: string;
   onClose?: (status: string) => void;
   fullPage?: boolean;
 }
@@ -28,9 +30,9 @@ interface SectionState {
   [headerIndex: number]: boolean;
 }
 
-export function LogViewer({ jobId, onClose, fullPage }: Props) {
-  const [lines, setLines] = useState<string[]>([]);
-  const [status, setStatus] = useState<string>('connecting');
+export function LogViewer({ jobId, externalLines, externalStatus, onClose, fullPage }: Props) {
+  const [internalLines, setInternalLines] = useState<string[]>([]);
+  const [internalStatus, setInternalStatus] = useState<string>('connecting');
   const [following, setFollowing] = useState(true);
   const [searchText, setSearchText] = useState('');
   const [searchVisible, setSearchVisible] = useState(false);
@@ -39,10 +41,15 @@ export function LogViewer({ jobId, onClose, fullPage }: Props) {
   const prevScrollTopRef = useRef(0);
   const prevScrollHeightRef = useRef(0);
 
-  // --- Data loading: WebSocket with REST fallback ---
+  const lines = externalLines ?? internalLines;
+  const status = externalStatus ?? internalStatus;
+
+  // --- Data loading: WebSocket with REST fallback (only when not externally driven) ---
   useEffect(() => {
-    setLines([]);
-    setStatus('connecting');
+    if (externalLines !== undefined) return;
+
+    setInternalLines([]);
+    setInternalStatus('connecting');
     setCollapsed({});
     setFollowing(true);
 
@@ -53,12 +60,12 @@ export function LogViewer({ jobId, onClose, fullPage }: Props) {
       jobId,
       (line) => {
         wsReceivedData = true;
-        setLines(prev => [...prev, line]);
-        setStatus('streaming');
+        setInternalLines(prev => [...prev, line]);
+        setInternalStatus('streaming');
       },
       (reason) => {
         const finalStatus = reason || 'closed';
-        setStatus(finalStatus);
+        setInternalStatus(finalStatus);
         onClose?.(finalStatus);
 
         if (!wsReceivedData && !closed) {
@@ -71,13 +78,13 @@ export function LogViewer({ jobId, onClose, fullPage }: Props) {
       try {
         const job = await api.getJob(jobId) as Job;
         if (job.output && job.output.length > 0) {
-          setLines(job.output);
-          setStatus(job.status);
+          setInternalLines(job.output);
+          setInternalStatus(job.status);
         } else {
-          setStatus(job.status || 'empty');
+          setInternalStatus(job.status || 'empty');
         }
       } catch {
-        setStatus('error');
+        setInternalStatus('error');
       }
     }
 
@@ -85,7 +92,7 @@ export function LogViewer({ jobId, onClose, fullPage }: Props) {
       closed = true;
       ws.close();
     };
-  }, [jobId]);
+  }, [jobId, externalLines]);
 
   // --- Follow / auto-scroll ---
   useEffect(() => {

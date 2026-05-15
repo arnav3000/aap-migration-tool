@@ -1,29 +1,36 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+"""Job management endpoints."""
 
-from aap_migration.api.dependencies import get_app_state, get_db
-from aap_migration.api.models import Job
-from aap_migration.api.schemas import JobDetailResponse, JobResponse
+from __future__ import annotations
 
-router = APIRouter(tags=["jobs"])
+from typing import Any
 
+from fastapi import APIRouter, HTTPException
 
-@router.get("/jobs", response_model=list[JobResponse])
-def list_jobs(db: Session = Depends(get_db)) -> list[JobResponse]:
-    jobs = db.query(Job).order_by(Job.started_at.desc()).all()
-    return [JobResponse.model_validate(j) for j in jobs]
+from aap_migration.api.dependencies import get_job_service
+
+router = APIRouter()
 
 
-@router.get("/jobs/{job_id}", response_model=JobDetailResponse)
-def get_job(job_id: str, db: Session = Depends(get_db)) -> JobDetailResponse:
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if not job:
+@router.get("/jobs")
+def list_jobs() -> list[dict[str, Any]]:
+    svc = get_job_service()
+    return svc.list_jobs()
+
+
+@router.get("/jobs/{job_id}")
+def get_job(job_id: str) -> dict[str, Any]:
+    svc = get_job_service()
+    job = svc.get_job(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return JobDetailResponse.model_validate(job)
+    return job.to_dict()
 
 
-@router.post("/jobs/{job_id}/cancel", status_code=204)
-def cancel_job(job_id: str) -> None:
-    state = get_app_state()
-    if not state.job_service.cancel_job(job_id):
-        raise HTTPException(status_code=404, detail="Job not found or not running")
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict[str, str]:
+    svc = get_job_service()
+    job = svc.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    cancelled = svc.cancel_job(job_id)
+    return {"status": "cancelled" if cancelled else job.status}

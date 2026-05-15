@@ -1,50 +1,42 @@
-import asyncio
+"""WebSocket endpoint for streaming job logs."""
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from aap_migration.api.dependencies import get_app_state
-from aap_migration.api.models import Job
+from aap_migration.api.dependencies import get_job_service
 
 router = APIRouter()
 
 
 @router.websocket("/ws/jobs/{job_id}/logs")
-async def stream_logs(websocket: WebSocket, job_id: str) -> None:
+async def job_log_stream(websocket: WebSocket, job_id: str) -> None:
+    job_service = get_job_service()
+    job = job_service.get_job(job_id)
+    if job is None:
+        await websocket.close(code=4004, reason="Job not found")
+        return
+
     await websocket.accept()
-    state = get_app_state()
-    offset = 0
+
+    for line in job.log_lines:
+        await websocket.send_text(line)
+
+    if job.status in ("completed", "failed", "cancelled"):
+        await websocket.close(reason=job.status)
+        return
+
+    q = job_service.subscribe(job_id)
+    if q is None:
+        await websocket.close(reason="subscribe_failed")
+        return
+
     try:
         while True:
-            lines = state.job_service.get_logs_since(job_id, offset)
-            for line in lines:
-                await websocket.send_text(line)
-                offset += 1
-            job = state.job_service.get_job_status(job_id)
-            if job and job["status"] in ("completed", "failed", "cancelled") and not lines:
-                if offset == 0:
-                    await _replay_from_db(websocket, state, job_id, job["status"])
-                else:
-                    await websocket.close(code=1000, reason=job["status"])
-                return
-            if not job and offset == 0:
-                await _replay_from_db(websocket, state, job_id, None)
-                return
-            await asyncio.sleep(0.2)
+            line = await q.get()
+            if line is None:
+                await websocket.close(reason=job.status)
+                break
+            await websocket.send_text(line)
     except WebSocketDisconnect:
         pass
-
-
-async def _replay_from_db(
-    websocket: WebSocket, state: "object", job_id: str, status: str | None
-) -> None:
-    """Replay persisted output from the database for completed jobs."""
-    db = state.db_session_factory()
-    try:
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if job and job.output:
-            for line in job.output:
-                await websocket.send_text(line)
-        reason = (job.status if job else status) or "closed"
-        await websocket.close(code=1000, reason=reason)
     finally:
-        db.close()
+        job_service.unsubscribe(job_id, q)
