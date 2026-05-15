@@ -1,52 +1,44 @@
-"""Token encryption for connection credentials stored at rest.
+"""Token encryption utilities using Fernet symmetric encryption."""
 
-Uses Fernet symmetric encryption from the cryptography package.
-The encryption key is read from AAP_BRIDGE_SECRET_KEY environment variable.
-If not set, a key is generated and written to .secret_key for persistence.
-"""
+from __future__ import annotations
 
 import os
-from pathlib import Path
+from base64 import urlsafe_b64encode
+from hashlib import sha256
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet
 
+_KEY_ENV = "AAP_TOKEN_ENCRYPTION_KEY"
 _fernet: Fernet | None = None
 
 
 def _get_fernet() -> Fernet:
-    global _fernet
+    """Return a cached Fernet instance, deriving the key from the environment."""
+    global _fernet  # noqa: PLW0603
     if _fernet is not None:
         return _fernet
 
-    key = os.environ.get("AAP_BRIDGE_SECRET_KEY")
+    raw_key = os.environ.get(_KEY_ENV, "")
+    if not raw_key:
+        raw_key = "aap-migration-default-key-change-me"
 
-    if not key:
-        key_file = Path(".secret_key")
-        if key_file.exists():
-            key = key_file.read_text().strip()
-        if not key:
-            key = Fernet.generate_key().decode()
-            key_file.write_text(key)
-            key_file.chmod(0o600)
-
-    _fernet = Fernet(key.encode() if isinstance(key, str) else key)
+    key_bytes = urlsafe_b64encode(sha256(raw_key.encode()).digest())
+    _fernet = Fernet(key_bytes)
     return _fernet
 
 
 def encrypt_token(plaintext: str) -> str:
-    """Encrypt a token for storage."""
+    """Encrypt a token string, returning the ciphertext as a string."""
     if not plaintext:
-        return plaintext
-    f = _get_fernet()
-    return f.encrypt(plaintext.encode()).decode()
+        return ""
+    return _get_fernet().encrypt(plaintext.encode()).decode()
 
 
 def decrypt_token(ciphertext: str) -> str:
-    """Decrypt a stored token."""
+    """Decrypt a token string. Returns empty string if input is empty or decryption fails."""
     if not ciphertext:
-        return ciphertext
-    f = _get_fernet()
+        return ""
     try:
-        return f.decrypt(ciphertext.encode()).decode()
-    except InvalidToken:
+        return _get_fernet().decrypt(ciphertext.encode()).decode()
+    except Exception:
         return ciphertext

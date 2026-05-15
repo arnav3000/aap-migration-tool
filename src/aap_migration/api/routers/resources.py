@@ -20,8 +20,8 @@ async def list_resource_types(conn_id: str, db: Session = Depends(get_db)) -> li
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 
-    client = ConnectionService.build_source_client(conn)
     result: list[dict[str, Any]] = []
+    client = ConnectionService.build_source_client(conn)
     try:
         async with client:
             for rtype, info in sorted(
@@ -36,14 +36,22 @@ async def list_resource_types(conn_id: str, db: Session = Depends(get_db)) -> li
                     count = 0
                 result.append(
                     {
-                        "type": rtype,
-                        "endpoint": info.endpoint,
-                        "description": info.description,
+                        "name": rtype,
+                        "label": info.description or rtype.replace("_", " ").title(),
+                        "api_path": info.endpoint,
                         "count": count,
                     }
                 )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to query AAP: {exc}") from None
+    except Exception:
+        for rtype, info in sorted(RESOURCE_REGISTRY.items(), key=lambda x: x[1].migration_order):
+            result.append(
+                {
+                    "name": rtype,
+                    "label": info.description or rtype.replace("_", " ").title(),
+                    "api_path": info.endpoint,
+                    "count": -1,
+                }
+            )
 
     return result
 

@@ -25,6 +25,7 @@ def create_connection(body: ConnectionCreate, db: Session = Depends(get_db)) -> 
         name=body.name,
         url=body.url,
         token=body.token,
+        type=body.type,
         role=body.role,
         verify_ssl=body.verify_ssl,
         timeout=body.timeout,

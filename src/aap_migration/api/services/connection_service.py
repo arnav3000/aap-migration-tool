@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from aap_migration.api.crypto import decrypt_token, encrypt_token
 from aap_migration.api.models import Connection
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.aap_target_client import AAPTargetClient
@@ -17,7 +18,8 @@ class ConnectionService:
         *,
         name: str,
         url: str,
-        token: str,
+        token: str | None = None,
+        type: str = "awx",
         role: str = "source",
         verify_ssl: bool = True,
         timeout: int = 30,
@@ -25,7 +27,8 @@ class ConnectionService:
         conn = Connection(
             name=name,
             url=url,
-            token=token,
+            token=encrypt_token(token or ""),
+            type=type,
             role=role,
             verify_ssl=verify_ssl,
             timeout=timeout,
@@ -51,6 +54,8 @@ class ConnectionService:
             return None
         for k, v in kwargs.items():
             if v is not None and hasattr(conn, k):
+                if k == "token" and isinstance(v, str):
+                    v = encrypt_token(v)
                 setattr(conn, k, v)
         db.flush()
         return conn
@@ -68,7 +73,7 @@ class ConnectionService:
     def build_instance_config(conn: Connection) -> AAPInstanceConfig:
         return AAPInstanceConfig(
             url=conn.url,
-            token=conn.token,
+            token=decrypt_token(conn.token),
             verify_ssl=conn.verify_ssl,
             timeout=conn.timeout,
         )
@@ -88,7 +93,7 @@ class ConnectionService:
         """Test connectivity to an AAP instance. Returns (ok, error_message)."""
         try:
             config = ConnectionService.build_instance_config(conn)
-            if conn.role == "target":
+            if conn.role in ("target", "destination"):
                 target = AAPTargetClient(config)
                 async with target:
                     await target.get_version()

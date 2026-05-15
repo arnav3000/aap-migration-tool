@@ -17,7 +17,7 @@ router = APIRouter()
 
 
 @router.post("/connections/{conn_id}/cleanup", response_model=JobStartResponse)
-def run_cleanup(conn_id: str, db: Session = Depends(get_db)) -> JobStartResponse:
+async def run_cleanup(conn_id: str, db: Session = Depends(get_db)) -> JobStartResponse:
     conn = ConnectionService.get(db, conn_id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
@@ -53,7 +53,7 @@ def run_cleanup(conn_id: str, db: Session = Depends(get_db)) -> JobStartResponse
 
 
 @router.post("/connections/{conn_id}/export", response_model=JobStartResponse)
-def run_export(conn_id: str, db: Session = Depends(get_db)) -> JobStartResponse:
+async def run_export(conn_id: str, db: Session = Depends(get_db)) -> JobStartResponse:
     conn = ConnectionService.get(db, conn_id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")

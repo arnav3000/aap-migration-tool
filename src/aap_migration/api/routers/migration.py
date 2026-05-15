@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from aap_migration.api.crypto import decrypt_token
 from aap_migration.api.dependencies import get_db, get_job_service
 from aap_migration.api.schemas import (
     ClearStateResponse,
@@ -23,7 +24,7 @@ router = APIRouter()
 
 
 @router.post("/migrate/preview", response_model=JobStartResponse)
-def migration_preview(
+async def migration_preview(
     body: MigrationPreviewRequest, db: Session = Depends(get_db)
 ) -> JobStartResponse:
     source = ConnectionService.get(db, body.source_id)
@@ -34,7 +35,7 @@ def migration_preview(
     svc = get_job_service()
 
     source_url = source.url
-    source_token = source.token
+    source_token = decrypt_token(source.token)
     source_verify = source.verify_ssl
     source_timeout = source.timeout
     target_url = target.url
@@ -90,11 +91,16 @@ def get_migration_preview(job_id: str) -> dict[str, Any]:
     job = svc.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job.to_dict()
+    data = job.to_dict()
+    if job.status == "completed" and job.result:
+        data.update(job.result)
+    return data
 
 
 @router.post("/migrate/run", response_model=JobStartResponse)
-def migration_run(body: MigrationRunRequest, db: Session = Depends(get_db)) -> JobStartResponse:
+async def migration_run(
+    body: MigrationRunRequest, db: Session = Depends(get_db)
+) -> JobStartResponse:
     source = ConnectionService.get(db, body.source_id)
     target = ConnectionService.get(db, body.destination_id)
     if source is None or target is None:
@@ -104,7 +110,7 @@ def migration_run(body: MigrationRunRequest, db: Session = Depends(get_db)) -> J
     exclusions = body.exclusions or {}
 
     source_url = source.url
-    source_token = source.token
+    source_token = decrypt_token(source.token)
     source_verify = source.verify_ssl
     source_timeout = source.timeout
 

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 
+from aap_migration.api.crypto import decrypt_token
 from aap_migration.api.dependencies import get_db, get_job_service
 from aap_migration.api.schemas import AnalysisRunRequest, JobStartResponse
 from aap_migration.api.services.connection_service import ConnectionService
@@ -127,7 +128,7 @@ def _serialize_report(report: Any) -> dict[str, Any]:
 
 
 @router.post("/analysis/run", response_model=JobStartResponse)
-def run_analysis(body: AnalysisRunRequest, db: Session = Depends(get_db)) -> JobStartResponse:
+async def run_analysis(body: AnalysisRunRequest, db: Session = Depends(get_db)) -> JobStartResponse:
     conn = ConnectionService.get(db, body.connection_id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
@@ -135,7 +136,7 @@ def run_analysis(body: AnalysisRunRequest, db: Session = Depends(get_db)) -> Job
     svc = get_job_service()
 
     conn_url = conn.url
-    conn_token = conn.token
+    conn_token = decrypt_token(conn.token)
     conn_verify = conn.verify_ssl
     conn_timeout = conn.timeout
 
@@ -192,7 +193,10 @@ def get_analysis_result(job_id: str) -> dict[str, Any]:
     job = svc.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job.to_dict()
+    data = job.to_dict()
+    if job.status == "completed" and job.result:
+        data["data"] = job.result
+    return data
 
 
 @router.get("/analysis/{job_id}/export/json")

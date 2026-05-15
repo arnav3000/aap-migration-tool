@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 class ConnectionCreate(BaseModel):
     name: str
     url: str
-    token: str
+    token: str | None = None
+    type: str = "awx"
     role: str = "source"
     verify_ssl: bool = True
     timeout: int = 30
@@ -18,6 +19,7 @@ class ConnectionUpdate(BaseModel):
     name: str | None = None
     url: str | None = None
     token: str | None = None
+    type: str | None = None
     role: str | None = None
     verify_ssl: bool | None = None
     timeout: int | None = None
@@ -45,6 +47,7 @@ class ConnectionResponseMasked(BaseModel):
     id: str
     name: str
     url: str
+    type: str
     role: str
     verify_ssl: bool
     timeout: int

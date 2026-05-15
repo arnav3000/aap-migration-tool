@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 @click.option(
     "--config",
     "-c",
-    type=click.Path(exists=True, path_type=Path),
+    type=click.Path(path_type=Path),
     help="Path to configuration file",
     envvar="AAP_BRIDGE_CONFIG",
 )

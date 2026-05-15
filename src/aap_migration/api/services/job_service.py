@@ -49,7 +49,8 @@ class Job:
             "type": self.type,
             "status": self.status,
             "created_at": self.created_at.isoformat(),
-            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "started_at": (self.started_at or self.created_at).isoformat(),
+            "finished_at": self.completed_at.isoformat() if self.completed_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "error": self.error,
             "result": self.result,
@@ -67,6 +68,7 @@ class JobService:
         name: str,
         job_type: str,
         coro_factory: Callable[[Job, Callable[[str], None]], Coroutine],
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> str:
         """Start a background job.
 
@@ -74,6 +76,7 @@ class JobService:
             name: Human-readable job name
             job_type: Category (migration, analysis, cleanup, export, etc.)
             coro_factory: Async callable(job, log_fn) that performs the work
+            loop: Event loop to schedule the task on (required from sync contexts)
 
         Returns:
             The new job's UUID.
@@ -102,7 +105,8 @@ class JobService:
                 for q in job._subscribers:
                     await q.put(None)
 
-        job._task = asyncio.get_event_loop().create_task(_run())
+        target_loop = loop or asyncio.get_event_loop()
+        job._task = target_loop.create_task(_run())
         return job_id
 
     def add_log(self, job_id: str, line: str) -> None:

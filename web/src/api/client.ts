@@ -10,7 +10,13 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   const resp = await fetch(`${BASE}${path}`, opts);
   if (resp.status === 204) return undefined as T;
-  const data = await resp.json();
+  const text = await resp.text();
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(resp.ok ? 'Invalid JSON response' : `HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
   if (!resp.ok) {
     const msg = data.detail || data.error || `HTTP ${resp.status}`;
     throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));

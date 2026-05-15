@@ -40,6 +40,7 @@ uv.lock
 # Documentation (not needed in container)
 docs/
 *.md
+!README.md
 !config/*.yaml
 
 # Runtime directories (created at runtime)

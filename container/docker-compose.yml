@@ -1,22 +1,27 @@
 version: '3.8'
 
+networks:
+  app:
+    driver: bridge
+
 services:
   # PostgreSQL database
   db:
-    image: postgres:15-alpine
+    image: registry.redhat.io/rhel9/postgresql-15:latest
     container_name: aap-db
+    networks:
+    - app
     environment:
-      POSTGRES_USER: aap_user
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      POSTGRES_DB: aap_migration
-      POSTGRES_INITDB_ARGS: -E UTF8 --locale=en_US.UTF-8
+      POSTGRESQL_USER: aap_user
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRESQL_DATABASE: aap_migration
     volumes:
-    - postgres-data:/var/lib/postgresql/data
+    - postgres-data:/var/lib/pgsql/data
     ports:
     - 5432:5432
     restart: unless-stopped
     healthcheck:
-      test: [CMD-SHELL, pg_isready -U aap_user]
+      test: [CMD-SHELL, pg_isready -U aap_user -d aap_migration]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -25,16 +30,17 @@ services:
   engine:
     build:
       context: ..
-      dockerfile: Containerfile.api
+      dockerfile: container/Containerfile.api
     image: aap-bridge-api:latest
     container_name: aap-engine
+    networks:
+    - app
     depends_on:
       db:
         condition: service_healthy
     environment:
       MIGRATION_STATE_DB_PATH: postgresql://aap_user:${POSTGRES_PASSWORD:-changeme}@db:5432/aap_migration
-    env_file:
-    - .env
+      AAP_TOKEN_ENCRYPTION_KEY: ${AAP_TOKEN_ENCRYPTION_KEY:-}
     volumes:
     - ./volumes/logs:/app/logs:Z
     - ./volumes/exports:/app/exports:Z
@@ -54,9 +60,11 @@ services:
   ui:
     build:
       context: ..
-      dockerfile: Containerfile.ui
+      dockerfile: container/Containerfile.ui
     image: aap-bridge-ui:latest
     container_name: aap-ui
+    networks:
+    - app
     depends_on:
       engine:
         condition: service_healthy
@@ -79,6 +87,8 @@ services:
         APP_VERSION: 0.5.4
     image: aap-bridge:latest
     container_name: aap-bridge
+    networks:
+    - app
     depends_on:
       db:
         condition: service_healthy
