@@ -1,35 +1,37 @@
-# AAP Bridge
+# AAP Migration Tool -- CLI container
 # Base: Universal Base Image (UBI) 9
-FROM ubi9/ubi
+FROM registry.access.redhat.com/ubi9/ubi:9.4
 
 # Labels (OCI standard)
-LABEL org.opencontainers.image.title="aap-bridge" \
+LABEL org.opencontainers.image.title="aap-migration-tool" \
       org.opencontainers.image.version="0.5.4" \
       org.opencontainers.image.description="Production-grade migration tool for Ansible Automation Platform" \
-      org.opencontainers.image.source="https://github.com/antonysallas/aap-bridge" \
+      org.opencontainers.image.source="https://github.com/arnav3000/aap-migration-tool" \
       org.opencontainers.image.licenses="GPL-3.0-or-later" \
       org.opencontainers.image.vendor="Antony Sallas"
 
-MAINTAINER Magnus Glantz <sudo@redhat.com>
+LABEL maintainer="Magnus Glantz <sudo@redhat.com>"
 
 # Prereqs
-RUN dnf install python3 python3-pip wget unzip -y
+# hadolint ignore=DL3041
+RUN dnf install python3 python3-pip wget unzip -y && dnf clean all
 
 RUN mkdir /app
 
 # Working directory
 WORKDIR /app
 
-# Download variable, if you are building your own image, simply pass your own repository like such:
-# podman build --build-arg AAP_BRIDGE_ZIP=https://github.com/myuser/aap-bridge-fork/archive/refs/heads/main.zip -t stuff .
+# Download variable -- override to build from a fork:
+# podman build --build-arg AAP_BRIDGE_ZIP=https://github.com/myuser/aap-migration-tool/archive/refs/heads/main.zip -t stuff .
 ARG AAP_BRIDGE_ZIP
 RUN echo "Downloading from: $AAP_BRIDGE_ZIP"
-ENV AAP_BRIDGE_ZIP="${AAP_BRIDGE_ZIP:-https://github.com/arnav3000/aap-bridge-fork/archive/refs/heads/main.zip}"
+ENV AAP_BRIDGE_ZIP="${AAP_BRIDGE_ZIP:-https://github.com/arnav3000/aap-migration-tool/archive/refs/heads/main.zip}"
 
 # Download and unzip of aap-bridge code
 RUN wget $AAP_BRIDGE_ZIP
 RUN unzip /app/"${AAP_BRIDGE_ZIP##*/}"
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN mv /app/$(ls /app | head -1) /app/aap-bridge
 
 WORKDIR /app/aap-bridge
@@ -46,7 +48,8 @@ RUN chown appuser:appuser /app -R
 
 USER appuser
 
-RUN pip3 install uv
+# hadolint ignore=DL3013
+RUN pip3 install --no-cache-dir uv
 
 # Install AAP Bridge
 RUN ~/.local/bin/uv venv --seed --python 3.12
