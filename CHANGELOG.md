@@ -8,57 +8,6 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.5.4] - 2026-05-15
-
-### Added
-
-- **Web UI**
-  - React / PatternFly v5 single-page application with full migration workflow
-  - Settings page for managing AAP connections with encrypted token storage (Fernet)
-  - Dependency Analysis page with org-level dependency graphs, quality scores, and migration phases
-  - Migration Planner: multi-source phased plans, drag-and-drop phase editing, per-phase execution
-  - Selective org migration and object-name suffix for consolidating multiple AAP instances
-  - Object Browser for inspecting resources on a connected AAP instance
-  - Cleanup page with confirmation gate
-  - Jobs page with live log streaming via WebSocket
-  - Global and component-level React error boundaries
-- **FastAPI API**
-  - REST API layer exposing all CLI functionality over HTTP
-  - Background job system (`JobService`) with `asyncio` task management
-  - Full job persistence: log lines, structured events, and results stored in DB
-  - Sequential job IDs alongside UUIDs for easier identification
-  - WebSocket endpoint for real-time log streaming
-- **Dependency Analyzer improvements**
-  - Cycle-aware phase grouping (`group_into_phases_with_cycles`)
-  - Partial topological sort that separates independent orgs from cycle members
-  - Circular-dependency detection surfaced in analysis reports
-- **Migration Planner backend**
-  - Multi-source plan creation from completed analysis scans
-  - Phase editing, saving, and per-phase execution with job tracking
-- **Documentation**
-  - Architecture overview (`docs/architecture.md`)
-  - Quick-start guides for local install, containerized CLI, and web UI
-  - MkDocs configuration updated for new doc structure
-
-### Changed
-
-- Renamed project from AAP Bridge to AAP Migration Tool across docs and config
-- Slimmed README to an overview with links to detailed docs
-- Moved `rbac_migration.py` to `scripts/`
-- Moved all container files to `container/` directory
-- PostgreSQL image switched to `registry.redhat.io/rhel9/postgresql-15:latest`
-- Deduplicated pre-commit hooks and pyproject.toml dependencies
-- Updated `.gitignore` to track `docs/` and `scripts/`
-
-### Fixed
-
-- Dependency analysis serialization double-wrapping `migration_phases` (caused UI blank screen)
-- Foreign-key violation when starting plan-phase execution (synchronous initial job persist)
-- Planner rendering corrupted org names from double-wrapped phase data
-- Connection test using unauthenticated `/ping/` endpoint (now uses `/me/`)
-- HTML report download for dependency analysis
-- Various `ruff`, `mypy`, and `bandit` pre-commit findings
-
 ## [0.4.0] - 2026-04-14
 
 ### Added
@@ -79,6 +28,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   - Import exceptions now mark resources as "failed" in database
   - Current-run-only failure reporting (excludes historical failures)
   - Automatic migration-report hint displayed when imports fail
+- **Documentation Improvements**
+  - Containerized deployment featured as primary installation method in README
+  - Added guides/ and workflows/ directories to MkDocs navigation
+  - 7 user guides and 3 workflow diagrams now accessible from documentation site
 - **Security Enhancements**
   - Enhanced pre-commit hooks with AAP-specific secret patterns
   - Additional gitleaks patterns for AAP tokens and credentials
@@ -99,29 +52,57 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Initial release
+- Initial release of AAP Bridge
 - **Migration Framework**
   - ETL pipeline for source-to-target AAP migrations
-  - Support for all major AAP resource types
+  - Support for all major AAP resource types: organizations, users, teams,
+    credentials, credential types, execution environments, projects,
+    inventories, hosts, job templates, workflow job templates, and schedules
   - RBAC role assignment migration
-  - Bulk API operations for high-performance imports
+  - Bulk API operations for high-performance host and inventory imports
 - **State Management**
-  - SQLite or PostgreSQL state tracking with checkpoint/resume
-  - ID mapping persistence
-  - Idempotent operations
+  - SQLite (default) or PostgreSQL state tracking with checkpoint/resume capability
+  - ID mapping persistence for cross-system resource references
+  - Idempotent operations to prevent duplicate creation
+- **Export/Import Operations**
+  - Split-file export for large datasets (configurable records per file)
+  - Automatic file discovery and ordered import
+  - Metadata tracking for export sessions
+- **Validation**
+  - Statistical sampling validation (configurable confidence level and margin of
+    error)
+  - Count reconciliation between source and target
+  - Phase-by-phase validation support
 - **CLI Interface**
-  - `aap-migrate` command with TUI and direct CLI modes
-  - Commands: migrate, export, import, transform, validate, state, cleanup, credentials
-- **Logging and Progress**
-  - Rich-based live progress display
+  - `aap-bridge` - Single command with a menu-driven interface
+  - `aap-bridge migrate` - Full migration with phase control
+  - `aap-bridge export` - Export resources from source AAP
+  - `aap-bridge import` - Import resources to target AAP
+  - `aap-bridge validate` - Validate migration completeness
+  - `aap-bridge state` - View and manage migration state
+  - `aap-bridge cleanup` - Clean up target resources or local data
+- **Progress Display**
+  - Rich-based live progress display with real-time metrics
+  - Multiple output modes: normal, quiet, CI/CD, and detailed
+  - Rate tracking, success/failure counts, and timing information
+- **Logging**
   - Structured logging with structlog
+  - Separate console (human-readable) and file (JSON) output
+  - Automatic sensitive data redaction
+  - Configurable log levels for console and file
+- **Configuration**
+  - YAML-based configuration with environment variable substitution
+  - Resource renaming via mappings.yaml (e.g., credential type name changes
+    between versions)
+  - Endpoint filtering via ignored_endpoints.yaml
+  - Extensive performance tuning options
 
 ### Security
 
-- Automatic redaction of sensitive fields in logs
+- Automatic redaction of sensitive fields in logs (tokens, passwords, SSH keys)
 - Environment variable support for all credentials
+- No hardcoded secrets in configuration files
 
-[Unreleased]: https://github.com/arnav3000/aap-migration-tool/compare/v0.5.4...HEAD
-[0.5.4]: https://github.com/arnav3000/aap-migration-tool/compare/v0.4.0...v0.5.4
-[0.4.0]: https://github.com/arnav3000/aap-migration-tool/compare/v0.1.0...v0.4.0
-[0.1.0]: https://github.com/arnav3000/aap-migration-tool/releases/tag/v0.1.0
+[Unreleased]: https://github.com/arnav3000/aap-bridge-fork/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/arnav3000/aap-bridge-fork/compare/v0.1.0...v0.4.0
+[0.1.0]: https://github.com/arnav3000/aap-bridge-fork/releases/tag/v0.1.0

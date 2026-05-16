@@ -1,114 +1,56 @@
 version: '3.8'
 
-networks:
-  app:
-    driver: bridge
-
 services:
-  # PostgreSQL database
-  db:
-    image: registry.redhat.io/rhel9/postgresql-15:latest
-    container_name: aap-db
-    networks:
-    - app
-    environment:
-      POSTGRESQL_USER: aap_user
-      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      POSTGRESQL_DATABASE: aap_migration
-    volumes:
-    - postgres-data:/var/lib/pgsql/data
-    ports:
-    - 5432:5432
-    restart: unless-stopped
-    healthcheck:
-      test: [CMD-SHELL, pg_isready -U aap_user -d aap_migration]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # FastAPI backend (serves the API for the UI)
-  engine:
-    build:
-      context: ..
-      dockerfile: container/Containerfile.api
-    image: aap-bridge-api:latest
-    container_name: aap-engine
-    networks:
-    - app
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      MIGRATION_STATE_DB_PATH: postgresql://aap_user:${POSTGRES_PASSWORD:-changeme}@db:5432/aap_migration
-      AAP_TOKEN_ENCRYPTION_KEY: ${AAP_TOKEN_ENCRYPTION_KEY:-}
-    volumes:
-    - ./volumes/logs:/app/logs:Z
-    - ./volumes/exports:/app/exports:Z
-    - ./volumes/xformed:/app/xformed:Z
-    - ./volumes/database:/app/database:Z
-    ports:
-    - 8000:8000
-    restart: unless-stopped
-    healthcheck:
-      test: [CMD, python3.12, -c, import urllib.request; urllib.request.urlopen('http://localhost:8000/api/jobs')]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 10s
-
-  # React UI served by nginx
-  ui:
-    build:
-      context: ..
-      dockerfile: container/Containerfile.ui
-    image: aap-bridge-ui:latest
-    container_name: aap-ui
-    networks:
-    - app
-    depends_on:
-      engine:
-        condition: service_healthy
-    ports:
-    - 8080:8080
-    restart: unless-stopped
-    healthcheck:
-      test: [CMD, curl, -f, http://localhost:8080/]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # CLI container (for users who want to exec in and run CLI commands)
-  bridge:
+  # AAP Bridge Migration Tool
+  aap-bridge:
     build:
       context: ..
       dockerfile: container/Containerfile
       args:
         BRANCH: main
-        APP_VERSION: 0.5.4
+        APP_VERSION: "0.2.0"
     image: aap-bridge:latest
     container_name: aap-bridge
-    networks:
-    - app
-    depends_on:
-      db:
-        condition: service_healthy
+    network_mode: host  # Required for host.containers.internal on macOS/Podman
     env_file:
-    - .env
-    environment:
-      MIGRATION_STATE_DB_PATH: postgresql://aap_user:${POSTGRES_PASSWORD:-changeme}@db:5432/aap_migration
+      - .env  # Copy .env.container to .env and customize
     volumes:
-    - ./volumes/database:/app/aap-bridge/database:Z
-    - ./volumes/logs:/app/aap-bridge/logs:Z
-    - ./volumes/exports:/app/aap-bridge/exports:Z
-    - ./volumes/xformed:/app/aap-bridge/xformed:Z
-    - ./volumes/config:/app/aap-bridge/config:Z
+      # Persistent data volumes
+      - ./volumes/database:/app/aap-bridge/database:Z
+      - ./volumes/logs:/app/aap-bridge/logs:Z
+      - ./volumes/exports:/app/aap-bridge/exports:Z
+      - ./volumes/xformed:/app/aap-bridge/xformed:Z
+      # Configuration (override if needed)
+      - ./volumes/config:/app/aap-bridge/config:Z
     restart: unless-stopped
     command: tail -f /dev/null
     healthcheck:
-      test: [CMD, python3, -c, import sys; sys.exit(0)]
+      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # PostgreSQL (Optional - only if using PostgreSQL instead of SQLite)
+  postgres:
+    image: postgres:15-alpine
+    container_name: aap-postgres
+    profiles:
+      - postgres  # Only starts when explicitly enabled
+    environment:
+      POSTGRES_USER: aap_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: aap_migration
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aap_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres-data:
@@ -117,14 +59,16 @@ volumes:
 # Usage:
 # ======
 # 1. Copy .env.container to .env and customize your credentials
-# 2. Create volumes: mkdir -p volumes/{database,logs,exports,xformed,config}
+# 2. Create volumes directory: mkdir -p volumes/{database,logs,exports,xformed,config}
 #
-# Full stack (UI + API + DB + CLI):
-#   podman-compose up -d
-#   # UI at http://localhost:8080
-#   # API at http://localhost:8000
-#
-# CLI only (exec into bridge container):
-#   podman-compose up -d db bridge
+# SQLite deployment (default):
+#   podman-compose up -d aap-bridge
 #   podman exec -it aap-bridge bash
+#
+# PostgreSQL deployment:
+#   podman-compose --profile postgres up -d
+#   # Update .env: MIGRATION_STATE_DB_PATH=postgresql://aap_user:changeme@postgres:5432/aap_migration
+#   podman exec -it aap-bridge bash
+#
+# Run migration:
 #   aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y

@@ -37,19 +37,16 @@ pre-commit run gitleaks --all-files
 ## What Gets Checked
 
 ### Security Checks
-
 - **Gitleaks**: Scans for secrets, API tokens, credentials
 - **Private key detection**: Catches SSH private keys
 - **Safety check**: Scans Python dependencies for vulnerabilities
 
 ### Code Quality
-
 - **Ruff**: Python linting and formatting
 - **Bandit**: Python security linting
 - **Mypy**: Type checking
 
 ### General Checks
-
 - Trailing whitespace
 - End-of-file fixer
 - Large file detection (>1MB)
@@ -58,7 +55,6 @@ pre-commit run gitleaks --all-files
 ## How It Works
 
 When you run `git commit`:
-
 1. Pre-commit automatically runs all configured hooks
 2. If any hook fails, the commit is blocked
 3. Fix the issues and try again
@@ -82,7 +78,6 @@ git commit --no-verify
 ## Gitleaks Configuration
 
 Gitleaks uses `.gitleaks.toml` for configuration:
-
 - **Allowlisted patterns**: Placeholders like `<your-token>`, `***REMOVED***`
 - **Allowlisted paths**: Template files, test data, documentation
 - **Custom rules**: AAP-specific token patterns
@@ -92,7 +87,6 @@ Gitleaks uses `.gitleaks.toml` for configuration:
 If gitleaks flags something that's not a real secret:
 
 **Option 1: Add to allowlist in `.gitleaks.toml`**
-
 ```toml
 [allowlist]
 regexes = [
@@ -101,7 +95,6 @@ regexes = [
 ```
 
 **Option 2: Skip for specific commit (not recommended)**
-
 ```bash
 git commit --no-verify
 ```
@@ -121,13 +114,11 @@ pre-commit autoupdate --repo https://github.com/gitleaks/gitleaks
 Pre-commit hooks run locally before commits. The repository also has GitHub Actions that run gitleaks on every push/PR for additional protection.
 
 **Local (pre-commit):**
-
 - Fast feedback
 - Catches issues before commit
 - Uses `.gitleaks.toml` config
 
 **CI/CD (GitHub Actions):**
-
 - Comprehensive scan (full history)
 - Catches issues in PRs
 - Uses same `.gitleaks.toml` config
@@ -135,7 +126,6 @@ Pre-commit hooks run locally before commits. The repository also has GitHub Acti
 ## Troubleshooting
 
 ### Hooks are slow
-
 ```bash
 # Only run on changed files
 git add <files>
@@ -146,7 +136,6 @@ SKIP=mypy,bandit pre-commit run
 ```
 
 ### Hook installation fails
-
 ```bash
 # Clean and reinstall
 pre-commit clean
@@ -154,7 +143,6 @@ pre-commit install
 ```
 
 ### Gitleaks false positive
-
 1. Verify it's actually safe (not a real secret)
 2. Add pattern to `.gitleaks.toml` allowlist
 3. Commit the updated config
@@ -163,4 +151,4 @@ pre-commit install
 
 - [Pre-commit documentation](https://pre-commit.com/)
 - [Gitleaks documentation](https://github.com/gitleaks/gitleaks)
-- [Security Policy](SECURITY.md)
+- [AAP Bridge Security Rules](CRITICAL-RULES.md)
