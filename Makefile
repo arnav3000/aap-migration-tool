@@ -1,8 +1,9 @@
 .PHONY: help install install-dev clean format lint typecheck test test-unit test-integration \
        test-performance test-cov test-watch check pre-commit docs docs-serve run-example \
        init-env setup version venv install-editable all \
-       build prepare-pgdata up up-postgres down shell logs \
-       c-test c-lint c-format c-typecheck c-check
+       build build-api build-ui prepare-pgdata up up-dev down shell shell-engine logs \
+       c-test c-lint c-format c-typecheck c-check \
+       web-install web-dev web-build serve
 
 .DEFAULT_GOAL := help
 
@@ -32,10 +33,16 @@ help: ## Show this help message
 	@echo "    make docs-serve                    # Serve docs locally"
 	@echo ""
 	@echo "  Container deployment:"
-	@echo "    make build && make up              # Build and start bridge container"
-	@echo "    make up                            # Start aap-bridge container"
-	@echo "    make up-postgres                   # Start bridge + postgres"
+	@echo "    make build && make up              # Build and start all containers"
+	@echo "    make up                            # Start db + engine + ui"
+	@echo "    make up-dev                        # Start db + bridge (CLI dev)"
 	@echo "    make c-check                       # Run checks inside container"
+	@echo ""
+	@echo "  Web UI:"
+	@echo "    make web-install                   # Install frontend dependencies"
+	@echo "    make web-dev                       # Start Vite dev server"
+	@echo "    make web-build                     # Build frontend for production"
+	@echo "    make serve                         # Start FastAPI API server"
 	@echo ""
 	@echo "  All targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -126,8 +133,10 @@ all: check docs ## Run all checks and build docs
 # ===========================================================================
 
 COMPOSE          := podman compose -f container/docker-compose.yml
-BRIDGE_SVC       := aap-bridge
+BRIDGE_SVC       := bridge
 BRIDGE_IMAGE     := localhost/aap-bridge:latest
+BRIDGE_API_IMAGE := localhost/aap-bridge-api:latest
+UI_IMAGE         := localhost/aap-bridge-ui:latest
 PROJECT_NAME     := $(notdir $(CURDIR))
 PGDATA_VOLUME    := $(PROJECT_NAME)_postgres-data
 
@@ -135,24 +144,35 @@ define run-bridge
 	$(COMPOSE) exec $(BRIDGE_SVC)
 endef
 
-build: ## Build bridge container image
+build: ## Build all container images (cli, api, ui)
 	podman build -t $(BRIDGE_IMAGE) -f container/Containerfile .
+	podman build -t $(BRIDGE_API_IMAGE) -f container/Containerfile.api .
+	podman build -t $(UI_IMAGE) -f container/Containerfile.ui .
+
+build-api: ## Build API container image only
+	podman build -t $(BRIDGE_API_IMAGE) -f container/Containerfile.api .
+
+build-ui: ## Build UI container image only
+	podman build -t $(UI_IMAGE) -f container/Containerfile.ui .
 
 prepare-pgdata: ## Prepare PostgreSQL volume ownership for rootless Podman
 	@podman volume inspect $(PGDATA_VOLUME) >/dev/null 2>&1 || podman volume create $(PGDATA_VOLUME) >/dev/null
 	@podman unshare chown -R 26:26 "$$(podman volume inspect $(PGDATA_VOLUME) --format '{{.Mountpoint}}')"
 
-up: ## Start aap-bridge container
-	$(COMPOSE) up -d $(BRIDGE_SVC)
+up: prepare-pgdata ## Start db + engine + ui (web interface)
+	$(COMPOSE) up -d db engine ui
 
-up-postgres: prepare-pgdata ## Start aap-bridge + postgres (requires --profile postgres)
-	$(COMPOSE) --profile postgres up -d
+up-dev: prepare-pgdata ## Start db + bridge (CLI dev container)
+	$(COMPOSE) up -d db bridge
 
 down: ## Stop all containers
 	$(COMPOSE) down
 
 shell: ## Shell into bridge container
 	$(COMPOSE) exec $(BRIDGE_SVC) /bin/bash
+
+shell-engine: ## Shell into engine container
+	$(COMPOSE) exec engine /bin/bash
 
 logs: ## Tail all container logs
 	$(COMPOSE) logs -f
@@ -171,3 +191,19 @@ c-typecheck: ## Run mypy inside bridge container
 	$(run-bridge) python3.12 -m mypy src/
 
 c-check: c-lint c-typecheck c-test ## Run all checks inside bridge container
+
+# ===========================================================================
+#  Web UI
+# ===========================================================================
+
+web-install: ## Install frontend dependencies
+	cd web && npm ci
+
+web-dev: ## Start Vite dev server (proxies API to localhost:8000)
+	cd web && npm run dev
+
+web-build: ## Build frontend for production
+	cd web && npm run build
+
+serve: ## Start FastAPI API server (requires pip install '.[api]')
+	aap-bridge serve --host 0.0.0.0 --port 8000

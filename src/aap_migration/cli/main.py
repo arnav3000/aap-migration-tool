@@ -25,6 +25,7 @@ from aap_migration.cli.commands import project_failures as project_failures_comm
 from aap_migration.cli.commands import retry as retry_commands
 from aap_migration.cli.commands import state as state_commands
 from aap_migration.cli.commands import transform as transform_commands
+from aap_migration.cli.commands.serve import serve as serve_command
 from aap_migration.cli.context import MigrationContext
 from aap_migration.cli.menu import interactive_menu
 from aap_migration.utils.logging import configure_logging, get_logger
@@ -89,10 +90,16 @@ def cli(
         # Show migration status
         aap-bridge migrate status --config config.yaml
     """
-    effective_log_file = str(log_file) if log_file else "logs/migration.log"
-    log_path = Path(effective_log_file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    configure_logging(level=log_level, log_file=effective_log_file)
+    # Skip file logging for serve command — uvicorn handles its own logging
+    is_serve = len(sys.argv) > 1 and sys.argv[1] == "serve"
+
+    if not is_serve:
+        effective_log_file = str(log_file) if log_file else "logs/migration.log"
+        log_path = Path(effective_log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        configure_logging(level=log_level, log_file=effective_log_file)
+    else:
+        configure_logging(level=log_level)
 
     # Create context
     ctx.obj = MigrationContext(
@@ -129,6 +136,7 @@ cli.add_command(export_import.import_cmd, name="import")
 cli.add_command(patch_projects_commands.patch_projects)
 cli.add_command(project_failures_commands.analyze_project_failures)
 cli.add_command(migration_report_commands.generate_migration_report)
+cli.add_command(serve_command)
 
 
 def main() -> int:
