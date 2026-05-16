@@ -9,7 +9,7 @@ requests>=2.33.0
 aiofiles==23.2.1
 
 # CLI Framework
-click==8.1.7
+click==8.3.3
 
 # Logging
 structlog==24.1.0
