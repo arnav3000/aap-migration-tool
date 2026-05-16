@@ -98,7 +98,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
         engine.dispose()
 
     app = FastAPI(
-        title="AAP Bridge API",
+        title="AAP Migration Tool API",
         version="0.5.4",
         lifespan=lifespan,
     )

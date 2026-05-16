@@ -214,10 +214,10 @@ export function App() {
                   popperProps={{ position: 'right' }}
                 >
                   <DropdownList>
-                    <DropdownItem key="docs" component="a" to="https://github.com/arnav3000/aap-migration-tool" target="_blank">
+                    <DropdownItem key="docs" component="a" href="https://github.com/arnav3000/aap-migration-tool" target="_blank" rel="noopener noreferrer">
                       Documentation
                     </DropdownItem>
-                    <DropdownItem key="repo" component="a" to="https://github.com/arnav3000/aap-migration-tool" target="_blank">
+                    <DropdownItem key="repo" component="a" href="https://github.com/arnav3000/aap-migration-tool" target="_blank" rel="noopener noreferrer">
                       Source Code
                     </DropdownItem>
                   </DropdownList>

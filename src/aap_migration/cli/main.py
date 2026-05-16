@@ -91,7 +91,12 @@ def cli(
         aap-bridge migrate status --config config.yaml
     """
     # Skip file logging for serve command — uvicorn handles its own logging
-    is_serve = "serve" in sys.argv[1:]
+    is_serve = False
+    for arg in sys.argv[1:]:
+        if arg.startswith("-"):
+            continue
+        is_serve = arg == "serve"
+        break
 
     if not is_serve:
         effective_log_file = str(log_file) if log_file else "logs/migration.log"
