@@ -70,7 +70,6 @@ instance/
 
 # Sphinx documentation
 docs/_build/
-docs/
 examples/
 
 # PyBuilder
@@ -202,9 +201,7 @@ reports/
 schemas/
 xformed/
 sql/
-tests/
 migrations/
-scripts/
 
 # AAP Bridge State Databases (SQLite)
 migration_state.db
@@ -220,13 +217,11 @@ database/*.db-shm
 *.db-wal
 *.db-shm
 
-# Documentation PDFs (API references, etc.)
+# Documentation build artifacts
+docs/_build/
 docs/*.pdf
 archive/
 *.bak
-
-# Local-only design documents (not for public repo)
-docs/ORG_TOKEN_MIGRATION_ANALYSIS.md
 
 # AI Development Workflow (private - not tracked in public repos)
 .claude/

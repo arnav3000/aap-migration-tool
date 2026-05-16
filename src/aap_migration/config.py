@@ -633,7 +633,7 @@ class MigrationConfig(BaseSettings):
                         mappings_data = yaml.safe_load(f)
                         if mappings_data:
                             self.resource_mappings = mappings_data
-                except Exception:
+                except Exception:  # nosec B110
                     pass
         return self
 
@@ -661,7 +661,7 @@ class MigrationConfig(BaseSettings):
                                     "source": raw_ignored.get("source") or [],
                                     "target": raw_ignored.get("target") or [],
                                 }
-                except Exception:
+                except Exception:  # nosec B110
                     pass
         return self
 

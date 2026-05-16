@@ -7,7 +7,7 @@ with exponential backoff, jitter, and specific handling for different error type
 import asyncio
 from collections.abc import Callable
 from functools import wraps
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import httpx
 from tenacity import (
@@ -91,9 +91,9 @@ def retry_on_network_error(
 
         # Return appropriate wrapper based on function type
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper  # type: ignore
+            return cast(F, async_wrapper)
         else:
-            return sync_wrapper  # type: ignore
+            return cast(F, sync_wrapper)
 
     return decorator
 
@@ -150,9 +150,9 @@ def retry_on_server_error(
             return _inner()
 
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper  # type: ignore
+            return cast(F, async_wrapper)
         else:
-            return sync_wrapper  # type: ignore
+            return cast(F, sync_wrapper)
 
     return decorator
 
@@ -213,9 +213,9 @@ def retry_with_backoff(
             return _inner()
 
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper  # type: ignore
+            return cast(F, async_wrapper)
         else:
-            return sync_wrapper  # type: ignore
+            return cast(F, sync_wrapper)
 
     return decorator
 
@@ -399,9 +399,9 @@ def retry_on_gateway_error(
 
         # Return appropriate wrapper based on function type
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper  # type: ignore
+            return cast(F, async_wrapper)
         else:
-            return sync_wrapper  # type: ignore
+            return cast(F, sync_wrapper)
 
     return decorator
 

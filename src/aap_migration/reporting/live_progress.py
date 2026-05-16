@@ -15,10 +15,12 @@ issues and multiple boxes. Instead, update tasks with new values including compl
 to effectively reset progress while maintaining a single display.
 """
 
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import TracebackType
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -28,6 +30,7 @@ from rich.progress import (
     Progress,
     ProgressColumn,
     SpinnerColumn,
+    Task,
     TaskID,
     TaskProgressColumn,
     TextColumn,
@@ -46,7 +49,7 @@ class StatusIconColumn(ProgressColumn):
     spinner for running, bullet for pending.
     """
 
-    def render(self, task):
+    def render(self, task: Task) -> Text:
         """Render the status icon based on task state."""
         status = task.fields.get("status_text", "pending")
 
@@ -89,7 +92,7 @@ class PhaseProgressState:
     rate_history: deque = field(default_factory=lambda: deque(maxlen=10))
     last_update: float = field(default_factory=time.time)
 
-    def update(self, completed: int, failed: int = 0, skipped: int = 0):
+    def update(self, completed: int, failed: int = 0, skipped: int = 0) -> None:
         """Update progress and calculate processing rate.
 
         Args:
@@ -229,7 +232,7 @@ class MigrationProgressDisplay:
         self.overall_task: TaskID | None = None
         self.total_phases: int = 0
         self.phases_list: list[tuple[str, str]] = []
-        self._original_log_handlers = []
+        self._original_log_handlers: list[logging.Handler] = []
         self._live_started = False  # Track if live display has started
 
         if not self.enabled:
@@ -292,7 +295,7 @@ class MigrationProgressDisplay:
             refresh_per_second=10,  # Explicit refresh rate
         )
 
-    def start(self):
+    def start(self) -> None:
         """Prepare the progress display.
 
         Call this before beginning migration operations.
@@ -317,7 +320,7 @@ class MigrationProgressDisplay:
             # Note: Live display will be started in initialize_phases() or start_phase()
             # This prevents jitter from tasks being added while display is active
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the live display.
 
         Call this after migration completes or fails.
@@ -339,7 +342,7 @@ class MigrationProgressDisplay:
                         root_logger.addHandler(handler)
                 self._original_log_handlers = []
 
-    def set_total_phases(self, total: int):
+    def set_total_phases(self, total: int) -> None:
         """Set total number of migration phases.
 
         Note: Should be called BEFORE initialize_phases().
@@ -541,7 +544,9 @@ class MigrationProgressDisplay:
 
         return phase_name
 
-    def update_phase(self, phase_id: str, completed: int, failed: int = 0, skipped: int = 0):
+    def update_phase(
+        self, phase_id: str, completed: int, failed: int = 0, skipped: int = 0
+    ) -> None:
         """Update phase progress with new counts.
 
         Args:
@@ -572,7 +577,7 @@ class MigrationProgressDisplay:
             metrics=state.formatted_metrics,
         )
 
-    def complete_phase(self, phase_id: str):
+    def complete_phase(self, phase_id: str) -> None:
         """Mark phase as complete.
 
         Args:
@@ -601,12 +606,17 @@ class MigrationProgressDisplay:
         if self.overall_task is not None:
             self.overall_progress.advance(self.overall_task)
 
-    def __enter__(self):
+    def __enter__(self) -> "MigrationProgressDisplay":
         """Context manager entry - starts live display."""
         self.start()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Context manager exit - stops live display."""
         self.stop()
-        return False  # Don't suppress exceptions
+        return None  # Don't suppress exceptions (falsy, same as False)

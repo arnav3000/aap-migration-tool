@@ -5,6 +5,8 @@ This module provides commands for managing migration state,
 including viewing mappings, resetting state, and inspecting progress.
 """
 
+from typing import Any
+
 import click
 
 from aap_migration.cli.context import MigrationContext
@@ -188,7 +190,7 @@ def show_mappings(
 
         else:
             # Show multiple mappings
-            mappings = []
+            mappings: list[Any] = []
 
             if not mappings:
                 echo_warning("No ID mappings found")

@@ -1,9 +1,15 @@
-.PHONY: help install install-dev clean format lint typecheck test test-unit test-integration test-performance test-cov check docs docs-serve run
+.PHONY: help install install-dev clean format lint typecheck test test-unit test-integration \
+       test-performance test-cov test-watch check pre-commit docs docs-serve run-example \
+       init-env setup version venv install-editable all \
+       build prepare-pgdata up up-postgres down shell logs \
+       c-test c-lint c-format c-typecheck c-check
 
-# Default target
 .DEFAULT_GOAL := help
 
-# Variables
+# ===========================================================================
+#  Local development (runs on host, no containers needed)
+# ===========================================================================
+
 PYTHON := python3
 PIP := uv pip
 PYTEST := $(PYTHON) -m pytest
@@ -12,7 +18,6 @@ ISORT := $(PYTHON) -m isort
 RUFF := $(PYTHON) -m ruff
 MYPY := $(PYTHON) -m mypy
 
-# Directories
 SRC_DIR := src
 TESTS_DIR := tests
 DOCS_DIR := docs
@@ -20,7 +25,21 @@ DOCS_DIR := docs
 help: ## Show this help message
 	@echo "AAP Migration Tool - Development Commands"
 	@echo ""
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@echo "  Local development (no containers):"
+	@echo "    make setup                         # Complete dev setup"
+	@echo "    make test                          # Run all tests"
+	@echo "    make check                         # Format + lint + typecheck + test"
+	@echo "    make docs-serve                    # Serve docs locally"
+	@echo ""
+	@echo "  Container deployment:"
+	@echo "    make build && make up              # Build and start bridge container"
+	@echo "    make up                            # Start aap-bridge container"
+	@echo "    make up-postgres                   # Start bridge + postgres"
+	@echo "    make c-check                       # Run checks inside container"
+	@echo ""
+	@echo "  All targets:"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-28s\033[0m %s\n", $$1, $$2}'
 
 venv: ## Create virtual environment with uv
 	uv venv --seed --python 3.12
@@ -100,5 +119,55 @@ setup: install-dev install-editable init-env ## Complete development setup
 version: ## Show current version
 	@$(PYTHON) -c "from importlib.metadata import version; print(f'AAP Migration Tool v{version(\"aap-migration-tool\")}')" 2>/dev/null || echo "Package not installed"
 
-.PHONY: all
 all: check docs ## Run all checks and build docs
+
+# ===========================================================================
+#  Container deployment (requires podman)
+# ===========================================================================
+
+COMPOSE          := podman compose -f container/docker-compose.yml
+BRIDGE_SVC       := aap-bridge
+BRIDGE_IMAGE     := localhost/aap-bridge:latest
+PROJECT_NAME     := $(notdir $(CURDIR))
+PGDATA_VOLUME    := $(PROJECT_NAME)_postgres-data
+
+define run-bridge
+	$(COMPOSE) exec $(BRIDGE_SVC)
+endef
+
+build: ## Build bridge container image
+	podman build -t $(BRIDGE_IMAGE) -f container/Containerfile .
+
+prepare-pgdata: ## Prepare PostgreSQL volume ownership for rootless Podman
+	@podman volume inspect $(PGDATA_VOLUME) >/dev/null 2>&1 || podman volume create $(PGDATA_VOLUME) >/dev/null
+	@podman unshare chown -R 26:26 "$$(podman volume inspect $(PGDATA_VOLUME) --format '{{.Mountpoint}}')"
+
+up: ## Start aap-bridge container
+	$(COMPOSE) up -d $(BRIDGE_SVC)
+
+up-postgres: prepare-pgdata ## Start aap-bridge + postgres (requires --profile postgres)
+	$(COMPOSE) --profile postgres up -d
+
+down: ## Stop all containers
+	$(COMPOSE) down
+
+shell: ## Shell into bridge container
+	$(COMPOSE) exec $(BRIDGE_SVC) /bin/bash
+
+logs: ## Tail all container logs
+	$(COMPOSE) logs -f
+
+c-test: ## Run unit tests inside bridge container
+	$(run-bridge) python3.12 -m pytest tests/unit/ -v
+
+c-lint: ## Run ruff linter inside bridge container
+	$(run-bridge) python3.12 -m ruff check src/ tests/unit/
+
+c-format: ## Run black + isort inside bridge container
+	$(run-bridge) python3.12 -m black src/ tests/unit/
+	$(run-bridge) python3.12 -m isort src/ tests/unit/
+
+c-typecheck: ## Run mypy inside bridge container
+	$(run-bridge) python3.12 -m mypy src/
+
+c-check: c-lint c-typecheck c-test ## Run all checks inside bridge container

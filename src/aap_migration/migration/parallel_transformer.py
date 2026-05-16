@@ -74,7 +74,7 @@ class ParallelTransformCoordinator:
         Returns:
             Transform statistics for this resource type
         """
-        stats = {
+        stats: dict[str, Any] = {
             "resource_type": resource_type,
             "count": 0,
             "failed": 0,

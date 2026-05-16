@@ -5,7 +5,7 @@ between source and target AAP instances.
 """
 
 import asyncio
-from pathlib import Path
+from typing import Any
 
 import click
 
@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 
 
 @click.group(name="credentials")
-def credentials():
+def credentials() -> None:
     """Credential comparison and migration commands."""
     pass
 
@@ -45,7 +45,7 @@ def credentials():
 @pass_context
 @requires_config
 @handle_errors
-def compare_credentials(ctx: MigrationContext, output: str):
+def compare_credentials(ctx: MigrationContext, output: str) -> None:
     """Compare credentials between source and target instances.
 
     This command:
@@ -61,7 +61,7 @@ def compare_credentials(ctx: MigrationContext, output: str):
     """
     echo_info("Starting credential comparison...")
 
-    async def _compare():
+    async def _compare() -> dict[str, Any]:
         # Initialize coordinator
         coordinator = MigrationCoordinator(
             config=ctx.config,
@@ -115,7 +115,7 @@ def compare_credentials(ctx: MigrationContext, output: str):
 
     if result["missing_count"] > 0:
         echo_warning(
-            f"\nNext step: Run 'aap-bridge migrate credentials' to create missing credentials"
+            "\nNext step: Run 'aap-bridge migrate credentials' to create missing credentials"
         )
 
 
@@ -134,7 +134,7 @@ def compare_credentials(ctx: MigrationContext, output: str):
 @pass_context
 @requires_config
 @handle_errors
-def migrate_credentials(ctx: MigrationContext, dry_run: bool, report_dir: str):
+def migrate_credentials(ctx: MigrationContext, dry_run: bool, report_dir: str) -> None:
     """Migrate only credentials from source to target.
 
     This command:
@@ -153,7 +153,7 @@ def migrate_credentials(ctx: MigrationContext, dry_run: bool, report_dir: str):
     echo_info("Starting credential-only migration...")
     echo_info("Phase 1: Comparing credentials...")
 
-    async def _migrate():
+    async def _migrate() -> dict[str, Any]:
         # Initialize coordinator
         coordinator = MigrationCoordinator(
             config=ctx.config,
@@ -180,9 +180,7 @@ def migrate_credentials(ctx: MigrationContext, dry_run: bool, report_dir: str):
 
         # Migrate only credential-related phases
         echo_info("\nPhase 2: Migrating credentials...")
-        echo_warning(
-            "Note: This will migrate organizations and credential types as dependencies"
-        )
+        echo_warning("Note: This will migrate organizations and credential types as dependencies")
 
         result = await coordinator.migrate_all(
             only_phases=["organizations", "credentials"],
@@ -209,7 +207,7 @@ def migrate_credentials(ctx: MigrationContext, dry_run: bool, report_dir: str):
         echo_warning("Check migration report for details")
 
     if "report_files" in result:
-        echo_info(f"\nReports generated:")
+        echo_info("\nReports generated:")
         for report_file in result["report_files"]:
             echo_info(f"  - {report_file}")
 
@@ -225,7 +223,7 @@ def migrate_credentials(ctx: MigrationContext, dry_run: bool, report_dir: str):
 @pass_context
 @requires_config
 @handle_errors
-def credential_report(ctx: MigrationContext, output: str):
+def credential_report(ctx: MigrationContext, output: str) -> None:
     """Generate a detailed credential status report.
 
     This command generates a comprehensive report showing:
@@ -235,7 +233,7 @@ def credential_report(ctx: MigrationContext, output: str):
     """
     echo_info("Generating credential status report...")
 
-    async def _report():
+    async def _report() -> dict[str, Any]:
         coordinator = MigrationCoordinator(
             config=ctx.config,
             source_client=ctx.source_client,

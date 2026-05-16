@@ -39,9 +39,8 @@ def format_summary_report(report: GlobalDependencyReport) -> str:
         for org_name in report.independent_orgs:
             org_report = report.org_reports[org_name]
             lines.append(f"│ ✓ {org_name:<63}│")
-            lines.append(
-                f"│   - {org_report.resource_count} resources{' ' * (57 - len(str(org_report.resource_count)))}│"
-            )
+            resource_line = f"│   - {org_report.resource_count} resources{' ' * (57 - len(str(org_report.resource_count)))}│"  # noqa: E501
+            lines.append(resource_line)
             lines.append(f"│   - No external dependencies{' ' * 36}│")
             lines.append("│                                                                  │")
         lines.append("╰─────────────────────────────────────────────────────────────────╯")
@@ -65,9 +64,8 @@ def format_summary_report(report: GlobalDependencyReport) -> str:
                 lines.append(f"│      • {dep_org:<58}│")
                 for rtype, count in sorted(by_type.items()):
                     plural = "s" if count > 1 else ""
-                    lines.append(
-                        f"│          - {count} {rtype}{plural}{' ' * (53 - len(str(count)) - len(rtype) - len(plural))}│"
-                    )
+                    dep_line = f"│          - {count} {rtype}{plural}{' ' * (53 - len(str(count)) - len(rtype) - len(plural))}│"  # noqa: E501
+                    lines.append(dep_line)
 
             lines.append("│                                                                  │")
 
@@ -110,9 +108,8 @@ def format_summary_report(report: GlobalDependencyReport) -> str:
 
     # Warning
     if report.dependent_orgs:
-        lines.append(
-            f"│ ⚠️  WARNING: {len(report.dependent_orgs)} organizations have cross-org dependencies{' ' * (7 - len(str(len(report.dependent_orgs))))}│"
-        )
+        warning_line = f"│ ⚠️  WARNING: {len(report.dependent_orgs)} organizations have cross-org dependencies{' ' * (7 - len(str(len(report.dependent_orgs))))}│"  # noqa: E501
+        lines.append(warning_line)
         lines.append("│    Migration must follow dependency order to avoid failures     │")
 
     lines.append("╰─────────────────────────────────────────────────────────────────╯")
@@ -176,7 +173,7 @@ def format_detailed_report(org_report: OrgDependencyReport) -> str:
                 # Show what requires it
                 lines.append("│   Required by:                                                   │")
                 for usage in res.required_by:
-                    usage_line = f'│     • {usage["type"].replace("_", " ").title()}: "{usage["name"]}" (ID: {usage["id"]})'
+                    usage_line = f'│     • {usage["type"].replace("_", " ").title()}: "{usage["name"]}" (ID: {usage["id"]})'  # noqa: E501
                     if len(usage_line) > 65:
                         usage_line = usage_line[:62] + "...│"
                     else:
@@ -204,8 +201,7 @@ def format_detailed_report(org_report: OrgDependencyReport) -> str:
     lines.append("  Required migrations (in order):")
     for i, dep_org in enumerate(org_report.required_migrations_before, 1):
         lines.append(f'    {i}. aap-bridge migrate -o "{dep_org}"')
-    lines.append(
-        f'    {len(org_report.required_migrations_before) + 1}. aap-bridge migrate -o "{org_report.org_name}"'
-    )
+    final_step = f'    {len(org_report.required_migrations_before) + 1}. aap-bridge migrate -o "{org_report.org_name}"'  # noqa: E501
+    lines.append(final_step)
 
     return "\n".join(lines)

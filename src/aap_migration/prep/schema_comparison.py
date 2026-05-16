@@ -7,7 +7,7 @@ to identify field differences and generate transformation rules.
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.utils.logging import get_logger
 
@@ -40,7 +40,7 @@ def compare_schemas(
         target_version=target_version,
     )
 
-    transformations = {}
+    transformations: dict[str, Any] = {}
     source_schemas = source_schema.get("schemas", {})
     target_schemas = target_schema.get("schemas", {})
 
@@ -213,4 +213,4 @@ def load_comparison(comparison_file: Path) -> dict[str, Any]:
         transformation_count=len(data.get("transformations", {})),
     )
 
-    return data
+    return cast(dict[str, Any], data)

@@ -40,7 +40,7 @@ logger = get_logger(__name__)
 @click.option(
     "--config",
     "-c",
-    type=click.Path(exists=True, path_type=Path),
+    type=click.Path(path_type=Path),
     help="Path to configuration file",
     envvar="AAP_BRIDGE_CONFIG",
 )
@@ -89,14 +89,9 @@ def cli(
         # Show migration status
         aap-bridge migrate status --config config.yaml
     """
-    # Setup logging with optional file output
-    # If --log-file is provided, use it; otherwise default to logs/migration.log
     effective_log_file = str(log_file) if log_file else "logs/migration.log"
-
-    # Ensure logs directory exists
     log_path = Path(effective_log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-
     configure_logging(level=log_level, log_file=effective_log_file)
 
     # Create context
@@ -143,7 +138,7 @@ def main() -> int:
         return 0
     except click.ClickException as e:
         e.show()
-        return e.exit_code
+        return int(e.exit_code)
     except Exception as e:
         logger.error("Unexpected error", error=str(e), exc_info=True)
         click.echo(f"Error: {e}", err=True)

@@ -33,6 +33,7 @@ class AAPSourceClient(BaseAPIClient):
         max_payload_size: int = 10000,
         max_connections: int | None = None,
         max_keepalive_connections: int | None = None,
+        auth_scheme: str = "Bearer",
     ):
         """Initialize AAP source client.
 
@@ -43,6 +44,7 @@ class AAPSourceClient(BaseAPIClient):
             max_payload_size: Maximum payload size to log before truncation
             max_connections: Maximum number of connections in pool
             max_keepalive_connections: Maximum keep-alive connections
+            auth_scheme: Authorization header scheme (Bearer or Token)
         """
         super().__init__(
             base_url=config.url,
@@ -54,6 +56,7 @@ class AAPSourceClient(BaseAPIClient):
             max_payload_size=max_payload_size,
             max_connections=max_connections,
             max_keepalive_connections=max_keepalive_connections,
+            auth_scheme=auth_scheme,
         )
         logger.info("aap_source_client_initialized", url=config.url)
         self._version_cache: str | None = None
@@ -78,20 +81,20 @@ class AAPSourceClient(BaseAPIClient):
             if not version:
                 logger.warning(
                     "version_not_found_in_config",
-                    message="Version field not found in /config/ response, using fallback"
+                    message="Version field not found in /config/ response, using fallback",
                 )
                 # Try to extract from ansible_version or default to 2.4.0
                 version = config_data.get("ansible_version", "2.4.0")
 
             self._version_cache = version
             logger.info("aap_version_detected", version=version, url=self.base_url)
-            return version
+            return str(version)
 
         except Exception as e:
             logger.error(
                 "version_detection_failed",
                 error=str(e),
-                message="Failed to detect AAP version, defaulting to 2.4.0"
+                message="Failed to detect AAP version, defaulting to 2.4.0",
             )
             # Default to 2.4.0 if detection fails
             self._version_cache = "2.4.0"
@@ -171,7 +174,7 @@ class AAPSourceClient(BaseAPIClient):
             Total count of resources
         """
         response = await self.get(endpoint, params={"page_size": 1})
-        return response.get("count", 0)
+        return int(response.get("count", 0))
 
     async def get_all_resources_parallel(
         self,
@@ -272,7 +275,7 @@ class AAPSourceClient(BaseAPIClient):
 
             # Process results in page order (important for consistent behavior)
             for page_num, result in zip(page_range, results, strict=False):
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
                     logger.error(
                         "parallel_page_failed",
                         page=page_num,

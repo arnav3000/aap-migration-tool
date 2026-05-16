@@ -520,7 +520,7 @@ class BulkOperations:
                 matches=matches,
             )
 
-            return matches
+            return bool(matches)
 
         except Exception as e:
             logger.error(

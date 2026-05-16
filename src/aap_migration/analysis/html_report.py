@@ -6,9 +6,9 @@ No external dependencies, CDNs, or internet connection required.
 
 from __future__ import annotations
 
+import html as html_escape
 import json
-from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from aap_migration.analysis.dependency_analyzer import GlobalDependencyReport
@@ -27,7 +27,7 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
     orgs_data = []
     for org_name, org_report in report.org_reports.items():
         # Build resource tree for mind map
-        resource_tree = {}
+        resource_tree: dict[str, list[dict[str, Any]]] = {}
         for rtype, items in org_report.resources.items():
             if not items:
                 continue
@@ -50,80 +50,106 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
 
             resource_tree[type_display_name] = []
             for item in items:
-                resource_info = {
-                    "id": item.get("id"),
-                    "name": item.get("name", f"ID {item.get('id')}"),
+                if not isinstance(item, dict):
+                    continue
+                item_id = item.get("id")
+                item_name = html_escape.escape(item.get("name", f"ID {item_id}"))
+                resource_info: dict = {
+                    "id": item_id,
+                    "name": item_name,
                     "type": rtype,
                 }
 
-                # Check if this resource has cross-org dependencies
                 has_cross_org_dep = False
                 dep_details = []
 
                 for dep_org, deps in org_report.dependencies.items():
                     for dep in deps:
-                        # Check if this resource uses the dependency
                         for usage in dep.required_by:
-                            if usage["id"] == item.get("id") and usage["type"] == rtype:
+                            usage_id = usage.get("id") if isinstance(usage, dict) else None
+                            usage_type = usage.get("type") if isinstance(usage, dict) else None
+                            if usage_id == item_id and usage_type == rtype:
                                 has_cross_org_dep = True
-                                dep_details.append({
-                                    "org": dep_org,
-                                    "resource_type": dep.resource_type,
-                                    "resource_name": dep.resource_name,
-                                    "resource_id": dep.resource_id,
-                                })
+                                dep_details.append(
+                                    {
+                                        "org": dep_org,
+                                        "resource_type": dep.resource_type,
+                                        "resource_name": dep.resource_name,
+                                        "resource_id": dep.resource_id,
+                                    }
+                                )
 
                 if has_cross_org_dep:
                     resource_info["cross_org_deps"] = dep_details
 
                 resource_tree[type_display_name].append(resource_info)
 
-        orgs_data.append({
-            "name": org_name,
-            "id": org_report.org_id,
-            "total_resources": org_report.resource_count,
-            "has_dependencies": org_report.has_cross_org_deps,
-            "required_before": org_report.required_migrations_before,
-            "resource_tree": resource_tree,
-            "dependencies": [
-                {
-                    "org": dep_org,
-                    "resources": [
-                        {
-                            "type": dep.resource_type,
-                            "name": dep.resource_name,
-                            "id": dep.resource_id,
-                            "used_by": dep.required_by,
-                        }
-                        for dep in deps
-                    ],
-                }
-                for dep_org, deps in org_report.dependencies.items()
-            ],
-        })
+        orgs_data.append(
+            {
+                "name": html_escape.escape(org_name),
+                "id": org_report.org_id,
+                "total_resources": org_report.resource_count,
+                "has_dependencies": org_report.has_cross_org_deps,
+                "required_before": [
+                    html_escape.escape(r) for r in org_report.required_migrations_before
+                ],
+                "resource_tree": resource_tree,
+                "dependencies": [
+                    {
+                        "org": html_escape.escape(dep_org),
+                        "resources": [
+                            {
+                                "type": dep.resource_type,
+                                "name": html_escape.escape(dep.resource_name),
+                                "id": dep.resource_id,
+                                "used_by": [
+                                    {
+                                        "type": u.get("type", ""),
+                                        "id": u.get("id"),
+                                        "name": html_escape.escape(u.get("name", "")),
+                                    }
+                                    for u in dep.required_by
+                                ],
+                            }
+                            for dep in deps
+                        ],
+                    }
+                    for dep_org, deps in org_report.dependencies.items()
+                ],
+            }
+        )
 
     # Build org-to-org edges for overview graph
     edges_data = []
     for org_name, org_report in report.org_reports.items():
         for dep_org in org_report.required_migrations_before:
-            edges_data.append({"from": dep_org, "to": org_name})
+            edges_data.append(
+                {"from": html_escape.escape(dep_org), "to": html_escape.escape(org_name)}
+            )
 
-    # Build phases
+    # Build phases — raw report has list[list[str]], convert to structured format
     phases_data = []
-    for phase in report.migration_phases:
-        phases_data.append({
-            "phase": phase["phase"],
-            "description": phase["description"],
-            "orgs": phase["orgs"],
-        })
+    for i, phase in enumerate(report.migration_phases or []):
+        if isinstance(phase, dict):
+            escaped_phase = dict(phase)
+            if "orgs" in escaped_phase:
+                escaped_phase["orgs"] = [html_escape.escape(o) for o in escaped_phase["orgs"]]
+            phases_data.append(escaped_phase)
+        else:
+            phases_data.append(
+                {
+                    "phase": i + 1,
+                    "description": f"Phase {i + 1}",
+                    "orgs": [html_escape.escape(o) for o in phase],
+                }
+            )
 
     # Serialize data to JSON for embedding
     orgs_json = json.dumps(orgs_data, indent=2)
     edges_json = json.dumps(edges_data, indent=2)
     phases_json = json.dumps(phases_data, indent=2)
 
-    # Generate HTML
-    html = f'''<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1343,6 +1369,6 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
         }});
     </script>
 </body>
-</html>'''
+</html>"""  # nosec B608
 
     return html

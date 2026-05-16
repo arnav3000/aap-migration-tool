@@ -24,7 +24,7 @@ WORKDIR /app
 # podman build --build-arg AAP_BRIDGE_ZIP=https://github.com/myuser/aap-bridge-fork/archive/refs/heads/main.zip -t stuff .
 ARG AAP_BRIDGE_ZIP
 RUN echo "Downloading from: $AAP_BRIDGE_ZIP"
-ENV AAP_BRIDGE_ZIP="${AAP_BRIDGE_ZIP:-https://github.com/arnav3000/aap-bridge-fork/archive/refs/heads/main.zip}" 
+ENV AAP_BRIDGE_ZIP="${AAP_BRIDGE_ZIP:-https://github.com/arnav3000/aap-bridge-fork/archive/refs/heads/main.zip}"
 
 # Download and unzip of aap-bridge code
 RUN wget $AAP_BRIDGE_ZIP

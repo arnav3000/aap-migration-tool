@@ -544,7 +544,8 @@ def get_exportable_types(use_discovered: bool = False) -> list[str]:
             # Filter by has_exporter=True
             # This ensures types like "jobs" (has_exporter=False) are excluded
             return [
-                name for name in normalized
+                name
+                for name in normalized
                 if name in RESOURCE_REGISTRY and RESOURCE_REGISTRY[name].has_exporter
             ]
 
@@ -571,7 +572,7 @@ def get_importable_types(use_discovered: bool = False) -> list[str]:
                 with open(target_file) as f:
                     data = json.load(f)
                 return list(data.get("endpoints", {}).keys())
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     # Fall back to hardcoded registry

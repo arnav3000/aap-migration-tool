@@ -8,7 +8,6 @@ from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
 
-from aap_migration.cli.utils import echo_error, echo_info, echo_success, echo_warning
 from aap_migration.migration.state import MigrationState
 from aap_migration.utils.logging import get_logger
 
@@ -114,11 +113,13 @@ class DependencyValidator:
 
             if not mapping:
                 # Dependency not yet imported
-                result["missing_deps"].append({
-                    "field": field,
-                    "type": dep_type,
-                    "source_id": dep_id,
-                })
+                result["missing_deps"].append(
+                    {
+                        "field": field,
+                        "type": dep_type,
+                        "source_id": dep_id,
+                    }
+                )
                 result["status"] = "blocked"
 
         return result
@@ -257,9 +258,13 @@ class DependencyValidator:
 
         # Decision
         if overall["can_proceed"]:
-            self.console.print("[bold green]✓ All dependencies satisfied - safe to proceed![/bold green]")
+            self.console.print(
+                "[bold green]✓ All dependencies satisfied - safe to proceed![/bold green]"
+            )
         else:
-            self.console.print("[bold red]✗ Cannot proceed - fix dependency issues first[/bold red]")
+            self.console.print(
+                "[bold red]✗ Cannot proceed - fix dependency issues first[/bold red]"
+            )
 
         self.console.print()
 

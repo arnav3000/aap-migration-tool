@@ -1,4 +1,4 @@
-import subprocess
+import subprocess  # nosec B404
 import sys
 from typing import Any
 
@@ -22,7 +22,7 @@ def run_command(args: list[str], ctx: Any = None) -> None:
     cmd.extend(args)
 
     try:
-        subprocess.run(cmd, check=False)
+        subprocess.run(cmd, check=False)  # nosec B603
     except Exception as e:
         print(f"Error running command: {e}")
 
@@ -47,9 +47,7 @@ def interactive_menu(ctx: Any) -> None:
             )
         )
 
-        choice = Prompt.ask(
-            "Select an option", choices=["1", "2", "3", "4", "5", "q"], default="q"
-        )
+        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "5", "q"], default="q")
 
         if choice.lower() == "q":
             break

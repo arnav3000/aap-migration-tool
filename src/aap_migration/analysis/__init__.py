@@ -1,4 +1,4 @@
-"""Cross-organization dependency analysis for migration planning."""
+"""Analysis module for dependency detection and risk assessment."""
 
 from aap_migration.analysis.dependency_analyzer import (
     CrossOrgDependencyAnalyzer,
@@ -6,18 +6,10 @@ from aap_migration.analysis.dependency_analyzer import (
     OrgDependencyReport,
     ResourceDependency,
 )
-from aap_migration.analysis.dependency_graph import topological_sort
-from aap_migration.analysis.reports import (
-    format_detailed_report,
-    format_summary_report,
-)
 
 __all__ = [
     "CrossOrgDependencyAnalyzer",
     "GlobalDependencyReport",
     "OrgDependencyReport",
     "ResourceDependency",
-    "topological_sort",
-    "format_summary_report",
-    "format_detailed_report",
 ]

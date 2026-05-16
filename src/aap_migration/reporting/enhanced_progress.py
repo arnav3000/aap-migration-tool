@@ -1,5 +1,6 @@
 """Enhanced progress display with granular resource tracking and error details."""
 
+from collections.abc import Callable
 from typing import Any
 
 from rich.console import Console
@@ -117,12 +118,14 @@ class EnhancedProgressDisplay:
             name: Resource name
             error: Error message
         """
-        self.errors.append({
-            "type": resource_type,
-            "source_id": source_id,
-            "name": name,
-            "error": error,
-        })
+        self.errors.append(
+            {
+                "type": resource_type,
+                "source_id": source_id,
+                "name": name,
+                "error": error,
+            }
+        )
 
         # Update failed count
         task_id = self.tasks.get(resource_type)
@@ -149,7 +152,9 @@ class EnhancedProgressDisplay:
             percent = (self.totals["completed"] / self.totals["total"]) * 100
             summary_table.add_row("Progress:", f"[bold]{percent:.1f}%[/bold]")
 
-        return Panel(summary_table, title="[bold cyan]Overall Progress[/bold cyan]", border_style="cyan")
+        return Panel(
+            summary_table, title="[bold cyan]Overall Progress[/bold cyan]", border_style="cyan"
+        )
 
     def create_errors_panel(self) -> Panel | None:
         """Create panel showing recent errors.
@@ -193,7 +198,9 @@ class EnhancedProgressDisplay:
         layout.add_row(self.create_summary_panel())
 
         # Progress bars
-        layout.add_row(Panel(self.progress, title="[bold]Resource Import Progress[/bold]", border_style="blue"))
+        layout.add_row(
+            Panel(self.progress, title="[bold]Resource Import Progress[/bold]", border_style="blue")
+        )
 
         # Errors panel (if any)
         errors_panel = self.create_errors_panel()
@@ -202,7 +209,7 @@ class EnhancedProgressDisplay:
 
         return layout
 
-    def run_with_live_display(self, import_func):
+    def run_with_live_display(self, import_func: Callable[[], Any]) -> Any:
         """Run import function with live progress display.
 
         Args:

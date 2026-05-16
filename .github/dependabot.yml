@@ -20,7 +20,6 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    # Grouping strategy for minor and patch updates
     groups:
       development-dependencies:
         patterns:
@@ -52,6 +51,25 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+
+  # Docker/Container dependencies
+  - package-ecosystem: "docker"
+    directory: "/container"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "arnav3000"
+    labels:
+      - "dependencies"
+      - "docker"
     commit-message:
       prefix: "chore"
       include: "scope"

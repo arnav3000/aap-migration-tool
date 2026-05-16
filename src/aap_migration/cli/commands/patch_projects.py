@@ -90,8 +90,7 @@ async def patch_project_scm_details(
     if project_source_ids is not None:
         original_count = len(projects_to_patch)
         projects_to_patch = [
-            p for p in projects_to_patch
-            if p.get("_source_id") in project_source_ids
+            p for p in projects_to_patch if p.get("_source_id") in project_source_ids
         ]
         logger.info(
             "selective_project_patching",

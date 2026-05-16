@@ -8,7 +8,10 @@ import sys
 
 import click
 
-from aap_migration.analysis.dependency_analyzer import CrossOrgDependencyAnalyzer
+from aap_migration.analysis.dependency_analyzer import (
+    CrossOrgDependencyAnalyzer,
+    GlobalDependencyReport,
+)
 from aap_migration.analysis.html_report import generate_html_report
 from aap_migration.analysis.reports import (
     format_detailed_report,
@@ -21,7 +24,7 @@ from aap_migration.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-def serialize_global_report_to_json(report) -> str:
+def serialize_global_report_to_json(report: GlobalDependencyReport) -> str:
     """Convert GlobalDependencyReport to JSON string.
 
     Args:
@@ -124,7 +127,7 @@ def analyze_dependencies_cmd(
     output_file: str | None,
     output_html: str | None,
     output_json: str | None,
-):
+) -> None:
     """Analyze cross-organization dependencies for migration planning.
 
     This tool helps you understand which organizations depend on others,
@@ -153,7 +156,18 @@ def analyze_dependencies_cmd(
         # Generate both HTML and JSON
         aap-bridge analyze-dependencies --all --output-html report.html --output-json deps.json
     """
-    asyncio.run(run_analysis(ctx, organization, analyze_all, verbose, output_format, output_file, output_html, output_json))
+    asyncio.run(
+        run_analysis(
+            ctx,
+            organization,
+            analyze_all,
+            verbose,
+            output_format,
+            output_file,
+            output_html,
+            output_json,
+        )
+    )
 
 
 async def run_analysis(
@@ -165,7 +179,7 @@ async def run_analysis(
     output_file: str | None,
     output_html: str | None,
     output_json: str | None,
-):
+) -> None:
     """Run dependency analysis."""
     try:
         # Validate input
@@ -186,7 +200,12 @@ async def run_analysis(
                 output_json = output_file
 
         # Validate new-style options
-        if output_format in ("html", "json") and not output_file and not output_html and not output_json:
+        if (
+            output_format in ("html", "json")
+            and not output_file
+            and not output_html
+            and not output_json
+        ):
             click.echo(f"Error: --output is required when using --format {output_format}")
             sys.exit(1)
 
@@ -229,12 +248,13 @@ async def run_analysis(
             # If output requested, build global report
             if output_html or output_json:
                 from datetime import datetime
+
+                from aap_migration.analysis.dependency_analyzer import (
+                    GlobalDependencyReport,
+                )
                 from aap_migration.analysis.dependency_graph import (
                     group_into_phases,
                     topological_sort,
-                )
-                from aap_migration.analysis.dependency_analyzer import (
-                    GlobalDependencyReport,
                 )
 
                 independent = [] if org_report.has_cross_org_deps else [org_name]
@@ -290,15 +310,24 @@ async def run_analysis(
                 topological_sort,
             )
 
-            independent = sorted([name for name, r in org_reports.items()
-                                  if not r.has_cross_org_deps])
-            dependent = sorted([name for name, r in org_reports.items()
-                                if r.has_cross_org_deps])
+            independent = sorted(
+                [name for name, r in org_reports.items() if not r.has_cross_org_deps]
+            )
+            dependent = sorted([name for name, r in org_reports.items() if r.has_cross_org_deps])
 
-            graph = {org: report.required_migrations_before
-                     for org, report in org_reports.items()}
+            graph = {org: report.required_migrations_before for org, report in org_reports.items()}
             migration_order = topological_sort(graph)
-            migration_phases = group_into_phases(graph, migration_order)
+            # Keep only orgs that were actually analyzed to avoid KeyError
+            # when external dependencies appear in the graph
+            migration_order = [org for org in migration_order if org in org_reports]
+            # Filter dependency lists to analyzed orgs so group_into_phases
+            # doesn't fail waiting for unselected external dependencies
+            filtered_graph = {
+                org: [dep for dep in deps if dep in org_reports]
+                for org, deps in graph.items()
+                if org in org_reports
+            }
+            migration_phases = group_into_phases(filtered_graph, migration_order)
 
             # Create global report for these orgs
             from aap_migration.analysis.dependency_analyzer import (
@@ -348,9 +377,7 @@ async def run_analysis(
 
     except Exception as e:
         logger.error(
-            "dependency_analysis_failed",
-            error=str(e),
-            message=f"Dependency analysis failed: {e}"
+            "dependency_analysis_failed", error=str(e), message=f"Dependency analysis failed: {e}"
         )
         click.echo(f"✗ Analysis failed: {e}")
         sys.exit(1)

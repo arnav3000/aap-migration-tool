@@ -8,6 +8,7 @@ success, failures, and discrepancies between exported and imported resources.
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import click
 from sqlalchemy import text
@@ -17,6 +18,7 @@ from aap_migration.cli.decorators import handle_errors, pass_context, requires_c
 from aap_migration.cli.utils import echo_error, echo_info, echo_success
 from aap_migration.migration.database import get_session
 from aap_migration.migration.models import MigrationProgress
+from aap_migration.migration.state import MigrationState
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -89,9 +91,7 @@ def generate_migration_report(
             try:
                 with get_session(migration_state.database_url) as session:
                     db_resource_types = (
-                        session.query(MigrationProgress.resource_type)
-                        .distinct()
-                        .all()
+                        session.query(MigrationProgress.resource_type).distinct().all()
                     )
                     resource_types = [rt[0] for rt in db_resource_types]
             except Exception as e:
@@ -145,7 +145,7 @@ def _identify_missing_resources(
     Returns:
         List of missing resource details
     """
-    missing = []
+    missing: list[dict[str, Any]] = []
     transformed_data = []
 
     # Load transformed resources (handle both flat and directory structure)
@@ -199,16 +199,20 @@ def _identify_missing_resources(
     for resource in transformed_data:
         source_id = resource.get("id")
         if source_id and source_id not in completed_ids:
-            missing.append({
-                "source_id": source_id,
-                "name": resource.get("name", "N/A"),
-                "type": resource.get("type") or resource.get("credential_type"),
-            })
+            missing.append(
+                {
+                    "source_id": source_id,
+                    "name": resource.get("name", "N/A"),
+                    "type": resource.get("type") or resource.get("credential_type"),
+                }
+            )
 
     return missing
 
 
-def _format_workflow_nodes_failures(failed_resources: list[dict], migration_state) -> list[str]:
+def _format_workflow_nodes_failures(
+    failed_resources: list[dict[str, Any]], migration_state: MigrationState
+) -> list[str]:
     """Format workflow node failures grouped by parent workflow.
 
     Args:
@@ -237,17 +241,16 @@ def _format_workflow_nodes_failures(failed_resources: list[dict], migration_stat
 
             # Query the export data for this workflow node to get parent workflow info
             # We need the workflow_job_template field from the node data
-            workflow_id = None
-            workflow_name = None
 
             # Parse the error message to extract job template source ID
             error = failed["error"] or ""
             jt_source_id = None
             jt_name = None
+            jt_status = None
 
             # Extract job template source_id from error message
             # Format: "Referenced job template (source_id=33) was not successfully imported"
-            match = re.search(r'source_id=(\d+)', error)
+            match = re.search(r"source_id=(\d+)", error)
             if match:
                 jt_source_id = int(match.group(1))
 
@@ -270,7 +273,9 @@ def _format_workflow_nodes_failures(failed_resources: list[dict], migration_stat
             entry = {
                 "source_id": source_id,
                 "jt_source_id": jt_source_id,
-                "jt_name": jt_name or f"Unknown (source ID: {jt_source_id})" if jt_source_id else "Unknown",
+                "jt_name": jt_name or f"Unknown (source ID: {jt_source_id})"
+                if jt_source_id
+                else "Unknown",
                 "jt_status": jt_status if jt_source_id else None,
                 "error": error,
             }
@@ -280,7 +285,7 @@ def _format_workflow_nodes_failures(failed_resources: list[dict], migration_stat
             grouped_by_workflow["workflow_nodes"].append(entry)
 
     # Format output grouped by workflow
-    for workflow_key, nodes in grouped_by_workflow.items():
+    for _workflow_key, nodes in grouped_by_workflow.items():
         lines.append(f"**All Workflow Nodes ({len(nodes)} failed):**")
         lines.append("")
 
@@ -318,7 +323,7 @@ def _analyze_resource_type(
     database_url: str,
 ) -> dict:
     """Analyze a single resource type and collect statistics."""
-    stats = {
+    stats: dict[str, Any] = {
         "resource_type": resource_type,
         "exported_count": 0,
         "transformed_count": 0,
@@ -406,9 +411,7 @@ def _analyze_resource_type(
         with get_session(database_url) as session:
             # Count by status
             progress_records = (
-                session.query(MigrationProgress)
-                .filter_by(resource_type=resource_type)
-                .all()
+                session.query(MigrationProgress).filter_by(resource_type=resource_type).all()
             )
 
             for record in progress_records:
@@ -476,7 +479,9 @@ def _analyze_resource_type(
     return stats
 
 
-def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
+def _generate_markdown_report(
+    report_data: list[dict[str, Any]], migration_state: MigrationState
+) -> str:
     """Generate markdown-formatted migration report."""
     lines = [
         "# AAP Migration Report",
@@ -491,8 +496,12 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
     ]
 
     # Summary table
-    lines.append("| Resource Type | Exported | Transformed | Imported | Failed | Skipped | Discrepancy |")
-    lines.append("|---------------|----------|-------------|----------|--------|---------|-------------|")
+    lines.append(
+        "| Resource Type | Exported | Transformed | Imported | Failed | Skipped | Discrepancy |"
+    )
+    lines.append(
+        "|---------------|----------|-------------|----------|--------|---------|-------------|"
+    )
 
     total_exported = 0
     total_transformed = 0
@@ -527,7 +536,9 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
         total_discrepancy += discrepancy
 
     # Totals row
-    total_discrepancy_str = f"**{total_discrepancy}**" if total_discrepancy != 0 else str(total_discrepancy)
+    total_discrepancy_str = (
+        f"**{total_discrepancy}**" if total_discrepancy != 0 else str(total_discrepancy)
+    )
     total_failed_str = f"**{total_failed}**" if total_failed > 0 else str(total_failed)
     total_skipped_str = f"**{total_skipped}**" if total_skipped > 0 else str(total_skipped)
 
@@ -541,13 +552,17 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
 
     # SECURITY FIX: Add workflow-specific correlation section
     # Show relationship between workflow_job_templates and workflow_nodes
-    workflow_stats = next((s for s in report_data if s["resource_type"] == "workflow_job_templates"), None)
+    workflow_stats = next(
+        (s for s in report_data if s["resource_type"] == "workflow_job_templates"), None
+    )
     node_stats = next((s for s in report_data if s["resource_type"] == "workflow_nodes"), None)
 
     if workflow_stats and node_stats:
         lines.append("## Workflow Job Templates - Node Import Status")
         lines.append("")
-        lines.append("Workflow job templates consist of multiple workflow nodes. This section shows the correlation:")
+        lines.append(
+            "Workflow job templates consist of multiple workflow nodes. This section shows the correlation:"
+        )
         lines.append("")
         lines.append(f"- **Workflows imported:** {workflow_stats['completed_count']}")
         lines.append(f"- **Workflow nodes imported:** {node_stats['completed_count']}")
@@ -555,7 +570,7 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
         lines.append("")
 
         # Warning if nodes failed
-        if node_stats['failed_count'] > 0:
+        if node_stats["failed_count"] > 0:
             lines.append("⚠️ **WARNING:** Some workflow nodes failed to import!")
             lines.append("")
             lines.append("**Impact:**")
@@ -570,7 +585,7 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
             lines.append("")
 
         # Warning if workflows failed
-        if workflow_stats['failed_count'] > 0:
+        if workflow_stats["failed_count"] > 0:
             lines.append("⚠️ **WARNING:** Some workflows failed to import!")
             lines.append("")
             lines.append(f"- **Workflows failed:** {workflow_stats['failed_count']}")
@@ -625,12 +640,16 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
     if transform_issues_found:
         lines.append("## Transform Phase Issues")
         lines.append("")
-        lines.append("The following resources were skipped during transformation due to missing dependencies:")
+        lines.append(
+            "The following resources were skipped during transformation due to missing dependencies:"
+        )
         lines.append("")
 
         for stats in report_data:
             if len(stats.get("transform_skipped", [])) > 0:
-                lines.append(f"### {stats['resource_type']} ({len(stats['transform_skipped'])} skipped)")
+                lines.append(
+                    f"### {stats['resource_type']} ({len(stats['transform_skipped'])} skipped)"
+                )
                 lines.append("")
                 lines.append("| Source ID | Name | Reason |")
                 lines.append("|-----------|------|--------|")
@@ -650,7 +669,9 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
         lines.append("")
         lines.append("**Recommended Actions:**")
         lines.append("- Export and transform the missing dependencies first")
-        lines.append("- Example: if a schedule references missing job_template:42, export job_templates")
+        lines.append(
+            "- Example: if a schedule references missing job_template:42, export job_templates"
+        )
         lines.append("- Re-run transform after dependencies are available")
         lines.append("")
         lines.append("---")
@@ -665,7 +686,9 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
             if stats["failed_count"] > 0:
                 # Special formatting for workflow_nodes - group by parent workflow
                 if stats["resource_type"] == "workflow_nodes":
-                    lines.extend(_format_workflow_nodes_failures(stats["failed_resources"], migration_state))
+                    lines.extend(
+                        _format_workflow_nodes_failures(stats["failed_resources"], migration_state)
+                    )
                 else:
                     lines.append(f"### Failed Resources ({stats['failed_count']})")
                     lines.append("")
@@ -686,7 +709,9 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
             if stats["skipped_count"] > 0:
                 lines.append(f"### Skipped Resources ({stats['skipped_count']})")
                 lines.append("")
-                lines.append("These resources were intentionally skipped and require manual resolution:")
+                lines.append(
+                    "These resources were intentionally skipped and require manual resolution:"
+                )
                 lines.append("")
                 lines.append("| Source ID | Name | Reason |")
                 lines.append("|-----------|------|--------|")
@@ -703,7 +728,9 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
                 lines.append("**Action Required:**")
                 lines.append("- Review each skipped resource and its reason")
                 lines.append("- Follow the instructions in the reason column to resolve")
-                lines.append("- Typically requires renaming duplicates in source AAP or manual creation in target AAP")
+                lines.append(
+                    "- Typically requires renaming duplicates in source AAP or manual creation in target AAP"
+                )
                 lines.append("")
 
             # Add warnings section for successfully imported resources with warnings
@@ -723,7 +750,9 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
                 if resources_with_warnings:
                     lines.append(f"### Warnings ({len(resources_with_warnings)})")
                     lines.append("")
-                    lines.append("These resources were successfully imported but have warnings (e.g., incomplete notification associations):")
+                    lines.append(
+                        "These resources were successfully imported but have warnings (e.g., incomplete notification associations):"
+                    )
                     lines.append("")
                     lines.append("| Source ID | Name | Warning |")
                     lines.append("|-----------|------|---------|")
@@ -744,9 +773,15 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
 
                     lines.append("")
                     lines.append("**Note:**")
-                    lines.append("- These resources are functional but may have incomplete configurations")
-                    lines.append("- Review warnings and manually complete missing associations if needed")
-                    lines.append("- Common warnings: notification templates not migrated, credentials missing")
+                    lines.append(
+                        "- These resources are functional but may have incomplete configurations"
+                    )
+                    lines.append(
+                        "- Review warnings and manually complete missing associations if needed"
+                    )
+                    lines.append(
+                        "- Common warnings: notification templates not migrated, credentials missing"
+                    )
                     lines.append("")
 
             # Special check for credentials: detect duplicate target_id mappings
@@ -767,45 +802,71 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
 
                 if duplicate_mappings:
                     total_affected = sum(count - 1 for _, count, _ in duplicate_mappings)
-                    lines.append(f"### ⚠️ CRITICAL: Duplicate Target Mappings Detected ({total_affected} credentials affected)")
+                    lines.append(
+                        f"### ⚠️ CRITICAL: Duplicate Target Mappings Detected ({total_affected} credentials affected)"
+                    )
                     lines.append("")
-                    lines.append("**Problem:** Multiple source credentials were incorrectly mapped to the same target credential.")
-                    lines.append(f"This means **{total_affected} credentials were NOT created** in target AAP.")
+                    lines.append(
+                        "**Problem:** Multiple source credentials were incorrectly mapped to the same target credential."
+                    )
+                    lines.append(
+                        f"This means **{total_affected} credentials were NOT created** in target AAP."
+                    )
                     lines.append("")
-                    lines.append("**Root Cause:** Credential lookup bug - query only checked 'name' field, ignoring 'organization' and 'credential_type'.")
+                    lines.append(
+                        "**Root Cause:** Credential lookup bug - query only checked 'name' field, ignoring 'organization' and 'credential_type'."
+                    )
                     lines.append("")
                     lines.append("**Impact:**")
                     lines.append("- Organizations are missing credentials they should have")
                     lines.append("- Job templates/workflows using these credentials may fail")
-                    lines.append("- Multiple source credentials share same target credential (wrong organization)")
+                    lines.append(
+                        "- Multiple source credentials share same target credential (wrong organization)"
+                    )
                     lines.append("")
 
-                    lines.append("| Target ID | Source Count | Sample Source IDs | Organizations Affected |")
-                    lines.append("|-----------|--------------|-------------------|------------------------|")
+                    lines.append(
+                        "| Target ID | Source Count | Sample Source IDs | Organizations Affected |"
+                    )
+                    lines.append(
+                        "|-----------|--------------|-------------------|------------------------|"
+                    )
 
-                    for target_id, mapping_count, source_ids_str in duplicate_mappings[:10]:  # Show top 10
+                    for target_id, mapping_count, source_ids_str in duplicate_mappings[
+                        :10
+                    ]:  # Show top 10
                         source_ids = source_ids_str.split(",")[:5]  # Show first 5 source IDs
                         sample_ids = ", ".join(source_ids)
                         if mapping_count > 5:
                             sample_ids += f", ... (+{mapping_count - 5} more)"
                         orgs_affected = mapping_count - 1  # One org got it, others are missing
-                        lines.append(f"| {target_id} | {mapping_count} | {sample_ids} | {orgs_affected} |")
+                        lines.append(
+                            f"| {target_id} | {mapping_count} | {sample_ids} | {orgs_affected} |"
+                        )
 
                     if len(duplicate_mappings) > 10:
-                        lines.append(f"| ... | ... | ... | ... |")
+                        lines.append("| ... | ... | ... | ... |")
                         lines.append(f"| **({len(duplicate_mappings) - 10} more)** | | | |")
 
                     lines.append("")
                     lines.append("**Recommended Actions:**")
-                    lines.append("1. **URGENT:** Apply the credential import bug fix (check with migration tool maintainer)")
+                    lines.append(
+                        "1. **URGENT:** Apply the credential import bug fix (check with migration tool maintainer)"
+                    )
                     lines.append("2. Re-run credential import to create missing credentials")
                     lines.append("3. Verify all organizations have their required credentials")
                     lines.append("4. Test job templates/workflows after credential fix")
                     lines.append("")
                     lines.append("**Technical Details:**")
-                    lines.append("- See detailed list of affected credentials in separate analysis file")
-                    lines.append("- Bug affects credentials with same name but different organizations")
-                    lines.append("- Fix: Query by composite key (name, organization, credential_type)")
+                    lines.append(
+                        "- See detailed list of affected credentials in separate analysis file"
+                    )
+                    lines.append(
+                        "- Bug affects credentials with same name but different organizations"
+                    )
+                    lines.append(
+                        "- Fix: Query by composite key (name, organization, credential_type)"
+                    )
                     lines.append("")
 
             if stats["discrepancy"] > 0:
@@ -819,28 +880,38 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
                 lines.append("")
 
                 # Calculate gaps at each phase
-                export_transform_gap = stats['exported_count'] - stats['transformed_count']
-                transform_import_gap = stats['transformed_count'] - stats['completed_count']
+                export_transform_gap = stats["exported_count"] - stats["transformed_count"]
+                transform_import_gap = stats["transformed_count"] - stats["completed_count"]
 
                 lines.append("**Gap Analysis:**")
                 if export_transform_gap > 0:
-                    lines.append(f"- Export → Transform: **{export_transform_gap}** resources lost (check Transform Phase Issues above)")
+                    lines.append(
+                        f"- Export → Transform: **{export_transform_gap}** resources lost (check Transform Phase Issues above)"
+                    )
                 elif export_transform_gap < 0:
-                    lines.append(f"- Export → Transform: {abs(export_transform_gap)} additional resources (possibly seeded)")
+                    lines.append(
+                        f"- Export → Transform: {abs(export_transform_gap)} additional resources (possibly seeded)"
+                    )
                 else:
-                    lines.append(f"- Export → Transform: ✅ No gap")
+                    lines.append("- Export → Transform: ✅ No gap")
 
                 if transform_import_gap > 0:
-                    lines.append(f"- Transform → Import: **{transform_import_gap}** resources lost (check Failed/Skipped sections below)")
+                    lines.append(
+                        f"- Transform → Import: **{transform_import_gap}** resources lost (check Failed/Skipped sections below)"
+                    )
                 elif transform_import_gap < 0:
-                    lines.append(f"- Transform → Import: {abs(transform_import_gap)} additional resources (data inconsistency)")
+                    lines.append(
+                        f"- Transform → Import: {abs(transform_import_gap)} additional resources (data inconsistency)"
+                    )
                 else:
-                    lines.append(f"- Transform → Import: ✅ No gap")
+                    lines.append("- Transform → Import: ✅ No gap")
                 lines.append("")
 
                 # Show list of specific missing resources
                 if stats["missing_resources"]:
-                    lines.append(f"#### Specific Missing Resources ({len(stats['missing_resources'])})")
+                    lines.append(
+                        f"#### Specific Missing Resources ({len(stats['missing_resources'])})"
+                    )
                     lines.append("")
                     lines.append("| Source ID | Name | Type |")
                     lines.append("|-----------|------|------|")
@@ -852,7 +923,9 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
                         lines.append(f"| {source_id} | {name} | {res_type} |")
 
                     lines.append("")
-                    lines.append("**These resources were transformed but not found in the database as completed.**")
+                    lines.append(
+                        "**These resources were transformed but not found in the database as completed.**"
+                    )
                     lines.append("")
 
                 lines.append("**Recommended Actions:**")
@@ -869,7 +942,9 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
     if total_failed == 0 and total_discrepancy == 0:
         lines.append("## ✅ Migration Completed Successfully")
         lines.append("")
-        lines.append(f"All {total_imported} resources were imported successfully with no failures or discrepancies.")
+        lines.append(
+            f"All {total_imported} resources were imported successfully with no failures or discrepancies."
+        )
         lines.append("")
 
     return "\n".join(lines)

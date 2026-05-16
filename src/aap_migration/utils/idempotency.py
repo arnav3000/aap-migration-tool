@@ -11,7 +11,7 @@ import functools
 import hashlib
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.client.exceptions import ConflictError
 from aap_migration.migration.state import MigrationState
@@ -110,7 +110,7 @@ def idempotent(
     key_fields: list[str],
     source_id_field: str = "id",
     source_name_field: str = "name",
-):
+) -> Callable[..., Any]:
     """Decorator to make a function idempotent using state tracking.
 
     This decorator wraps async functions to:
@@ -148,9 +148,13 @@ def idempotent(
         >>> result2 = await create_inventory({"name": "test", "source_id": 50})
     """
 
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(func)
-        async def wrapper(data: dict[str, Any], *args, **kwargs) -> dict[str, Any]:
+        async def wrapper(
+            data: dict[str, Any],
+            *args: Any,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
             # Extract source ID and name
             source_id = data.get(source_id_field)
             source_name = data.get(source_name_field, "")
@@ -177,6 +181,11 @@ def idempotent(
                 # Mark as completed if we have source_id
                 if source_id is not None and "id" in result:
                     target_id = result["id"]
+                    if target_id is None:
+                        raise TypeError(
+                            "mark_completed requires numeric target id from API result['id']"
+                        )
+                    target_id = int(target_id)
 
                     # Mark in progress first if not already
                     if not state.is_migrated(resource_type, source_id):
@@ -200,7 +209,7 @@ def idempotent(
                         target_id=target_id,
                     )
 
-                return result
+                return cast(dict[str, Any], result)
 
             except ConflictError as e:
                 logger.warning(
@@ -219,7 +228,10 @@ def idempotent(
                     if existing:
                         # Mark as completed with existing ID
                         if source_id is not None:
-                            target_id = existing["id"]
+                            tid = existing["id"]
+                            if tid is None:
+                                raise TypeError("existing resource missing id") from None
+                            target_id = int(tid)
 
                             if not state.is_migrated(resource_type, source_id):
                                 state.mark_in_progress(
@@ -347,7 +359,7 @@ async def find_existing_resource(
             organization=organization,
         )
 
-        return result
+        return cast(dict[str, Any] | None, result)
 
     except Exception as e:
         logger.error(
