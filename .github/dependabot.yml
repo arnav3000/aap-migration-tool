@@ -55,47 +55,6 @@ updates:
       prefix: "chore"
       include: "scope"
 
-  # npm dependencies (React web UI)
-  - package-ecosystem: "npm"
-    directory: "/web"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "UTC"
-    open-pull-requests-limit: 10
-    reviewers:
-      - "arnav3000"
-    labels:
-      - "dependencies"
-      - "javascript"
-    commit-message:
-      prefix: "chore"
-      include: "scope"
-    groups:
-      patternfly:
-        patterns:
-          - "@patternfly/*"
-        update-types:
-          - "minor"
-          - "patch"
-      react:
-        patterns:
-          - "react"
-          - "react-dom"
-          - "react-router-dom"
-          - "@types/react*"
-        update-types:
-          - "minor"
-          - "patch"
-      build-tools:
-        patterns:
-          - "vite"
-          - "@vitejs/*"
-          - "typescript"
-        update-types:
-          - "minor"
-          - "patch"
 
   # Docker/Container dependencies
   - package-ecosystem: "docker"

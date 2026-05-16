@@ -138,8 +138,15 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
             report_lines.append("   ```bash\n")
             report_lines.append(f"   # Check if '{proj['name']}' exists in target AAP\n")
             report_lines.append("   curl -sk -H 'Authorization: Bearer $TOKEN' \\\n")
-            # Extract base URL without /api path
-            base_url = ctx.config.target.url.split("/api", 1)[0].rstrip("/")
+            # Extract base URL: strip path-based /api suffixes but preserve hostname
+            from urllib.parse import urlparse, urlunparse
+
+            parsed = urlparse(ctx.config.target.url)
+            path = parsed.path
+            api_idx = path.find("/api")
+            if api_idx >= 0:
+                path = path[:api_idx]
+            base_url = urlunparse((parsed.scheme, parsed.netloc, path.rstrip("/"), "", "", ""))
             report_lines.append(
                 f"     '{base_url}/api/v2/projects/?name={proj['name'].replace(' ', '+')}'\n"
             )
@@ -153,8 +160,9 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
             report_lines.append(
                 "     INSERT INTO id_mappings (resource_type, source_id, target_id, source_name, target_name)\n"
             )
+            safe_name = proj["name"].replace("'", "''")
             report_lines.append(
-                f"     VALUES ('projects', {proj['source_id']}, <EXISTING_TARGET_ID>, '{proj['name']}', '{proj['name']}');\n"
+                f"     VALUES ('projects', {proj['source_id']}, <EXISTING_TARGET_ID>, '{safe_name}', '{safe_name}');\n"
             )
             report_lines.append("     ```\n\n")
 

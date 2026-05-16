@@ -6,6 +6,7 @@ No external dependencies, CDNs, or internet connection required.
 
 from __future__ import annotations
 
+import html as html_escape
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -52,7 +53,7 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                 if not isinstance(item, dict):
                     continue
                 item_id = item.get("id")
-                item_name = item.get("name", f"ID {item_id}")
+                item_name = html_escape.escape(item.get("name", f"ID {item_id}"))
                 resource_info: dict = {
                     "id": item_id,
                     "name": item_name,
@@ -85,19 +86,21 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
 
         orgs_data.append(
             {
-                "name": org_name,
+                "name": html_escape.escape(org_name),
                 "id": org_report.org_id,
                 "total_resources": org_report.resource_count,
                 "has_dependencies": org_report.has_cross_org_deps,
-                "required_before": org_report.required_migrations_before,
+                "required_before": [
+                    html_escape.escape(r) for r in org_report.required_migrations_before
+                ],
                 "resource_tree": resource_tree,
                 "dependencies": [
                     {
-                        "org": dep_org,
+                        "org": html_escape.escape(dep_org),
                         "resources": [
                             {
                                 "type": dep.resource_type,
-                                "name": dep.resource_name,
+                                "name": html_escape.escape(dep.resource_name),
                                 "id": dep.resource_id,
                                 "used_by": dep.required_by,
                             }
@@ -113,7 +116,9 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
     edges_data = []
     for org_name, org_report in report.org_reports.items():
         for dep_org in org_report.required_migrations_before:
-            edges_data.append({"from": dep_org, "to": org_name})
+            edges_data.append(
+                {"from": html_escape.escape(dep_org), "to": html_escape.escape(org_name)}
+            )
 
     # Build phases — raw report has list[list[str]], convert to structured format
     phases_data = []

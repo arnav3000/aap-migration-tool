@@ -317,6 +317,9 @@ async def run_analysis(
 
             graph = {org: report.required_migrations_before for org, report in org_reports.items()}
             migration_order = topological_sort(graph)
+            # Keep only orgs that were actually analyzed to avoid KeyError
+            # when external dependencies appear in the graph
+            migration_order = [org for org in migration_order if org in org_reports]
             migration_phases = group_into_phases(graph, migration_order)
 
             # Create global report for these orgs

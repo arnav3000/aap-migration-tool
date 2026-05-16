@@ -131,16 +131,24 @@ def detect_duplicates(
 
         resource_list = resources[resource_type]
 
-        # Group by name (case-insensitive)
+        # Group by name (case-insensitive); for credentials, also include
+        # credential_type so that distinct types sharing a name aren't
+        # incorrectly flagged as duplicates.
         name_groups: dict[str, list[dict[str, Any]]] = {}
         for resource in resource_list:
             name = resource.get("name", "").lower().strip()
             if not name:
                 continue
 
-            if name not in name_groups:
-                name_groups[name] = []
-            name_groups[name].append(resource)
+            if resource_type == "credentials":
+                cred_type = str(resource.get("credential_type", "")).lower().strip()
+                group_key = f"{name}|{cred_type}"
+            else:
+                group_key = name
+
+            if group_key not in name_groups:
+                name_groups[group_key] = []
+            name_groups[group_key].append(resource)
 
         # Find duplicates (same name appearing multiple times)
         for name, group in name_groups.items():
