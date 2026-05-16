@@ -118,9 +118,15 @@ def _serialize_report(report: Any) -> dict[str, Any]:
         "dependent_orgs": report.dependent_orgs,
         "migration_order": report.migration_order,
         "migration_phases": [
-            p
-            if isinstance(p, dict)
-            else {"phase": i + 1, "orgs": p, "description": f"Phase {i + 1}"}
+            {
+                "phase": (p["phase"] if isinstance(p, dict) and "phase" in p else i + 1),
+                "orgs": (p["orgs"] if isinstance(p, dict) and "orgs" in p else p),
+                "description": (
+                    p.get("description", f"Phase {i + 1}")
+                    if isinstance(p, dict)
+                    else f"Phase {i + 1}"
+                ),
+            }
             for i, p in enumerate(report.migration_phases or [])
         ],
         "organizations": orgs,

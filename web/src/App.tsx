@@ -22,7 +22,7 @@ import {
   Alert,
   Button,
 } from '@patternfly/react-core';
-import { Dropdown, DropdownItem, KebabToggle } from '@patternfly/react-core/deprecated';
+import { Dropdown, DropdownItem, DropdownList, MenuToggle } from '@patternfly/react-core';
 import BarsIcon from '@patternfly/react-icons/dist/esm/icons/bars-icon';
 import QuestionCircleIcon from '@patternfly/react-icons/dist/esm/icons/question-circle-icon';
 import SunIcon from '@patternfly/react-icons/dist/esm/icons/sun-icon';
@@ -200,22 +200,28 @@ export function App() {
                 <Dropdown
                   isOpen={helpOpen}
                   onSelect={() => setHelpOpen(false)}
-                  toggle={
-                    <KebabToggle onToggle={(_e, open) => setHelpOpen(open)}>
+                  onOpenChange={setHelpOpen}
+                  toggle={(toggleRef) => (
+                    <MenuToggle
+                      ref={toggleRef}
+                      variant="plain"
+                      onClick={() => setHelpOpen(!helpOpen)}
+                      isExpanded={helpOpen}
+                    >
                       <QuestionCircleIcon style={{ color: 'white' }} />
-                    </KebabToggle>
-                  }
-                  isPlain
-                  position="right"
-                  dropdownItems={[
-                    <DropdownItem key="docs" component="a" href="https://github.com/arnav3000/aap-migration-tool" target="_blank">
+                    </MenuToggle>
+                  )}
+                  popperProps={{ position: 'right' }}
+                >
+                  <DropdownList>
+                    <DropdownItem key="docs" component="a" to="https://github.com/arnav3000/aap-migration-tool" target="_blank">
                       Documentation
-                    </DropdownItem>,
-                    <DropdownItem key="repo" component="a" href="https://github.com/arnav3000/aap-migration-tool" target="_blank">
+                    </DropdownItem>
+                    <DropdownItem key="repo" component="a" to="https://github.com/arnav3000/aap-migration-tool" target="_blank">
                       Source Code
-                    </DropdownItem>,
-                  ]}
-                />
+                    </DropdownItem>
+                  </DropdownList>
+                </Dropdown>
               </ToolbarItem>
             </ToolbarGroup>
           </ToolbarContent>

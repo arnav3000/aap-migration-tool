@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -45,7 +46,23 @@ async def list_resource_types(conn_id: str, db: Session = Depends(get_db)) -> li
 
     try:
         result = await asyncio.wait_for(_fetch_types(), timeout=15.0)
-    except (TimeoutError, Exception):
+    except TimeoutError:
+        logging.getLogger(__name__).warning(
+            "Timed out fetching resource types for connection %s", conn_id
+        )
+        result = [
+            {
+                "name": rtype,
+                "label": info.description or rtype.replace("_", " ").title(),
+                "api_path": info.endpoint,
+                "count": -1,
+            }
+            for rtype, info in sorted(RESOURCE_REGISTRY.items(), key=lambda x: x[1].migration_order)
+        ]
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to fetch resource types for connection %s", conn_id
+        )
         result = [
             {
                 "name": rtype,

@@ -41,7 +41,7 @@ class JobRecord(Base):
     __tablename__ = "api_jobs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    seq_id: Mapped[int] = mapped_column(Integer, autoincrement=True, unique=True, nullable=False)
+    seq_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
