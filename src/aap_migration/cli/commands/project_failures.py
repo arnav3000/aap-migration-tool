@@ -139,7 +139,7 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
             report_lines.append(f"   # Check if '{proj['name']}' exists in target AAP\n")
             report_lines.append("   curl -sk -H 'Authorization: Bearer $TOKEN' \\\n")
             # Extract base URL: strip path-based /api suffixes but preserve hostname
-            from urllib.parse import urlparse, urlunparse
+            from urllib.parse import quote, urlparse, urlunparse
 
             parsed = urlparse(ctx.config.target.url)
             path = parsed.path
@@ -147,9 +147,8 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
             if api_idx >= 0:
                 path = path[:api_idx]
             base_url = urlunparse((parsed.scheme, parsed.netloc, path.rstrip("/"), "", "", ""))
-            report_lines.append(
-                f"     '{base_url}/api/v2/projects/?name={proj['name'].replace(' ', '+')}'\n"
-            )
+            encoded_name = quote(proj["name"], safe="")
+            report_lines.append(f"     '{base_url}/api/v2/projects/?name={encoded_name}'\n")
             report_lines.append("   ```\n\n")
 
             report_lines.append("2. **If name collision exists:**\n")
@@ -175,18 +174,25 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
                 scm_branch = deferred.get("scm_branch", "")
                 cred_id = deferred.get("credential")
 
+                import json as json_mod
+
+                json_name = json_mod.dumps(proj["name"])[1:-1]
+                json_scm_url = json_mod.dumps(scm_url)[1:-1]
+                json_scm_type = json_mod.dumps(scm_type)[1:-1]
+
                 report_lines.append("   ```bash\n")
                 report_lines.append("   # Create project via API\n")
                 report_lines.append("   curl -sk -X POST -H 'Authorization: Bearer $TOKEN' \\\n")
                 report_lines.append("     -H 'Content-Type: application/json' \\\n")
                 report_lines.append(f"     '{base_url}/api/v2/projects/' \\\n")
                 report_lines.append("     -d '{\n")
-                report_lines.append(f'       "name": "{proj["name"]}",\n')
+                report_lines.append(f'       "name": "{json_name}",\n')
                 report_lines.append('       "organization": <TARGET_ORG_ID>,\n')
-                report_lines.append(f'       "scm_type": "{scm_type}",\n')
-                report_lines.append(f'       "scm_url": "{scm_url}",\n')
+                report_lines.append(f'       "scm_type": "{json_scm_type}",\n')
+                report_lines.append(f'       "scm_url": "{json_scm_url}",\n')
                 if scm_branch:
-                    report_lines.append(f'       "scm_branch": "{scm_branch}",\n')
+                    json_scm_branch = json_mod.dumps(scm_branch)[1:-1]
+                    report_lines.append(f'       "scm_branch": "{json_scm_branch}",\n')
                 if cred_id:
                     report_lines.append('       "credential": <TARGET_CREDENTIAL_ID>,\n')
                 report_lines.append("     }'\n")
@@ -204,7 +210,7 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
                 "   INSERT INTO id_mappings (resource_type, source_id, target_id, source_name, target_name)\n"
             )
             report_lines.append(
-                f"   VALUES ('projects', {proj['source_id']}, <NEW_TARGET_ID>, '{proj['name']}', '{proj['name']}');\n"
+                f"   VALUES ('projects', {proj['source_id']}, <NEW_TARGET_ID>, '{safe_name}', '{safe_name}');\n"
             )
             report_lines.append("   ```\n\n")
 

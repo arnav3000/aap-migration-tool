@@ -320,7 +320,14 @@ async def run_analysis(
             # Keep only orgs that were actually analyzed to avoid KeyError
             # when external dependencies appear in the graph
             migration_order = [org for org in migration_order if org in org_reports]
-            migration_phases = group_into_phases(graph, migration_order)
+            # Filter dependency lists to analyzed orgs so group_into_phases
+            # doesn't fail waiting for unselected external dependencies
+            filtered_graph = {
+                org: [dep for dep in deps if dep in org_reports]
+                for org, deps in graph.items()
+                if org in org_reports
+            }
+            migration_phases = group_into_phases(filtered_graph, migration_order)
 
             # Create global report for these orgs
             from aap_migration.analysis.dependency_analyzer import (

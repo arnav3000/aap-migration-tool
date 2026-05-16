@@ -102,7 +102,14 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                                 "type": dep.resource_type,
                                 "name": html_escape.escape(dep.resource_name),
                                 "id": dep.resource_id,
-                                "used_by": dep.required_by,
+                                "used_by": [
+                                    {
+                                        "type": u.get("type", ""),
+                                        "id": u.get("id"),
+                                        "name": html_escape.escape(u.get("name", "")),
+                                    }
+                                    for u in dep.required_by
+                                ],
                             }
                             for dep in deps
                         ],
@@ -124,9 +131,18 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
     phases_data = []
     for i, phase in enumerate(report.migration_phases or []):
         if isinstance(phase, dict):
-            phases_data.append(phase)
+            escaped_phase = dict(phase)
+            if "orgs" in escaped_phase:
+                escaped_phase["orgs"] = [html_escape.escape(o) for o in escaped_phase["orgs"]]
+            phases_data.append(escaped_phase)
         else:
-            phases_data.append({"phase": i + 1, "description": f"Phase {i + 1}", "orgs": phase})
+            phases_data.append(
+                {
+                    "phase": i + 1,
+                    "description": f"Phase {i + 1}",
+                    "orgs": [html_escape.escape(o) for o in phase],
+                }
+            )
 
     # Serialize data to JSON for embedding
     orgs_json = json.dumps(orgs_data, indent=2)

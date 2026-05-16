@@ -91,10 +91,55 @@ def _partial_topological_sort(graph: dict[str, list[str]]) -> tuple[list[str], s
 def detect_cycles(graph: dict[str, list[str]]) -> list[list[str]]:
     """Detect circular dependencies in the graph.
 
+    Uses Tarjan's algorithm to find strongly connected components,
+    distinguishing actual cycle members from downstream dependents.
+
     Returns each cycle cluster as a sorted list of organization names.
     """
-    _, cycle_members = _partial_topological_sort(graph)
-    return [sorted(cycle_members)] if cycle_members else []
+    _, remaining = _partial_topological_sort(graph)
+    if not remaining:
+        return []
+
+    # Use iterative Tarjan's SCC algorithm on the remaining subgraph
+    subgraph = {org: [d for d in graph.get(org, []) if d in remaining] for org in remaining}
+
+    index_counter = [0]
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    index_map: dict[str, int] = {}
+    lowlink: dict[str, int] = {}
+    sccs: list[list[str]] = []
+
+    def strongconnect(v: str) -> None:
+        index_map[v] = index_counter[0]
+        lowlink[v] = index_counter[0]
+        index_counter[0] += 1
+        stack.append(v)
+        on_stack.add(v)
+
+        for w in subgraph.get(v, []):
+            if w not in index_map:
+                strongconnect(w)
+                lowlink[v] = min(lowlink[v], lowlink[w])
+            elif w in on_stack:
+                lowlink[v] = min(lowlink[v], index_map[w])
+
+        if lowlink[v] == index_map[v]:
+            scc: list[str] = []
+            while True:
+                w = stack.pop()
+                on_stack.discard(w)
+                scc.append(w)
+                if w == v:
+                    break
+            if len(scc) > 1:
+                sccs.append(sorted(scc))
+
+    for node in sorted(remaining):
+        if node not in index_map:
+            strongconnect(node)
+
+    return sccs
 
 
 def group_into_phases(
