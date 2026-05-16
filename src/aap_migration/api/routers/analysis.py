@@ -140,7 +140,7 @@ async def run_analysis(body: AnalysisRunRequest, db: Session = Depends(get_db)) 
     svc = get_job_service()
 
     inst_config = ConnectionService.build_instance_config(conn)
-    auth_scheme = ConnectionService._auth_scheme(conn)
+    auth_scheme = ConnectionService.auth_scheme(conn)
 
     async def _do_analysis(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
         from aap_migration.analysis.dependency_analyzer import CrossOrgDependencyAnalyzer

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class ConnectionCreate(BaseModel):
@@ -23,22 +23,6 @@ class ConnectionUpdate(BaseModel):
     role: str | None = None
     verify_ssl: bool | None = None
     timeout: int | None = None
-
-
-class ConnectionResponse(BaseModel):
-    id: str
-    name: str
-    url: str
-    token: str = Field(exclude=True)
-    role: str
-    verify_ssl: bool
-    timeout: int
-    ping_status: str
-    auth_status: str
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
 
 
 class ConnectionResponseMasked(BaseModel):

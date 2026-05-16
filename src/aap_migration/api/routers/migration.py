@@ -35,8 +35,8 @@ async def migration_preview(
 
     src_config = ConnectionService.build_instance_config(source)
     tgt_config = ConnectionService.build_instance_config(target)
-    source_auth = ConnectionService._auth_scheme(source)
-    target_auth = ConnectionService._auth_scheme(target)
+    source_auth = ConnectionService.auth_scheme(source)
+    target_auth = ConnectionService.auth_scheme(target)
     org_filter = body.organizations
 
     async def _do_preview(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
@@ -153,7 +153,7 @@ async def migration_run(
     name_prefix = body.name_prefix
 
     run_src_config = ConnectionService.build_instance_config(source)
-    run_source_auth = ConnectionService._auth_scheme(source)
+    run_source_auth = ConnectionService.auth_scheme(source)
 
     async def _do_migration(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
         import json

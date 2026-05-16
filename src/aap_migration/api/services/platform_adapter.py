@@ -1,8 +1,12 @@
+import logging
 from typing import Any, cast
 
 import httpx
 
+from aap_migration.api.crypto import decrypt_token
 from aap_migration.api.models import Connection
+
+logger = logging.getLogger(__name__)
 
 
 class PlatformAdapter:
@@ -14,7 +18,9 @@ class PlatformAdapter:
         self.base_url = f"{conn.url}{self.api_prefix}"
         self.headers = {}
         if conn.token:
-            self.headers["Authorization"] = f"Bearer {conn.token}"
+            plain = decrypt_token(conn.token)
+            if plain:
+                self.headers["Authorization"] = f"Bearer {plain}"
 
     def _get(self, path: str, params: dict | None = None) -> dict[Any, Any]:
         resp = httpx.get(
@@ -38,6 +44,7 @@ class PlatformAdapter:
                 if isinstance(path, str)
             ]
         except Exception:
+            logger.exception("discover_resource_types_failed")
             return []
 
     def fetch_all(self, resource_type: str) -> list[dict]:
@@ -51,6 +58,10 @@ class PlatformAdapter:
                     break
                 page += 1
             except Exception:
+                logger.exception(
+                    "fetch_all_page_failed",
+                    extra={"resource_type": resource_type, "page": page},
+                )
                 break
         return results
 

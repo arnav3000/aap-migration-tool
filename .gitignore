@@ -138,6 +138,9 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+
+# API token encryption key file (never commit)
+.secret_key
 .venv
 env/
 venv/

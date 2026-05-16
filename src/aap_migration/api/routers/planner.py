@@ -345,7 +345,7 @@ async def execute_phase(
                 "timeout": cfg.timeout,
                 "name_prefix": ps.name_prefix or "",
                 "org_ids": org_ids,
-                "auth_scheme": ConnectionService._auth_scheme(conn),
+                "auth_scheme": ConnectionService.auth_scheme(conn),
             }
         )
 

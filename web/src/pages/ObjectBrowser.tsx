@@ -31,10 +31,11 @@ export function ObjectBrowser() {
 
   useEffect(() => {
     if (!selectedConn) return;
+    setSelectedType('');
     api.listResourceTypes(selectedConn).then(rt => {
       const types = rt as ResourceType[];
       setResourceTypes(types);
-      if (types.length > 0 && !selectedType) setSelectedType(types[0].name);
+      if (types.length > 0) setSelectedType(types[0].name);
     });
   }, [selectedConn]);
 

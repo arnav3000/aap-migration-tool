@@ -75,11 +75,15 @@ export function Planner() {
   };
 
   const handleDelete = async (id: string) => {
+    const snapshot = [...plans];
     setPlans(prev => prev.filter(p => p.id !== id));
     try {
       await api.deletePlan(id);
-    } catch { /* already removed from UI */ }
-    loadPlans();
+      loadPlans();
+    } catch {
+      setPlans(snapshot);
+      setError('Failed to delete plan. Please try again.');
+    }
   };
 
   const statusColor = (status: string) => {
@@ -92,7 +96,7 @@ export function Planner() {
     }
   };
 
-  const destinations = connections.filter(c => c.type === 'aap' || c.role === 'destination');
+  const destinations = connections.filter(c => c.role === 'destination');
 
   return (
     <>

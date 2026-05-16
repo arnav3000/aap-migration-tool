@@ -70,7 +70,7 @@ class ConnectionService:
         return True
 
     @staticmethod
-    def _auth_scheme(conn: Connection) -> str:
+    def auth_scheme(conn: Connection) -> str:
         """AWX uses Token auth, AAP 2.5+ uses Bearer."""
         return "Token" if getattr(conn, "type", "awx") == "awx" else "Bearer"
 
@@ -86,12 +86,12 @@ class ConnectionService:
     @staticmethod
     def build_source_client(conn: Connection) -> AAPSourceClient:
         config = ConnectionService.build_instance_config(conn)
-        return AAPSourceClient(config, auth_scheme=ConnectionService._auth_scheme(conn))
+        return AAPSourceClient(config, auth_scheme=ConnectionService.auth_scheme(conn))
 
     @staticmethod
     def build_target_client(conn: Connection) -> AAPTargetClient:
         config = ConnectionService.build_instance_config(conn)
-        return AAPTargetClient(config, auth_scheme=ConnectionService._auth_scheme(conn))
+        return AAPTargetClient(config, auth_scheme=ConnectionService.auth_scheme(conn))
 
     @staticmethod
     async def test_connection(conn: Connection) -> tuple[bool, str | None]:
@@ -101,7 +101,7 @@ class ConnectionService:
         """
         try:
             config = ConnectionService.build_instance_config(conn)
-            scheme = ConnectionService._auth_scheme(conn)
+            scheme = ConnectionService.auth_scheme(conn)
             if conn.role in ("target", "destination"):
                 client: AAPSourceClient | AAPTargetClient = AAPTargetClient(
                     config, auth_scheme=scheme

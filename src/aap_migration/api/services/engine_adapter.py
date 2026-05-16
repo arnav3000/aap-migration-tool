@@ -1,3 +1,4 @@
+from aap_migration.api.crypto import decrypt_token
 from aap_migration.api.models import Connection
 from aap_migration.config import AAPInstanceConfig, MigrationConfig, StateConfig
 
@@ -8,7 +9,7 @@ def connection_to_aap_config(conn: Connection) -> AAPInstanceConfig:
 
     return AAPInstanceConfig(
         url=url,
-        token=conn.token,
+        token=decrypt_token(conn.token) if conn.token else "",
         verify_ssl=conn.verify_ssl,
         timeout=30,
     )

@@ -18,9 +18,13 @@ def _get_fernet() -> Fernet:
     if _fernet is not None:
         return _fernet
 
-    raw_key = os.environ.get(_KEY_ENV, "")
+    raw_key = os.environ.get(_KEY_ENV, "").strip()
     if not raw_key:
-        raw_key = "aap-migration-default-key-change-me"
+        msg = (
+            f"Missing required environment variable {_KEY_ENV}: "
+            "set a secret value so API tokens can be encrypted at rest."
+        )
+        raise RuntimeError(msg)
 
     key_bytes = urlsafe_b64encode(sha256(raw_key.encode()).digest())
     _fernet = Fernet(key_bytes)
@@ -35,10 +39,10 @@ def encrypt_token(plaintext: str) -> str:
 
 
 def decrypt_token(ciphertext: str) -> str:
-    """Decrypt a token string. Returns empty string if input is empty or decryption fails."""
+    """Decrypt a token string. Raises if ciphertext is invalid or the key cannot decrypt it."""
     if not ciphertext:
         return ""
     try:
         return str(_get_fernet().decrypt(ciphertext.encode()).decode())
-    except Exception:
-        return ciphertext
+    except Exception as e:
+        raise ValueError("Failed to decrypt token; incorrect key or corrupted ciphertext.") from e

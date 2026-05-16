@@ -13,12 +13,10 @@ services:
     - app
     environment:
       POSTGRESQL_USER: aap_user
-      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRESQL_DATABASE: aap_migration
     volumes:
     - postgres-data:/var/lib/pgsql/data
-    ports:
-    - 5432:5432
     restart: unless-stopped
     healthcheck:
       test: [CMD-SHELL, pg_isready -U aap_user -d aap_migration]
@@ -39,8 +37,9 @@ services:
       db:
         condition: service_healthy
     environment:
-      MIGRATION_STATE_DB_PATH: postgresql://aap_user:${POSTGRES_PASSWORD:-changeme}@db:5432/aap_migration
-      AAP_TOKEN_ENCRYPTION_KEY: ${AAP_TOKEN_ENCRYPTION_KEY:-}
+      MIGRATION_STATE_DB_PATH: postgresql://aap_user:${POSTGRES_PASSWORD}@db:5432/aap_migration
+      AAP_TOKEN_ENCRYPTION_KEY: ${AAP_TOKEN_ENCRYPTION_KEY}
+      AAP_CORS_ORIGINS: http://localhost:9080,http://localhost:5173,http://localhost:8080
     volumes:
     - ./volumes/logs:/app/logs:Z
     - ./volumes/exports:/app/exports:Z
@@ -50,7 +49,11 @@ services:
     - 8000:8000
     restart: unless-stopped
     healthcheck:
-      test: [CMD, python3.12, -c, import urllib.request; urllib.request.urlopen('http://localhost:8000/api/jobs')]
+      test:
+      - CMD
+      - python3.12
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')
       interval: 15s
       timeout: 10s
       retries: 5
@@ -69,7 +72,7 @@ services:
       engine:
         condition: service_healthy
     ports:
-    - 8080:8080
+    - 9080:8080
     restart: unless-stopped
     healthcheck:
       test: [CMD, curl, -f, http://localhost:8080/]
@@ -95,7 +98,7 @@ services:
     env_file:
     - .env
     environment:
-      MIGRATION_STATE_DB_PATH: postgresql://aap_user:${POSTGRES_PASSWORD:-changeme}@db:5432/aap_migration
+      MIGRATION_STATE_DB_PATH: postgresql://aap_user:${POSTGRES_PASSWORD}@db:5432/aap_migration
     volumes:
     - ./volumes/database:/app/aap-bridge/database:Z
     - ./volumes/logs:/app/aap-bridge/logs:Z
@@ -116,12 +119,13 @@ volumes:
 
 # Usage:
 # ======
-# 1. Copy .env.container to .env and customize your credentials
+# 1. Set POSTGRES_PASSWORD, AAP_TOKEN_ENCRYPTION_KEY, and other secrets in the environment or .env.
+#    Example: export POSTGRES_PASSWORD='...'; export AAP_TOKEN_ENCRYPTION_KEY='...';
 # 2. Create volumes: mkdir -p volumes/{database,logs,exports,xformed,config}
 #
 # Full stack (UI + API + DB + CLI):
 #   podman-compose up -d
-#   # UI at http://localhost:8080
+#   # UI at http://localhost:9080
 #   # API at http://localhost:8000
 #
 # CLI only (exec into bridge container):

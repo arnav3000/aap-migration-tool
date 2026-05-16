@@ -9,6 +9,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
 from aap_migration.api.dependencies import AppState, set_app_state
@@ -25,9 +27,17 @@ from aap_migration.migration.database import create_database_engine
 from aap_migration.migration.models import Base
 
 
-def _migrate_add_seq_id(engine: object) -> None:
+def _cors_allow_origins() -> list[str]:
+    """Comma-separated list in AAP_CORS_ORIGINS; defaults for local UI dev."""
+    raw = os.environ.get("AAP_CORS_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return ["http://localhost:5173", "http://localhost:8080"]
+
+
+def _migrate_add_seq_id(engine: Engine) -> None:
     """Add seq_id column to api_jobs if it doesn't exist, backfill existing rows."""
-    from sqlalchemy import inspect, text
+    from sqlalchemy import text
 
     insp = inspect(engine)
     if not insp.has_table("api_jobs"):
@@ -35,15 +45,24 @@ def _migrate_add_seq_id(engine: object) -> None:
     columns = [c["name"] for c in insp.get_columns("api_jobs")]
     if "seq_id" in columns:
         return
-    with engine.begin() as conn:  # type: ignore[attr-defined]
+
+    dialect = engine.dialect.name
+    pg_backfill = (
+        "UPDATE api_jobs SET seq_id = sub.rn FROM "
+        "(SELECT id, ROW_NUMBER() OVER (ORDER BY created_at) AS rn FROM api_jobs) sub "
+        "WHERE api_jobs.id = sub.id"
+    )
+    portable_backfill = (
+        "UPDATE api_jobs SET seq_id = ("
+        "SELECT sub.rn FROM ("
+        "SELECT id, ROW_NUMBER() OVER (ORDER BY created_at) AS rn FROM api_jobs"
+        ") AS sub WHERE sub.id = api_jobs.id)"
+    )
+
+    with engine.begin() as conn:
         conn.execute(text("ALTER TABLE api_jobs ADD COLUMN seq_id INTEGER"))
-        conn.execute(
-            text(
-                "UPDATE api_jobs SET seq_id = sub.rn FROM "
-                "(SELECT id, ROW_NUMBER() OVER (ORDER BY created_at) AS rn FROM api_jobs) sub "
-                "WHERE api_jobs.id = sub.id"
-            )
-        )
+        stmt = pg_backfill if dialect == "postgresql" else portable_backfill
+        conn.execute(text(stmt))
         conn.execute(
             text("CREATE UNIQUE INDEX IF NOT EXISTS ix_api_jobs_seq_id ON api_jobs (seq_id)")
         )
@@ -86,11 +105,15 @@ def create_app(db_url: str | None = None) -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=_cors_allow_origins(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.get("/api/health", tags=["health"])
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
 
     from aap_migration.api import websocket
     from aap_migration.api.routers import (
@@ -119,19 +142,21 @@ def create_app(db_url: str | None = None) -> FastAPI:
 
 def _seed_connections_from_env(session_factory: sessionmaker) -> None:
     """Auto-create connections from SOURCE__*/TARGET__* env vars if DB is empty."""
+    from aap_migration.api.crypto import encrypt_token
+
     session = session_factory()
     try:
         if session.query(Connection).count() > 0:
             return
 
-        for role, prefix in [("source", "SOURCE__"), ("target", "TARGET__")]:
+        for role, prefix in [("source", "SOURCE__"), ("destination", "TARGET__")]:
             url = os.environ.get(f"{prefix}URL")
             token = os.environ.get(f"{prefix}TOKEN")
             if url and token:
                 conn = Connection(
                     name=f"{role.capitalize()} AAP",
                     url=url,
-                    token=token,
+                    token=encrypt_token(token),
                     role=role,
                     verify_ssl=os.environ.get(f"{prefix}VERIFY_SSL", "true").lower() == "true",
                     timeout=int(os.environ.get(f"{prefix}TIMEOUT", "30")),

@@ -19,7 +19,8 @@ import {
   DescriptionListDescription,
   Alert,
 } from '@patternfly/react-core';
-import { Dropdown, DropdownItem, KebabToggle } from '@patternfly/react-core/deprecated';
+import { Dropdown, DropdownItem, DropdownList, MenuToggle } from '@patternfly/react-core';
+import { EllipsisVIcon } from '@patternfly/react-icons';
 import { api } from '../api/client';
 import { ConnectionForm } from '../components/ConnectionForm';
 import type { Connection } from '../types/connection';
@@ -114,11 +115,23 @@ export function Dashboard() {
               <Dropdown
                 isOpen={openMenu === conn.id}
                 onSelect={() => setOpenMenu(null)}
-                toggle={<KebabToggle onToggle={(_e, open) => setOpenMenu(open ? conn.id : null)} />}
-                isPlain
-                dropdownItems={dropdownItems(conn)}
-                position="right"
-              />
+                onOpenChange={(open) => setOpenMenu(open ? conn.id : null)}
+                toggle={(toggleRef) => (
+                  <MenuToggle
+                    ref={toggleRef}
+                    variant="plain"
+                    onClick={() => setOpenMenu(openMenu === conn.id ? null : conn.id)}
+                    isExpanded={openMenu === conn.id}
+                  >
+                    <EllipsisVIcon />
+                  </MenuToggle>
+                )}
+                popperProps={{ position: 'right' }}
+              >
+                <DropdownList>
+                  {dropdownItems(conn)}
+                </DropdownList>
+              </Dropdown>
             ),
           }}
         >

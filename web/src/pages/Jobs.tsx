@@ -22,9 +22,15 @@ export function Jobs() {
 
   useEffect(() => {
     loadJobs();
-    const interval = setInterval(loadJobs, 3000);
-    return () => clearInterval(interval);
   }, [loadJobs]);
+
+  useEffect(() => {
+    const hasActiveJobs = jobs.some(j => j.status === 'pending' || j.status === 'running');
+    if (!hasActiveJobs) return;
+    const delay = document.visibilityState === 'visible' ? 3000 : 15000;
+    const interval = setInterval(loadJobs, delay);
+    return () => clearInterval(interval);
+  }, [jobs, loadJobs]);
 
   const statusColor = (status: string) => {
     switch (status) {
