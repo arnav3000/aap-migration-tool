@@ -452,6 +452,7 @@ async def execute_phase(
                                 resource_type=rtype,
                                 dry_run=False,
                                 state=state,
+                                defer_project_sync=False,
                             )
                             if info.has_transformer
                             else None
