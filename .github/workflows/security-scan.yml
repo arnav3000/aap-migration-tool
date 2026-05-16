@@ -76,8 +76,8 @@ jobs:
 
     - name: Run Bandit security scan
       run: |
-        bandit -r src/ -f json -o bandit-report.json || true
-        bandit -r src/ -f txt
+        bandit -c pyproject.toml -r src/ -f json -o bandit-report.json || true
+        bandit -c pyproject.toml -r src/ -f txt
 
     - name: Upload Bandit results
       if: always()
@@ -194,8 +194,8 @@ jobs:
 
     - name: Generate CycloneDX SBOM
       run: |
-        cyclonedx-py environment --outfile sbom.json --format json
-        cyclonedx-py environment --outfile sbom.xml --format xml
+        cyclonedx-py environment -o sbom.json --output-format JSON
+        cyclonedx-py environment -o sbom.xml --output-format XML
 
     - name: Upload SBOM
       uses: actions/upload-artifact@v4
