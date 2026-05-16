@@ -1,0 +1,31 @@
+# AAP Bridge API Server
+# Multi-stage build: base install + API extras
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.4 AS base
+
+LABEL org.opencontainers.image.title="aap-bridge-api" \
+      org.opencontainers.image.version="0.5.4" \
+      org.opencontainers.image.description="AAP Bridge API server for the web UI"
+
+# hadolint ignore=DL3041
+RUN microdnf install -y python3.12 python3.12-pip python3.12-devel gcc libpq-devel && \
+    microdnf clean all
+
+RUN mkdir -p /app
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY src/ src/
+
+# hadolint ignore=DL3013
+RUN python3.12 -m pip install --no-cache-dir '.[api]' psycopg2-binary
+
+RUN useradd -r -s /sbin/nologin bridge && \
+    chown -R bridge:bridge /app
+
+USER bridge
+
+RUN mkdir -p /app/logs /app/exports /app/xformed /app/database
+
+EXPOSE 8000
+
+ENTRYPOINT ["aap-bridge", "serve", "--host", "0.0.0.0", "--port", "8000"]
