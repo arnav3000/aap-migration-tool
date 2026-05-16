@@ -107,7 +107,7 @@ class MigrationPlanPhase(Base):
     )
     phase_number: Mapped[int] = mapped_column(Integer, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
     job_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("api_jobs.id", ondelete="SET NULL"), nullable=True
     )

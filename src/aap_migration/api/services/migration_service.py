@@ -212,9 +212,9 @@ class MigrationService:
         self.loop = loop
 
     def _get_db_url(self) -> str:
-        import os
+        from aap_migration.api.dependencies import get_db_url
 
-        return os.environ.get("MIGRATION_STATE_DB_PATH", "sqlite:///aap_bridge.db")
+        return get_db_url()
 
     def _create_job(self, job_type: str, connection_id: str | None = None) -> str:
         job_id = str(uuid4())

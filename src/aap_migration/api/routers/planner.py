@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from aap_migration.api.dependencies import get_db, get_job_service
+from aap_migration.api.dependencies import get_app_state, get_db, get_db_url, get_job_service
 from aap_migration.api.models import (
     MigrationPlan,
     MigrationPlanPhase,
@@ -349,57 +349,88 @@ async def execute_phase(
             }
         )
 
+    dest_cfg = ConnectionService.build_instance_config(dest)
+    dest_auth_scheme = ConnectionService._auth_scheme(dest)
+
     phase_name = phase.name or f"Phase {phase.phase_number}"
+
+    db_url = get_db_url()
 
     phase.status = "running"
     db.flush()
 
     svc = get_job_service()
+    session_factory = get_app_state().db_session_factory
 
     async def _do_phase(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
         import time
 
         from aap_migration.client.aap_source_client import AAPSourceClient
-        from aap_migration.config import AAPInstanceConfig
-        from aap_migration.resources import RESOURCE_REGISTRY, get_exportable_types
+        from aap_migration.client.aap_target_client import AAPTargetClient
+        from aap_migration.config import AAPInstanceConfig, MigrationConfig, StateConfig
+        from aap_migration.migration.exporter import create_exporter
+        from aap_migration.migration.importer import create_importer
+        from aap_migration.migration.state import MigrationState
+        from aap_migration.migration.transformer import SkipResourceError, create_transformer
+        from aap_migration.resources import RESOURCE_REGISTRY, get_migration_order
 
         def emit(event: dict[str, Any]) -> None:
             log("\t" + json.dumps(event))
 
-        resource_types = get_exportable_types()
         total_created = 0
         total_skipped = 0
         total_failed = 0
-        phase_num = 0
 
-        for src_cfg in source_configs:
-            src_config = AAPInstanceConfig(
-                url=src_cfg["url"],
-                token=src_cfg["token"],
-                verify_ssl=src_cfg["verify_ssl"],
-                timeout=src_cfg["timeout"],
+        resource_order = [
+            rt
+            for rt in get_migration_order()
+            if RESOURCE_REGISTRY[rt].has_exporter and RESOURCE_REGISTRY[rt].has_importer
+        ]
+        num_resource_types = len(resource_order) * len(source_configs)
+
+        try:
+            target_config = AAPInstanceConfig(
+                url=dest_cfg.url,
+                token=dest_cfg.token,
+                verify_ssl=dest_cfg.verify_ssl,
+                timeout=dest_cfg.timeout,
             )
-            prefix = src_cfg["name_prefix"]
-            org_ids = src_cfg["org_ids"]
+            target_client = AAPTargetClient(target_config, auth_scheme=dest_auth_scheme)
 
-            log(f"Processing source: {src_cfg['url']} (prefix='{prefix}', orgs={org_ids})")
+            phase_num = 0
 
-            src_client = AAPSourceClient(
-                src_config, auth_scheme=src_cfg.get("auth_scheme", "Bearer")
-            )
-            async with src_client:
-                for rtype in resource_types:
-                    info = RESOURCE_REGISTRY.get(rtype)
-                    if not info:
-                        continue
+            for src_cfg in source_configs:
+                src_config = AAPInstanceConfig(
+                    url=src_cfg["url"],
+                    token=src_cfg["token"],
+                    verify_ssl=src_cfg["verify_ssl"],
+                    timeout=src_cfg["timeout"],
+                )
+                org_ids: list[int] = src_cfg["org_ids"]
 
+                log(f"Processing source: {src_cfg['url']} (orgs={org_ids})")
+
+                migration_config = MigrationConfig(
+                    source=src_config,
+                    target=target_config,
+                    state=StateConfig(db_path=db_url),
+                )
+
+                src_client = AAPSourceClient(
+                    src_config, auth_scheme=src_cfg.get("auth_scheme", "Bearer")
+                )
+                state = MigrationState(migration_config.state)
+
+                for rtype in resource_order:
+                    info = RESOURCE_REGISTRY[rtype]
                     phase_num += 1
+
                     emit(
                         {
                             "_event": "phase_start",
                             "phase_num": phase_num,
-                            "total_phases": len(resource_types) * len(source_configs),
-                            "description": f"Export {info.description}",
+                            "total_phases": num_resource_types,
+                            "description": info.description,
                             "resource_type": rtype,
                         }
                     )
@@ -410,48 +441,151 @@ async def execute_phase(
                     failed = 0
 
                     try:
-                        items = await src_client.get_paginated(info.endpoint, page_size=200)
-
-                        if items and org_ids:
-                            if rtype == "organizations":
-                                items = [i for i in items if i.get("id") in org_ids]
-                            else:
-                                items = [
-                                    i
-                                    for i in items
-                                    if i.get("organization") in org_ids
-                                    or i.get("summary_fields", {}).get("organization", {}).get("id")
-                                    in org_ids
-                                ]
-
-                        for item in items or []:
-                            item_name = item.get(
-                                "name", item.get("username", str(item.get("id", 0)))
+                        exporter = create_exporter(
+                            resource_type=rtype,
+                            client=src_client,
+                            state=state,
+                            performance_config=migration_config.performance,
+                        )
+                        transformer = (
+                            create_transformer(
+                                resource_type=rtype,
+                                dry_run=False,
+                                state=state,
                             )
-                            if prefix and rtype != "users":
-                                item_name = f"{prefix}{item_name}"
-                            created += 1
-                            emit(
-                                {
-                                    "_event": "resource_result",
-                                    "phase_num": phase_num,
-                                    "name": item_name,
-                                    "resource_type": rtype,
-                                    "result": "created",
-                                    "detail": "Exported from source",
-                                }
-                            )
+                            if info.has_transformer
+                            else None
+                        )
+                        importer = create_importer(
+                            resource_type=rtype,
+                            client=target_client,
+                            state=state,
+                            performance_config=migration_config.performance,
+                            resource_mappings=migration_config.resource_mappings,
+                        )
+
+                        exported = 0
+                        last_progress = time.monotonic()
+                        PROGRESS_INTERVAL = 2.0
+
+                        async for resource in exporter.export():
+                            source_id = resource.get("id")
+                            if source_id is None:
+                                if rtype == "host_inventory_memberships":
+                                    source_id = (
+                                        f"{resource.get('host_id')}_{resource.get('inventory_id')}"
+                                    )
+                                elif rtype == "settings":
+                                    source_id = "settings"
+                                else:
+                                    continue
+
+                            if org_ids:
+                                if rtype == "organizations":
+                                    if source_id not in org_ids:
+                                        continue
+                                elif rtype not in (
+                                    "settings",
+                                    "host_inventory_memberships",
+                                ):
+                                    res_org = resource.get("organization")
+                                    sf_org = (
+                                        resource.get("summary_fields", {})
+                                        .get("organization", {})
+                                        .get("id")
+                                    )
+                                    if res_org not in org_ids and sf_org not in org_ids:
+                                        if res_org is not None or sf_org is not None:
+                                            continue
+
+                            if transformer:
+                                try:
+                                    resource = transformer.transform_resource(
+                                        resource_type=rtype,
+                                        data=resource,
+                                        validate=True,
+                                    )
+                                except SkipResourceError:
+                                    skipped += 1
+                                    continue
+                                except Exception:
+                                    failed += 1
+                                    continue
+
+                            exported += 1
+
+                            try:
+                                if rtype == "host_inventory_memberships":
+                                    result = await cast(Any, importer).import_resource(
+                                        resource=resource,
+                                    )
+                                else:
+                                    result = await importer.import_resource(
+                                        resource_type=rtype,
+                                        source_id=int(source_id),
+                                        data=resource,
+                                    )
+                                res_name = resource.get(
+                                    "name",
+                                    resource.get("username", str(source_id)),
+                                )
+                                if result:
+                                    created += 1
+                                    emit(
+                                        {
+                                            "_event": "resource_result",
+                                            "phase_num": phase_num,
+                                            "name": res_name,
+                                            "resource_type": rtype,
+                                            "result": "created",
+                                            "detail": "",
+                                        }
+                                    )
+                                else:
+                                    skipped += 1
+                            except Exception as exc:
+                                failed += 1
+                                emit(
+                                    {
+                                        "_event": "resource_result",
+                                        "phase_num": phase_num,
+                                        "name": resource.get(
+                                            "name",
+                                            resource.get("username", str(source_id)),
+                                        ),
+                                        "resource_type": rtype,
+                                        "result": "failed",
+                                        "detail": str(exc)[:200],
+                                    }
+                                )
+
+                            now = time.monotonic()
+                            if now - last_progress >= PROGRESS_INTERVAL:
+                                elapsed = f"{now - phase_start:.1f}s"
+                                emit(
+                                    {
+                                        "_event": "phase_progress",
+                                        "phase_num": phase_num,
+                                        "exported": exported,
+                                        "created": created,
+                                        "skipped": skipped,
+                                        "failed": failed,
+                                        "rate": f"{exported / max(now - phase_start, 0.1):.0f}/s",
+                                        "elapsed": elapsed,
+                                    }
+                                )
+                                last_progress = now
 
                         duration = f"{time.monotonic() - phase_start:.1f}s"
                         emit(
                             {
                                 "_event": "phase_complete",
                                 "phase_num": phase_num,
-                                "description": f"Export {info.description}",
+                                "description": info.description,
                                 "created": created,
                                 "skipped": skipped,
                                 "failed": failed,
-                                "exported": len(items or []),
+                                "exported": exported,
                                 "duration": duration,
                                 "warnings": {},
                             }
@@ -465,6 +599,12 @@ async def execute_phase(
                     total_skipped += skipped
                     total_failed += failed
 
+            final_status = "completed" if total_failed == 0 else "completed_with_errors"
+            _update_phase_status(session_factory, phase_id, final_status)
+        except Exception:
+            _update_phase_status(session_factory, phase_id, "failed")
+            raise
+
         emit(
             {
                 "_event": "migration_complete",
@@ -473,6 +613,7 @@ async def execute_phase(
                 "total_failed": total_failed,
             }
         )
+
         return {
             "total_created": total_created,
             "total_skipped": total_skipped,
@@ -486,3 +627,21 @@ async def execute_phase(
     db.flush()
 
     return JobStartResponse(job_id=job_id)
+
+
+def _update_phase_status(session_factory: Any, phase_id: str, status: str) -> None:
+    """Update the phase status in the DB from the background task."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+    session = session_factory()
+    try:
+        phase = session.get(MigrationPlanPhase, phase_id)
+        if phase is not None:
+            phase.status = status
+        session.commit()
+    except Exception:
+        logger.exception("Failed to update phase %s to status %s", phase_id, status)
+        session.rollback()
+    finally:
+        session.close()

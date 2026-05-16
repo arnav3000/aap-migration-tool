@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import sessionmaker
 
-from aap_migration.api.dependencies import AppState, set_app_state
+from aap_migration.api.dependencies import AppState, get_db_url, set_app_state
 from aap_migration.api.models import (  # noqa: F401 — registers tables
     Connection,
     JobRecord,
@@ -50,11 +50,7 @@ def _migrate_add_seq_id(engine: object) -> None:
 
 
 def create_app(db_url: str | None = None) -> FastAPI:
-    effective_url: str = (
-        db_url
-        or os.environ.get("MIGRATION_STATE_DB_PATH", "sqlite:///aap_bridge.db")
-        or "sqlite:///aap_bridge.db"
-    )
+    effective_url: str = db_url or get_db_url()
 
     if not effective_url.startswith(("sqlite", "postgresql", "mysql")):
         effective_url = f"sqlite:///{effective_url}"
@@ -73,6 +69,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
         set_app_state(state)
 
         _seed_connections_from_env(session_factory)
+        _recover_stale_jobs(session_factory)
 
         yield
 
@@ -115,6 +112,26 @@ def create_app(db_url: str | None = None) -> FastAPI:
     app.include_router(websocket.router)
 
     return app
+
+
+def _recover_stale_jobs(session_factory: sessionmaker) -> None:
+    """Mark any DB jobs stuck in 'running' as failed on startup."""
+    session = session_factory()
+    try:
+        from sqlalchemy import update
+
+        stmt = (
+            update(JobRecord)
+            .where(JobRecord.status == "running")
+            .values(status="failed", error="Engine restarted — job did not complete")
+        )
+        result = session.execute(stmt)
+        if result.rowcount:
+            session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
 
 
 def _seed_connections_from_env(session_factory: sessionmaker) -> None:

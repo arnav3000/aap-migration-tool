@@ -123,11 +123,24 @@ export function useJobLogs(jobId: string) {
       try {
         const job = (await api.getJob(jobId)) as Job;
         if (job.output && job.output.length > 0) {
-          setTextLines(job.output);
+          const text: string[] = [];
+          const evts: MigrationEvent[] = [];
+          for (const line of job.output) {
+            if (isEventMessage(line)) {
+              const evt = parseEventMessage(line);
+              if (evt) evts.push(evt);
+            } else {
+              text.push(line);
+            }
+          }
+          setTextLines(text);
+          if (evts.length > 0) setEvents(evts);
         }
-        const meta = job.job_metadata;
-        if (meta && Array.isArray(meta.events)) {
-          setEvents(meta.events as MigrationEvent[]);
+        if (events.length === 0) {
+          const meta = job.job_metadata;
+          if (meta && Array.isArray(meta.events)) {
+            setEvents(meta.events as MigrationEvent[]);
+          }
         }
         setStatus(job.status || 'empty');
       } catch {

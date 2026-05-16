@@ -84,6 +84,9 @@ function buildMigrationState(events: MigrationEvent[]): MigrationState {
 
       case 'phase_start': {
         const e = evt as PhaseStartEvent;
+        if (e.total_phases && e.total_phases > state.totalPhases) {
+          state.totalPhases = e.total_phases;
+        }
         phaseMap.set(e.phase_num, {
           num: e.phase_num,
           description: e.description,
@@ -124,6 +127,9 @@ function buildMigrationState(events: MigrationEvent[]): MigrationState {
             result: e.result,
             detail: e.detail,
           });
+          if (phase.resources.length > 200) {
+            phase.resources = phase.resources.slice(-200);
+          }
         }
         break;
       }
@@ -535,6 +541,8 @@ export function MigrationProgressView({ events, jobStatus }: Props) {
   const [modalData, setModalData] = useState<DetailModalData | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  const autoScrollRef = useRef(true);
+
   useEffect(() => {
     const next: Record<number, boolean> = { ...expanded };
     for (const p of migration.phases) {
@@ -544,6 +552,23 @@ export function MigrationProgressView({ events, jobStatus }: Props) {
     }
     setExpanded(next);
   }, [migration.phases.length]);
+
+  useEffect(() => {
+    if (autoScrollRef.current && scrollRef.current && migration.status === 'running') {
+      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    }
+  }, [migration.phases.length, events.length, migration.status]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      autoScrollRef.current = atBottom;
+    };
+    el.addEventListener('scroll', handleScroll);
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, []);
 
   const toggleExpand = useCallback((num: number) => {
     setExpanded((prev) => ({ ...prev, [num]: !prev[num] }));

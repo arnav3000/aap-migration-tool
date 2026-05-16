@@ -201,7 +201,7 @@ class JobService:
         job = self._jobs.get(job_id)
         if job is None:
             return None
-        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        q: asyncio.Queue = asyncio.Queue(maxsize=50_000)
         job._subscribers.append(q)
         return q
 

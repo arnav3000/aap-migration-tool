@@ -25,11 +25,11 @@ def serve(host: str, port: int, do_reload: bool) -> None:
         )
         raise SystemExit(1) from None
 
-    db_url = os.environ.get("MIGRATION_STATE_DB_PATH")
-    if not db_url:
-        db_url = "sqlite:///aap_bridge.db"
-        click.echo(f"MIGRATION_STATE_DB_PATH not set, defaulting to {db_url}")
-        os.environ["MIGRATION_STATE_DB_PATH"] = db_url
+    from aap_migration.api.dependencies import get_db_url
+
+    db_url = get_db_url()
+    os.environ.setdefault("MIGRATION_STATE_DB_PATH", db_url)
+    click.echo(f"Using database: {db_url}")
 
     click.echo(f"Starting AAP Bridge API on {host}:{port}")
 
