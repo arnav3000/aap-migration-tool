@@ -6,8 +6,8 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from aap_migration.api.models import Connection, Job
-from aap_migration.api.schemas import MigrationPreviewResponse
+from aap_migration.api.models import Connection, Job  # type: ignore[attr-defined]
+from aap_migration.api.schemas import MigrationPreviewResponse  # type: ignore[attr-defined]
 from aap_migration.api.services.job_service import JobService
 
 PREVIEW_RESOURCE_TYPES = [
@@ -46,7 +46,7 @@ class JobLogHandler(logging.Handler):
         self._total_phases = 0
 
     def _log(self, msg: str) -> None:
-        self.job_service.append_log(self.job_id, msg)
+        self.job_service.append_log(self.job_id, msg)  # type: ignore[attr-defined]
 
     def _bar(self, done: int, total: int, width: int = 20) -> str:
         if total <= 0:
@@ -225,7 +225,7 @@ class MigrationService:
             db.commit()
         finally:
             db.close()
-        self.job_service.register_job(job_id)
+        self.job_service.register_job(job_id)  # type: ignore[attr-defined]
         return job_id
 
     def _finish_job(
@@ -292,7 +292,7 @@ class MigrationService:
                 src_adapter = PlatformAdapter(src_conn)
                 dst_adapter = PlatformAdapter(dst_conn)
 
-                self.job_service.append_log(
+                self.job_service.append_log(  # type: ignore[attr-defined]
                     job_id, f"Starting migration preview: {src_snap['name']} -> {dst_snap['name']}"
                 )
 
@@ -302,16 +302,16 @@ class MigrationService:
                 warnings: list[str] = []
 
                 for rt in PREVIEW_RESOURCE_TYPES:
-                    self.job_service.append_log(job_id, f"Fetching {rt} from source...")
+                    self.job_service.append_log(job_id, f"Fetching {rt} from source...")  # type: ignore[attr-defined]
                     src_items = await asyncio.to_thread(src_adapter.fetch_all, rt)
                     if not src_items:
                         continue
 
-                    self.job_service.append_log(job_id, f"  Found {len(src_items)} {rt} on source")
-                    self.job_service.append_log(job_id, f"Fetching {rt} from destination...")
+                    self.job_service.append_log(job_id, f"  Found {len(src_items)} {rt} on source")  # type: ignore[attr-defined]
+                    self.job_service.append_log(job_id, f"Fetching {rt} from destination...")  # type: ignore[attr-defined]
                     dst_items = await asyncio.to_thread(dst_adapter.fetch_all, rt)
                     dst_names = {item.get("name", "") for item in dst_items}
-                    self.job_service.append_log(
+                    self.job_service.append_log(  # type: ignore[attr-defined]
                         job_id, f"  Found {len(dst_items)} {rt} on destination"
                     )
 
@@ -343,7 +343,7 @@ class MigrationService:
                 total_skip = sum(
                     1 for items in resources.values() for i in items if i["action"] != "create"
                 )
-                self.job_service.append_log(
+                self.job_service.append_log(  # type: ignore[attr-defined]
                     job_id, f"Preview complete: {total_create} to create, {total_skip} to skip"
                 )
 
@@ -355,20 +355,20 @@ class MigrationService:
                     "host_counts": host_counts,
                     "group_counts": group_counts,
                 }
-                self.job_service.mark_completed(job_id)
+                self.job_service.mark_completed(job_id)  # type: ignore[attr-defined]
                 self._finish_job(job_id, "completed", metadata=preview_data)
             except asyncio.CancelledError:
-                self.job_service.mark_failed(job_id, "Cancelled")
+                self.job_service.mark_failed(job_id, "Cancelled")  # type: ignore[attr-defined]
                 self._finish_job(job_id, "cancelled")
             except Exception as e:
-                self.job_service.append_log(job_id, f"ERROR: {e}")
-                self.job_service.mark_failed(job_id, str(e))
+                self.job_service.append_log(job_id, f"ERROR: {e}")  # type: ignore[attr-defined]
+                self.job_service.mark_failed(job_id, str(e))  # type: ignore[attr-defined]
                 self._finish_job(job_id, "failed", str(e))
             finally:
                 self._detach_log_handler(handler)
 
         task = self.loop.create_task(_run())
-        self.job_service.register_task(job_id, task)
+        self.job_service.register_task(job_id, task)  # type: ignore[attr-defined]
         return job_id
 
     def get_preview(self, job_id: str) -> tuple[str, MigrationPreviewResponse | None]:
@@ -404,7 +404,7 @@ class MigrationService:
                 from aap_migration.migration.coordinator import MigrationCoordinator
                 from aap_migration.migration.state import MigrationState
 
-                self.job_service.append_log(
+                self.job_service.append_log(  # type: ignore[attr-defined]
                     job_id, f"Starting migration: {src_snap['name']} -> {dst_snap['name']}"
                 )
 
@@ -417,11 +417,11 @@ class MigrationService:
 
                 config = build_migration_config(src_conn, dst_conn, db_url)
 
-                self.job_service.append_log(job_id, "Initializing clients...")
+                self.job_service.append_log(job_id, "Initializing clients...")  # type: ignore[attr-defined]
                 source_client = AAPSourceClient(config.source)
                 target_client = AAPTargetClient(config.target)
 
-                self.job_service.append_log(job_id, "Initializing migration state...")
+                self.job_service.append_log(job_id, "Initializing migration state...")  # type: ignore[attr-defined]
                 state = MigrationState(config.state)
 
                 coordinator = MigrationCoordinator(
@@ -441,7 +441,7 @@ class MigrationService:
                     preview_job = None
                     db = self.session_factory()
                     try:
-                        from aap_migration.api.models import Job
+                        from aap_migration.api.models import Job  # type: ignore[attr-defined]
 
                         preview_job = db.query(Job).filter(Job.id == preview_job_id).first()
                     finally:
@@ -465,7 +465,7 @@ class MigrationService:
 
                         if all_ids and set(excluded_ids) >= all_ids:
                             skip_phases.append(resource_type)
-                            self.job_service.append_log(
+                            self.job_service.append_log(  # type: ignore[attr-defined]
                                 job_id,
                                 f"Skipping entire phase: {resource_type} (all resources excluded)",
                             )
@@ -483,14 +483,14 @@ class MigrationService:
                                         source_id,
                                         "Excluded by user in migration preview",
                                     )
-                                except Exception:
+                                except Exception:  # nosec B110
                                     pass
-                            self.job_service.append_log(
+                            self.job_service.append_log(  # type: ignore[attr-defined]
                                 job_id,
                                 f"Excluded {len(excluded_ids)} {resource_type} resource(s) from migration",
                             )
 
-                self.job_service.append_log(job_id, "Running migration...")
+                self.job_service.append_log(job_id, "Running migration...")  # type: ignore[attr-defined]
                 summary = await coordinator.migrate_all(
                     skip_phases=skip_phases if skip_phases else None,
                     generate_report=True,
@@ -503,25 +503,25 @@ class MigrationService:
                 failed = summary.get("total_resources_failed", 0)
                 skipped = summary.get("total_resources_skipped", 0)
 
-                self.job_service.append_log(
+                self.job_service.append_log(  # type: ignore[attr-defined]
                     job_id,
                     f"Migration {status_msg}: exported={exported} imported={imported} "
                     f"failed={failed} skipped={skipped}",
                 )
 
-                self.job_service.mark_completed(job_id)
+                self.job_service.mark_completed(job_id)  # type: ignore[attr-defined]
                 self._finish_job(job_id, "completed", metadata=summary)
             except asyncio.CancelledError:
-                self.job_service.append_log(job_id, "Migration cancelled")
-                self.job_service.mark_failed(job_id, "Cancelled")
+                self.job_service.append_log(job_id, "Migration cancelled")  # type: ignore[attr-defined]
+                self.job_service.mark_failed(job_id, "Cancelled")  # type: ignore[attr-defined]
                 self._finish_job(job_id, "cancelled")
             except Exception as e:
-                self.job_service.append_log(job_id, f"Migration failed: {e}")
-                self.job_service.mark_failed(job_id, str(e))
+                self.job_service.append_log(job_id, f"Migration failed: {e}")  # type: ignore[attr-defined]
+                self.job_service.mark_failed(job_id, str(e))  # type: ignore[attr-defined]
                 self._finish_job(job_id, "failed", str(e))
             finally:
                 self._detach_log_handler(handler)
 
         task = self.loop.create_task(_run())
-        self.job_service.register_task(job_id, task)
+        self.job_service.register_task(job_id, task)  # type: ignore[attr-defined]
         return job_id

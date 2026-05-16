@@ -96,6 +96,7 @@ aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y
 ```
 
 **Characteristics:**
+
 - ✅ Zero configuration
 - ✅ No additional containers
 - ✅ Suitable for most migrations
@@ -119,6 +120,7 @@ aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y
 ```
 
 **Characteristics:**
+
 - ✅ Better performance for large migrations (100k+ resources)
 - ✅ Concurrent access support
 - ✅ Advanced querying capabilities
@@ -129,6 +131,7 @@ aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y
 ### Using SQLite (Recommended for most users)
 
 **Configuration in `.env`:**
+
 ```bash
 MIGRATION_STATE_DB_PATH=sqlite:///./database/migration_state.db
 ```
@@ -138,16 +141,19 @@ MIGRATION_STATE_DB_PATH=sqlite:///./database/migration_state.db
 ### Using PostgreSQL (For advanced users)
 
 **1. Start PostgreSQL container:**
+
 ```bash
 podman-compose --profile postgres up -d postgres
 ```
 
 **2. Update `.env`:**
+
 ```bash
 MIGRATION_STATE_DB_PATH=postgresql://aap_user:changeme@postgres:5432/aap_migration
 ```
 
 **3. Verify connection:**
+
 ```bash
 podman exec -it aap-bridge bash
 python3 -c "from sqlalchemy import create_engine; engine = create_engine('postgresql://aap_user:changeme@postgres:5432/aap_migration'); print(engine.connect())"
@@ -203,7 +209,7 @@ All migration data persists on the host via volume mounts:
 
 ## Building Custom Images
 
-### Build from specific branch:
+### Build from specific branch
 
 ```bash
 podman build \
@@ -213,7 +219,7 @@ podman build \
   .
 ```
 
-### Build with custom Python version:
+### Build with custom Python version
 
 ```bash
 podman build \
@@ -236,6 +242,7 @@ podman build \
 **Problem:** Database disappears when container restarts
 
 **Solution:** Verify volume mount with `:Z` flag for SELinux:
+
 ```bash
 -v $(pwd)/database:/app/aap-bridge/database:Z
 ```
@@ -245,18 +252,20 @@ podman build \
 **Problem:** Container can't write to mounted volumes
 
 **Solution:** Fix permissions:
+
 ```bash
 chmod 777 database logs exports xformed
 ```
 
 Or run container as root (not recommended for production):
+
 ```bash
 podman run --user root ...
 ```
 
 ## Advanced Usage
 
-### Running specific migration phases:
+### Running specific migration phases
 
 ```bash
 podman exec -it aap-bridge bash
@@ -274,7 +283,7 @@ aap-bridge import -y
 aap-bridge  # Launch TUI
 ```
 
-### Viewing logs in real-time:
+### Viewing logs in real-time
 
 ```bash
 # From host
@@ -284,7 +293,7 @@ tail -f ~/aap-migration/logs/migration.log
 podman exec aap-bridge tail -f /app/aap-bridge/logs/migration.log
 ```
 
-### Cleanup and start fresh:
+### Cleanup and start fresh
 
 ```bash
 # Stop and remove container
@@ -307,6 +316,7 @@ podman run ...
 2. **Use read-only mounts** for config: `-v $(pwd)/config:/app/aap-bridge/config:ro`
 3. **Run as non-root user** (default: appuser UID 1001)
 4. **Use secrets management** for production:
+
    ```bash
    podman secret create aap-source-token source-token.txt
    podman run --secret aap-source-token ...
@@ -314,5 +324,5 @@ podman run ...
 
 ## Support
 
-- Issues: https://github.com/arnav3000/aap-bridge-fork/issues
-- Documentation: https://github.com/arnav3000/aap-bridge-fork/blob/main/README.md
+- Issues: <https://github.com/arnav3000/aap-bridge-fork/issues>
+- Documentation: <https://github.com/arnav3000/aap-bridge-fork/blob/main/README.md>

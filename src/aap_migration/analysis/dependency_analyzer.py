@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -16,7 +17,7 @@ logger = get_logger(__name__)
 
 # Resource type foreign key mappings
 # Maps resource_type -> list of (field_name, target_resource_type)
-RESOURCE_DEPENDENCIES = {
+RESOURCE_DEPENDENCIES: dict[str, list[tuple[str, str | None]]] = {
     "job_templates": [
         ("project", "projects"),
         ("inventory", "inventories"),
@@ -58,7 +59,7 @@ class ResourceDependency:
     org_name: str
     required_by: list[dict[str, Any]] = field(default_factory=list)
 
-    def add_usage(self, resource_type: str, resource_id: int, resource_name: str):
+    def add_usage(self, resource_type: str, resource_id: int, resource_name: str) -> None:
         """Add a resource that requires this dependency."""
         self.required_by.append({"type": resource_type, "id": resource_id, "name": resource_name})
 
@@ -138,7 +139,7 @@ class CrossOrgDependencyAnalyzer:
         source_client: AAPSourceClient,
         max_concurrent_orgs: int = 5,
         max_concurrent_resources: int = 20,
-        progress_callback: callable = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
         db_service: Any = None,
         use_cache: bool = True,
         cache_ttl_hours: int = 24,
@@ -322,7 +323,7 @@ class CrossOrgDependencyAnalyzer:
             Tuple of (org_name, report)
         """
         async with self._org_semaphore:
-            if self.progress_callback:
+            if self.progress_callback is not None:
                 self.progress_callback(current, total, f"Analyzing {org_name}")
 
             logger.info(
@@ -388,11 +389,11 @@ class CrossOrgDependencyAnalyzer:
             message=f"Analyzing {len(org_names)} orgs (max {self.max_concurrent_orgs} parallel)",
         )
 
-        if self.progress_callback:
+        if self.progress_callback is not None:
             self.progress_callback(0, len(org_names), "Starting analysis...")
 
         # Analyze orgs in parallel with progress tracking
-        org_reports = {}
+        org_reports: dict[str, OrgDependencyReport] = {}
 
         # Create tasks for parallel execution
         tasks = [
@@ -405,7 +406,7 @@ class CrossOrgDependencyAnalyzer:
 
         # Collect results
         for result in results:
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 logger.error(
                     "dependency_analysis_task_exception",
                     error=str(result),
@@ -432,6 +433,7 @@ class CrossOrgDependencyAnalyzer:
         # Calculate migration order
         from aap_migration.analysis.graph import (
             group_into_phases,
+            group_into_phases_with_cycles,
             topological_sort,
         )
 
@@ -440,8 +442,7 @@ class CrossOrgDependencyAnalyzer:
             migration_order = topological_sort(graph)
             migration_phases = group_into_phases(graph, migration_order)
         except ValueError:
-            migration_order = sorted(graph.keys())
-            migration_phases = [migration_order]
+            migration_order, migration_phases = group_into_phases_with_cycles(graph)
 
         # Calculate quality summary
         total_duplicates = sum(
@@ -539,9 +540,9 @@ class CrossOrgDependencyAnalyzer:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Collect results
-        resources = {}
+        resources: dict[str, list[dict[str, Any]]] = {}
         for result in results:
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 logger.error(
                     "dependency_analysis_resource_exception", org_name=org_name, error=str(result)
                 )
@@ -565,7 +566,7 @@ class CrossOrgDependencyAnalyzer:
             "notification_templates",
         ]
 
-        resources = {}
+        resources: dict[str, list[dict[str, Any]]] = {}
         for rtype in global_resource_types:
             try:
                 endpoint = f"{rtype}/"
@@ -608,7 +609,7 @@ class CrossOrgDependencyAnalyzer:
                         continue
 
                     # Get target resource org
-                    target_org = await self._get_resource_org(target_type, target_id)
+                    target_org = await self._get_resource_org(target_type, int(target_id))
 
                     if target_org and target_org != org_name:
                         # Cross-org dependency found!
@@ -629,7 +630,9 @@ class CrossOrgDependencyAnalyzer:
                         if existing:
                             # Add to required_by
                             existing.add_usage(
-                                resource_type, resource["id"], resource.get("name", "unknown")
+                                resource_type,
+                                int(resource["id"]),
+                                str(resource.get("name", "unknown")),
                             )
                         else:
                             # New dependency
@@ -641,7 +644,9 @@ class CrossOrgDependencyAnalyzer:
                                 org_name=target_org,
                             )
                             dep.add_usage(
-                                resource_type, resource["id"], resource.get("name", "unknown")
+                                resource_type,
+                                int(resource["id"]),
+                                str(resource.get("name", "unknown")),
                             )
                             cross_org_deps[target_org].append(dep)
 
@@ -691,14 +696,16 @@ class CrossOrgDependencyAnalyzer:
 
         if resource_type in self._resource_cache:
             if resource_id in self._resource_cache[resource_type]:
-                return self._resource_cache[resource_type][resource_id].get(
-                    "name", f"{resource_type}_{resource_id}"
+                return str(
+                    self._resource_cache[resource_type][resource_id].get(
+                        "name", f"{resource_type}_{resource_id}"
+                    )
                 )
 
         try:
             endpoint = f"{resource_type}/{resource_id}/"
             resource = await self.client.get(endpoint)
-            return resource.get("name", f"{resource_type}_{resource_id}")
+            return str(resource.get("name", f"{resource_type}_{resource_id}"))
         except Exception:
             return f"{resource_type}_{resource_id}"
 
@@ -710,7 +717,7 @@ class CrossOrgDependencyAnalyzer:
         try:
             endpoint = f"organizations/{org_id}/"
             org = await self.client.get(endpoint)
-            self._org_cache[org_id] = org["name"]
-            return org["name"]
+            self._org_cache[org_id] = str(org["name"])
+            return str(org["name"])
         except Exception:
             return f"org_{org_id}"

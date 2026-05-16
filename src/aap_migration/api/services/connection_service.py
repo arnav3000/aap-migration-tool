@@ -70,6 +70,11 @@ class ConnectionService:
         return True
 
     @staticmethod
+    def _auth_scheme(conn: Connection) -> str:
+        """AWX uses Token auth, AAP 2.5+ uses Bearer."""
+        return "Token" if getattr(conn, "type", "awx") == "awx" else "Bearer"
+
+    @staticmethod
     def build_instance_config(conn: Connection) -> AAPInstanceConfig:
         return AAPInstanceConfig(
             url=conn.url,
@@ -81,26 +86,30 @@ class ConnectionService:
     @staticmethod
     def build_source_client(conn: Connection) -> AAPSourceClient:
         config = ConnectionService.build_instance_config(conn)
-        return AAPSourceClient(config)
+        return AAPSourceClient(config, auth_scheme=ConnectionService._auth_scheme(conn))
 
     @staticmethod
     def build_target_client(conn: Connection) -> AAPTargetClient:
         config = ConnectionService.build_instance_config(conn)
-        return AAPTargetClient(config)
+        return AAPTargetClient(config, auth_scheme=ConnectionService._auth_scheme(conn))
 
     @staticmethod
     async def test_connection(conn: Connection) -> tuple[bool, str | None]:
-        """Test connectivity to an AAP instance. Returns (ok, error_message)."""
+        """Test connectivity AND authentication to an AAP instance.
+
+        Uses /me/ which requires valid auth, unlike /ping/ which is public.
+        """
         try:
             config = ConnectionService.build_instance_config(conn)
+            scheme = ConnectionService._auth_scheme(conn)
             if conn.role in ("target", "destination"):
-                target = AAPTargetClient(config)
-                async with target:
-                    await target.get_version()
+                client: AAPSourceClient | AAPTargetClient = AAPTargetClient(
+                    config, auth_scheme=scheme
+                )
             else:
-                source = AAPSourceClient(config)
-                async with source:
-                    await source.get_version()
+                client = AAPSourceClient(config, auth_scheme=scheme)
+            async with client:
+                await client.get("me/")
             return True, None
         except Exception as exc:
             return False, str(exc)

@@ -14,8 +14,10 @@ export function Jobs() {
   const navigate = useNavigate();
 
   const loadJobs = useCallback(async () => {
-    const data = await api.listJobs();
-    setJobs(data as Job[]);
+    try {
+      const data = await api.listJobs();
+      setJobs(data as Job[]);
+    } catch { /* API may be restarting */ }
   }, []);
 
   useEffect(() => {
@@ -26,6 +28,7 @@ export function Jobs() {
 
   const statusColor = (status: string) => {
     switch (status) {
+      case 'pending': return 'grey';
       case 'running': return 'blue';
       case 'completed': return 'green';
       case 'failed': return 'red';
@@ -54,6 +57,8 @@ export function Jobs() {
       <Table aria-label="Jobs" variant="compact">
         <Thead>
           <Tr>
+            <Th width={10}>#</Th>
+            <Th>Name</Th>
             <Th>Type</Th>
             <Th>Status</Th>
             <Th>Started</Th>
@@ -69,6 +74,8 @@ export function Jobs() {
               onRowClick={() => navigate(`/jobs/${job.id}`)}
               style={{ cursor: 'pointer' }}
             >
+              <Td><strong>{job.seq_id ?? '—'}</strong></Td>
+              <Td>{job.name || job.type}</Td>
               <Td>{job.type}</Td>
               <Td>
                 <Label color={statusColor(job.status)}>{job.status}</Label>
@@ -84,7 +91,7 @@ export function Jobs() {
           ))}
           {jobs.length === 0 && (
             <Tr>
-              <Td colSpan={5}>No jobs yet. Run an operation from the Operations page.</Td>
+              <Td colSpan={7}>No jobs yet. Start an analysis or migration to see jobs here.</Td>
             </Tr>
           )}
         </Tbody>

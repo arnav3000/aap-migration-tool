@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Component, type ReactNode } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, useLocation, Link } from 'react-router-dom';
 import {
   Page,
@@ -19,12 +19,39 @@ import {
   ToolbarContent,
   ToolbarGroup,
   ToolbarItem,
+  Alert,
+  Button,
 } from '@patternfly/react-core';
 import { Dropdown, DropdownItem, KebabToggle } from '@patternfly/react-core/deprecated';
 import BarsIcon from '@patternfly/react-icons/dist/esm/icons/bars-icon';
 import QuestionCircleIcon from '@patternfly/react-icons/dist/esm/icons/question-circle-icon';
 import SunIcon from '@patternfly/react-icons/dist/esm/icons/sun-icon';
 import MoonIcon from '@patternfly/react-icons/dist/esm/icons/moon-icon';
+
+class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 48 }}>
+          <Alert variant="danger" isInline title="Application Error">
+            <p>Something went wrong. Please try refreshing the page.</p>
+            <pre style={{ fontSize: '0.8em', whiteSpace: 'pre-wrap', marginTop: 12, maxHeight: 300, overflow: 'auto' }}>
+              {this.state.error.message}
+              {'\n\n'}
+              {this.state.error.stack}
+            </pre>
+            <Button variant="primary" onClick={() => { this.setState({ error: null }); window.location.reload(); }} style={{ marginTop: 12 }}>
+              Reload Page
+            </Button>
+          </Alert>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function useTheme() {
   const [dark, setDark] = useState(() => {
@@ -54,12 +81,14 @@ import { Jobs } from './pages/Jobs';
 import { JobDetail } from './pages/JobDetail';
 import { Analysis } from './pages/Analysis';
 import { Sizing } from './pages/Sizing';
+import { Planner } from './pages/Planner';
+import { PlanDetail } from './pages/PlanDetail';
 
 function AppNav() {
   const location = useLocation();
   const path = location.pathname;
 
-  const isActive = (route: string) => route === '/' ? path === '/' : path.startsWith(route);
+  const isActive = (route: string) => path.startsWith(route);
 
   const [migrationOpen, setMigrationOpen] = useState(
     () => JSON.parse(localStorage.getItem('nav-migration-open') ?? 'true')
@@ -83,43 +112,46 @@ function AppNav() {
   return (
     <Nav>
       <NavList>
-        <NavItem isActive={isActive('/')}>
-          <NavLink to="/" end>Connections</NavLink>
+        <NavItem isActive={isActive('/jobs')}>
+          <NavLink to="/jobs">Jobs</NavLink>
         </NavItem>
-
-        <NavExpandable
-          title="Migration"
-          isExpanded={migrationOpen}
-          onExpand={toggleMigration}
-          isActive={isActive('/migrate') || isActive('/operations') || isActive('/browse')}
-        >
-          <NavItem isActive={isActive('/migrate')}>
-            <NavLink to="/migrate">Migrate</NavLink>
-          </NavItem>
-          <NavItem isActive={isActive('/operations')}>
-            <NavLink to="/operations">Operations</NavLink>
-          </NavItem>
-          <NavItem isActive={isActive('/browse')}>
-            <NavLink to="/browse">Object Browser</NavLink>
-          </NavItem>
-        </NavExpandable>
 
         <NavExpandable
           title="Planning"
           isExpanded={planningOpen}
           onExpand={togglePlanning}
-          isActive={isActive('/analysis') || isActive('/sizing')}
+          isActive={isActive('/analysis') || isActive('/sizing') || isActive('/browse')}
         >
           <NavItem isActive={isActive('/analysis')}>
             <NavLink to="/analysis">Dependency Analysis</NavLink>
+          </NavItem>
+          <NavItem isActive={isActive('/browse')}>
+            <NavLink to="/browse">Object Browser</NavLink>
           </NavItem>
           <NavItem isActive={isActive('/sizing')}>
             <NavLink to="/sizing">Sizing Calculator</NavLink>
           </NavItem>
         </NavExpandable>
 
-        <NavItem isActive={isActive('/jobs')}>
-          <NavLink to="/jobs">Jobs</NavLink>
+        <NavExpandable
+          title="Migration"
+          isExpanded={migrationOpen}
+          onExpand={toggleMigration}
+          isActive={isActive('/migrate') || isActive('/operations') || isActive('/planner')}
+        >
+          <NavItem isActive={isActive('/planner')}>
+            <NavLink to="/planner">Migration Planner</NavLink>
+          </NavItem>
+          <NavItem isActive={isActive('/migrate')}>
+            <NavLink to="/migrate">Migrate</NavLink>
+          </NavItem>
+          <NavItem isActive={isActive('/operations')}>
+            <NavLink to="/operations">Operations</NavLink>
+          </NavItem>
+        </NavExpandable>
+
+        <NavItem isActive={isActive('/settings')}>
+          <NavLink to="/settings">Settings</NavLink>
         </NavItem>
       </NavList>
     </Nav>
@@ -202,20 +234,25 @@ export function App() {
 
   return (
     <BrowserRouter>
-      <Page header={header} sidebar={sidebar} isManagedSidebar={false}>
-        <PageSection>
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/operations" element={<Operations />} />
-            <Route path="/migrate" element={<Migrate />} />
-            <Route path="/browse" element={<ObjectBrowser />} />
-            <Route path="/analysis" element={<Analysis />} />
-            <Route path="/sizing" element={<Sizing />} />
-            <Route path="/jobs" element={<Jobs />} />
-            <Route path="/jobs/:id" element={<JobDetail />} />
-          </Routes>
-        </PageSection>
-      </Page>
+      <AppErrorBoundary>
+        <Page header={header} sidebar={sidebar} isManagedSidebar={false}>
+          <PageSection>
+            <Routes>
+              <Route path="/" element={<Jobs />} />
+              <Route path="/jobs" element={<Jobs />} />
+              <Route path="/jobs/:id" element={<JobDetail />} />
+              <Route path="/analysis" element={<Analysis />} />
+              <Route path="/browse" element={<ObjectBrowser />} />
+              <Route path="/sizing" element={<Sizing />} />
+              <Route path="/planner" element={<Planner />} />
+              <Route path="/planner/:id" element={<PlanDetail />} />
+              <Route path="/migrate" element={<Migrate />} />
+              <Route path="/operations" element={<Operations />} />
+              <Route path="/settings" element={<Dashboard />} />
+            </Routes>
+          </PageSection>
+        </Page>
+      </AppErrorBoundary>
     </BrowserRouter>
   );
 }

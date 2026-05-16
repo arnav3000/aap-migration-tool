@@ -4,8 +4,6 @@ This module provides functions to validate AAP version compatibility
 between source and target instances for safe migrations.
 """
 
-from typing import Tuple
-
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -17,7 +15,7 @@ class VersionValidationError(Exception):
     pass
 
 
-def parse_version(version_string: str) -> Tuple[int, int, int]:
+def parse_version(version_string: str) -> tuple[int, int, int]:
     """Parse a version string into major, minor, patch components.
 
     Args:
@@ -152,7 +150,7 @@ def get_version_info(version_string: str) -> dict[str, int | str]:
         logger.warning(
             "version_info_parse_failed",
             version_string=version_string,
-            message="Failed to parse version string, returning empty info"
+            message="Failed to parse version string, returning empty info",
         )
         return {
             "major": 0,

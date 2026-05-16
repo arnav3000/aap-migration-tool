@@ -46,7 +46,7 @@ def generate_temp_ssh_key() -> str:
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    return pem.decode("utf-8")
+    return str(pem.decode("utf-8"))
 
 
 def generate_temp_encrypted_ssh_key(passphrase: str) -> str:
@@ -71,7 +71,7 @@ def generate_temp_encrypted_ssh_key(passphrase: str) -> str:
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.BestAvailableEncryption(passphrase.encode("utf-8")),
     )
-    return pem.decode("utf-8")
+    return str(pem.decode("utf-8"))
 
 
 # =============================================================================
@@ -103,6 +103,14 @@ class SkipResourceError(Exception):
         self.resource_type = resource_type
         self.source_id = source_id
         self.missing_dependency = missing_dependency
+
+
+def coerce_source_id(data: dict[str, Any]) -> int:
+    """Best-effort integer source id from export/transform payloads."""
+    raw = data.get("_source_id") or data.get("id")
+    if raw is None:
+        return -1
+    return int(raw)
 
 
 class DataTransformer:
@@ -228,6 +236,16 @@ class DataTransformer:
             "skipped_count": 0,
         }
 
+    async def populate_target_id_from_target(
+        self,
+        data: dict[str, Any],
+        target_client: Any,
+        state: MigrationState,
+        source_id: int,
+    ) -> dict[str, Any]:
+        """Optional hook for transformers that resolve target IDs before import."""
+        return data
+
     def transform_resource(
         self,
         resource_type: str,
@@ -327,7 +345,7 @@ class DataTransformer:
             # No dependencies defined for this resource type
             return
 
-        source_id = data.get("_source_id") or data.get("id")
+        source_id = coerce_source_id(data)
 
         for field, dep_resource_type in self.DEPENDENCIES.items():
             dep_source_id = data.get(field)
@@ -1057,9 +1075,7 @@ class CredentialTransformer(DataTransformer):
                     error=str(e),
                 )
 
-    def _apply_credential_type_field_mappings(
-        self, data: dict[str, Any], source_id: int
-    ) -> None:
+    def _apply_credential_type_field_mappings(self, data: dict[str, Any], source_id: int) -> None:
         """Apply credential type-specific field mappings for AAP version compatibility.
 
         Handles schema differences between AAP versions for specific credential types.
@@ -1085,7 +1101,7 @@ class CredentialTransformer(DataTransformer):
             mapping_info = self.state.get_id_mapping("credential_types", cred_type_id)
             if mapping_info:
                 cred_type_name = mapping_info.get("source_name")
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
         # If we couldn't get the name from state, try summary_fields
@@ -1104,14 +1120,14 @@ class CredentialTransformer(DataTransformer):
 
             # AAP 2.6 doesn't accept these fields - remove them
             fields_to_remove = [
-                "api_version",      # API version selection removed in 2.6
-                "namespace",        # Namespace handling changed
-                "role_id",          # AppRole auth changed
-                "secret_id",        # AppRole auth changed
-                "default_auth_path", # Auth path handling changed
+                "api_version",  # API version selection removed in 2.6
+                "namespace",  # Namespace handling changed
+                "role_id",  # AppRole auth changed
+                "secret_id",  # AppRole auth changed
+                "default_auth_path",  # Auth path handling changed
                 "kubernetes_role",  # Kubernetes auth changed
-                "username",         # User auth changed
-                "password",         # User auth changed
+                "username",  # User auth changed
+                "password",  # User auth changed
             ]
 
             for field in fields_to_remove:
@@ -1127,8 +1143,8 @@ class CredentialTransformer(DataTransformer):
                     source_name=data.get("name"),
                     removed_fields=removed_fields,
                     message="Removed incompatible HashiCorp Vault fields for AAP 2.6 - "
-                            "credential will be created with basic auth (url, token, cacert). "
-                            "Advanced auth methods (AppRole, Kubernetes, namespace) must be reconfigured manually.",
+                    "credential will be created with basic auth (url, token, cacert). "
+                    "Advanced auth methods (AppRole, Kubernetes, namespace) must be reconfigured manually.",
                 )
 
     def _apply_specific_transformations(
@@ -1147,7 +1163,7 @@ class CredentialTransformer(DataTransformer):
         if self.external_credential_type_ids is None:
             self._load_external_credential_types()
 
-        source_id = data.get("_source_id") or data.get("id")
+        source_id = coerce_source_id(data)
 
         # Check if credential depends on an external credential type that is NOT mapped
         cred_type_id = data.get("credential_type")
@@ -1830,7 +1846,7 @@ class CredentialTypeTransformer(DataTransformer):
 
             # Map legacy names to new names (e.g. CyberArk)
             name = data.get("name")
-            new_name = self._get_name_mapping(name)
+            new_name = self._get_name_mapping(str(name or ""))
 
             if name != new_name:
                 logger.info(
@@ -2095,7 +2111,7 @@ class ScheduleTransformer(DataTransformer):
         if not self.state:
             return
 
-        source_id = data.get("_source_id") or data.get("id")
+        source_id = coerce_source_id(data)
         ujt_id = data.get("unified_job_template")
 
         if not ujt_id:
@@ -2144,7 +2160,8 @@ class ScheduleTransformer(DataTransformer):
             # Example: /api/v2/job_templates/14/ → "job_templates"
             # Example: /api/v2/projects/8/ → "projects"
             import re
-            match = re.search(r'/api/v2/([^/]+)/\d+/', ujt_url)
+
+            match = re.search(r"/api/v2/([^/]+)/\d+/", ujt_url)
             if match:
                 # Extract resource type from URL (already plural in URL)
                 url_resource_type = match.group(1)
@@ -2398,17 +2415,19 @@ class ApplicationTransformer(DataTransformer):
         # Handle client secret
         # AAP masks secrets with "************" when exporting, but we need to detect
         # if a secret exists and mark it for regeneration
-        if 'client_secret' in data and data['client_secret']:
+        if "client_secret" in data and data["client_secret"]:
             # Redact the actual secret value (even if already masked)
-            data['client_secret'] = "***REDACTED_WILL_BE_REGENERATED***"
+            data["client_secret"] = "***REDACTED_WILL_BE_REGENERATED***"  # nosec B105
             # Mark for secret regeneration during import
-            data['_requires_new_secret'] = True
+            data["_requires_new_secret"] = True
 
         # Add migration notes
-        data['_migration_notes'] = {
-            'client_secret_action': 'will_be_auto_generated' if data.get('_requires_new_secret') else 'none',
-            'redirect_uris_action': 'review_for_environment',
-            'external_systems_action': 'update_with_new_client_id_secret'
+        data["_migration_notes"] = {
+            "client_secret_action": "will_be_auto_generated"
+            if data.get("_requires_new_secret")
+            else "none",
+            "redirect_uris_action": "review_for_environment",
+            "external_systems_action": "update_with_new_client_id_secret",
         }
 
         return data
@@ -2427,14 +2446,27 @@ class SettingsTransformer(DataTransformer):
 
     # Patterns for identifying sensitive settings
     SENSITIVE_PATTERNS = [
-        'PASSWORD', 'SECRET', 'KEY', 'TOKEN', 'PRIVATE',
-        'CLIENT_SECRET', 'BIND_PASSWORD', 'SOCIAL_AUTH'
+        "PASSWORD",
+        "SECRET",
+        "KEY",
+        "TOKEN",
+        "PRIVATE",
+        "CLIENT_SECRET",
+        "BIND_PASSWORD",
+        "SOCIAL_AUTH",
     ]
 
     # Patterns for environment-specific settings
     ENVIRONMENT_PATTERNS = [
-        'URL', 'URI', 'HOST', 'PATH', 'DOMAIN', 'SERVER',
-        'EMAIL_HOST', 'LDAP', 'SMTP'  # LDAP catches all LDAP settings (schema can differ between AAP versions)
+        "URL",
+        "URI",
+        "HOST",
+        "PATH",
+        "DOMAIN",
+        "SERVER",
+        "EMAIL_HOST",
+        "LDAP",
+        "SMTP",  # LDAP catches all LDAP settings (schema can differ between AAP versions)
     ]
 
     def _apply_specific_transformations(
@@ -2455,47 +2487,47 @@ class SettingsTransformer(DataTransformer):
             Categorized settings data
         """
         # Extract metadata
-        metadata = data.pop('_migration_metadata', {})
+        metadata = data.pop("_migration_metadata", {})
 
         # Categorize settings
         categorized = {
-            'safe_to_copy': {},
-            'review_required': {},
-            'sensitive': {},
-            '_migration_metadata': metadata
+            "safe_to_copy": {},
+            "review_required": {},
+            "sensitive": {},
+            "_migration_metadata": metadata,
         }
 
         for key, value in data.items():
             # Skip internal fields
-            if key.startswith('_'):
+            if key.startswith("_"):
                 continue
 
             # Check if sensitive
             if any(pattern in key for pattern in self.SENSITIVE_PATTERNS):
-                categorized['sensitive'][key] = {
-                    '_original_value_redacted': True,
-                    '_action': 'provide_new_value_manually',
-                    '_placeholder': f'***PROVIDE_{key}***'
+                categorized["sensitive"][key] = {
+                    "_original_value_redacted": True,
+                    "_action": "provide_new_value_manually",
+                    "_placeholder": f"***PROVIDE_{key}***",
                 }
             # Check if environment-specific
             elif any(pattern in key for pattern in self.ENVIRONMENT_PATTERNS):
-                categorized['review_required'][key] = {
-                    'source_value': value,
-                    '_action': 'review_and_adapt_for_target_environment'
+                categorized["review_required"][key] = {
+                    "source_value": value,
+                    "_action": "review_and_adapt_for_target_environment",
                 }
             # Safe to copy
             else:
-                categorized['safe_to_copy'][key] = value
+                categorized["safe_to_copy"][key] = value
 
         # Add summary
-        categorized['_summary'] = {
-            'total_settings': len(data),
-            'safe_to_copy_count': len(categorized['safe_to_copy']),
-            'review_required_count': len(categorized['review_required']),
-            'sensitive_count': len(categorized['sensitive']),
-            'auto_import_percentage': round(
-                len(categorized['safe_to_copy']) / len(data) * 100, 1
-            ) if len(data) > 0 else 0
+        categorized["_summary"] = {
+            "total_settings": len(data),
+            "safe_to_copy_count": len(categorized["safe_to_copy"]),
+            "review_required_count": len(categorized["review_required"]),
+            "sensitive_count": len(categorized["sensitive"]),
+            "auto_import_percentage": round(len(categorized["safe_to_copy"]) / len(data) * 100, 1)
+            if len(data) > 0
+            else 0,
         }
 
         return categorized

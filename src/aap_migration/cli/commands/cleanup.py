@@ -9,6 +9,7 @@ This module provides cleanup operations for:
 
 import asyncio
 from collections.abc import Callable
+from typing import Any, cast
 
 import click
 
@@ -262,7 +263,7 @@ async def fetch_all_resources_parallel(
     total_pages = (total_count + page_size - 1) // page_size
 
     if total_pages <= 1:
-        return first_page.get("results", [])
+        return cast(list[dict[Any, Any]], first_page.get("results", []))
 
     logger.debug(
         f"Fetching {total_pages} pages concurrently (concurrency={concurrency}) "
@@ -272,11 +273,11 @@ async def fetch_all_resources_parallel(
     # Step 2: Fetch remaining pages concurrently
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def fetch_page(page_num: int) -> dict:
+    async def fetch_page(page_num: int) -> dict[Any, Any]:
         async with semaphore:
             # Apply retry logic for gateway errors
             @retry_decorator
-            async def _fetch():
+            async def _fetch() -> dict[str, Any]:
                 return await client.get(
                     endpoint,
                     params={
@@ -285,7 +286,7 @@ async def fetch_all_resources_parallel(
                     },
                 )
 
-            return await _fetch()
+            return cast(dict[Any, Any], await _fetch())
 
     # Fetch pages 2-N in parallel
     tasks = [fetch_page(p) for p in range(2, total_pages + 1)]
@@ -297,7 +298,7 @@ async def fetch_all_resources_parallel(
         all_resources.extend(result.get("results", []))
 
     logger.debug(f"Fetched {len(all_resources)} resources from {total_pages} pages")
-    return all_resources
+    return cast(list[dict[Any, Any]], all_resources)
 
 
 async def fetch_counts_parallel(
@@ -437,8 +438,11 @@ async def cancel_all_jobs(
         semaphore = asyncio.Semaphore(max_concurrent)
 
         async def cancel_with_semaphore(
-            job, semaphore=semaphore, display_name=display_name, endpoint=endpoint
-        ):
+            job: dict[str, Any],
+            semaphore: asyncio.Semaphore = semaphore,
+            display_name: str = display_name,
+            endpoint: str = endpoint,
+        ) -> bool:
             """Cancel a single job with proper error handling.
 
             Uses the new client.cancel_job() method which:
@@ -716,7 +720,7 @@ async def ensure_no_active_jobs(
 
     logger.info("Ensuring no active jobs exist before import...")
 
-    summary = {
+    summary: dict[str, Any] = {
         "total_active": 0,
         "total_cancelled": 0,
         "total_deleted": 0,
@@ -813,7 +817,7 @@ async def ensure_no_active_jobs(
                         },
                     )
                     total_remaining += response.get("count", 0)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
             if total_remaining == 0:
@@ -862,7 +866,7 @@ async def ensure_no_active_jobs(
                     },
                 )
                 summary["still_running"] += response.get("count", 0)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     logger.info(
@@ -1575,7 +1579,7 @@ def cleanup(
                 # Helper function to create progress callback for live updates
                 def create_progress_callback(
                     progress_display: MigrationProgressDisplay, resource_type: str
-                ):
+                ) -> Callable[[int, int, int], None]:
                     """Create a callback that updates progress after each deletion.
 
                     Args:

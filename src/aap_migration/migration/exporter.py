@@ -6,7 +6,8 @@ that use generators for memory-efficient extraction of large datasets.
 
 import asyncio
 from collections.abc import AsyncGenerator
-from typing import Any, Protocol, runtime_checkable
+from datetime import UTC
+from typing import Any, Protocol, cast, runtime_checkable
 
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.exceptions import APIError
@@ -79,6 +80,10 @@ class ExporterProtocol(Protocol):
         Args:
             resume_from_id: Maximum source_id that was already exported
         """
+        ...
+
+    def get_stats(self) -> dict[str, int]:
+        """Return exporter statistics snapshot."""
         ...
 
 
@@ -199,7 +204,7 @@ class ResourceExporter:
         for attempt in range(max_retries):
             try:
                 response = await self.client.get(endpoint, params=params)
-                return response.get("count", 0)
+                return int(response.get("count", 0))
             except APIError as e:
                 # Retry on server errors (500, 502, 503, 504)
                 if hasattr(e, "status_code") and e.status_code in (500, 502, 503, 504):
@@ -1102,9 +1107,7 @@ class HostInventoryMembershipExporter(ResourceExporter):
 
         # Step 2: Filter to only regular inventories (skip smart/constructed)
         regular_inventories = [
-            inv
-            for inv in all_inventories
-            if inv.get("kind") in ("", None, "regular")
+            inv for inv in all_inventories if inv.get("kind") in ("", None, "regular")
         ]
 
         logger.info(
@@ -1169,7 +1172,7 @@ class HostInventoryMembershipExporter(ResourceExporter):
         logger.info(
             "host_inventory_memberships_export_complete",
             total_memberships=total_memberships,
-            unique_hosts=len(set(h for h, _ in seen_pairs)),
+            unique_hosts=len({h for h, _ in seen_pairs}),
             message=f"Exported {total_memberships} host-inventory membership relationships",
         )
 
@@ -1435,9 +1438,9 @@ class CredentialInputSourceExporter(ResourceExporter):
                     source_cred = self._credential_cache[source_cred_id]
                     source_cred_type_id = source_cred.get("credential_type")
                     if source_cred_type_id and source_cred_type_id in self._credential_type_cache:
-                        input_source[
-                            "source_credential_type_details"
-                        ] = self._credential_type_cache[source_cred_type_id]
+                        input_source["source_credential_type_details"] = (
+                            self._credential_type_cache[source_cred_type_id]
+                        )
 
             yield input_source
 
@@ -1465,9 +1468,7 @@ class ProjectExporter(ResourceExporter):
         ):
             # Fetch schedules
             try:
-                schedules_response = await self.client.get(
-                    f"projects/{project['id']}/schedules/"
-                )
+                schedules_response = await self.client.get(f"projects/{project['id']}/schedules/")
                 schedules = schedules_response.get("results", [])
                 if schedules:
                     project["schedules"] = schedules
@@ -1595,9 +1596,7 @@ class JobTemplateExporter(ResourceExporter):
             # Fetch survey spec regardless of enabled state
             # Disabled surveys still have definitions that should be preserved
             try:
-                survey_spec = await self.client.get(
-                    f"job_templates/{template['id']}/survey_spec/"
-                )
+                survey_spec = await self.client.get(f"job_templates/{template['id']}/survey_spec/")
                 # Only store if survey has actual questions
                 if survey_spec and survey_spec.get("spec"):
                     template["survey_spec"] = survey_spec
@@ -1720,9 +1719,7 @@ class JobTemplateExporter(ResourceExporter):
             # Fetch survey spec regardless of enabled state
             # Disabled surveys still have definitions that should be preserved
             try:
-                survey_spec = await self.client.get(
-                    f"job_templates/{template['id']}/survey_spec/"
-                )
+                survey_spec = await self.client.get(f"job_templates/{template['id']}/survey_spec/")
                 # Only store if survey has actual questions
                 if survey_spec and survey_spec.get("spec"):
                     template["survey_spec"] = survey_spec
@@ -1887,7 +1884,9 @@ class WorkflowExporter(ResourceExporter):
         Yields:
             Workflow dictionaries with 'nodes' field containing workflow nodes
         """
-        logger.info("parallel_export_workflows_with_nodes", max_concurrent_pages=max_concurrent_pages)
+        logger.info(
+            "parallel_export_workflows_with_nodes", max_concurrent_pages=max_concurrent_pages
+        )
 
         # Use base class parallel export to get workflows
         async for workflow in super().export_parallel(
@@ -2365,8 +2364,8 @@ class ApplicationExporter(ResourceExporter):
             filters=filters,
         ):
             # Mark if application has a client secret (for transformer)
-            if 'client_secret' in app and app['client_secret']:
-                app['_has_client_secret'] = True
+            if "client_secret" in app and app["client_secret"]:
+                app["_has_client_secret"] = True
                 # Keep the secret for now - transformer will handle redaction
                 # This allows users to optionally copy secrets if they want
 
@@ -2449,17 +2448,17 @@ class SettingsExporter(ResourceExporter):
 
             if not isinstance(settings_data, dict):
                 logger.warning(
-                    "settings_export_unexpected_format",
-                    data_type=type(settings_data).__name__
+                    "settings_export_unexpected_format", data_type=type(settings_data).__name__
                 )
                 return
 
             # Add metadata for transformer
-            from datetime import datetime, timezone
-            settings_data['_migration_metadata'] = {
-                'export_timestamp': datetime.now(timezone.utc).isoformat(),
-                'source_url': str(self.client.base_url),
-                'total_settings': len(settings_data)
+            from datetime import datetime
+
+            settings_data["_migration_metadata"] = {
+                "export_timestamp": datetime.now(UTC).isoformat(),
+                "source_url": str(self.client.base_url),
+                "total_settings": len(settings_data),
             }
 
             # Yield as a single resource (transformer will categorize)
@@ -2467,9 +2466,7 @@ class SettingsExporter(ResourceExporter):
 
         except APIError as e:
             logger.error(
-                "settings_export_failed",
-                error=str(e),
-                status_code=getattr(e, 'status_code', None)
+                "settings_export_failed", error=str(e), status_code=getattr(e, "status_code", None)
             )
             # Don't fail the entire export if settings fail
             return
@@ -2531,4 +2528,7 @@ def create_exporter(
             f"Available exporters: {', '.join(sorted(exporters.keys()))}"
         )
 
-    return exporter_class(client, state, performance_config)
+    return cast(
+        ExporterProtocol,
+        exporter_class(client, state, performance_config),
+    )

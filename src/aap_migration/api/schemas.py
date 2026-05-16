@@ -83,6 +83,7 @@ class JobResponse(BaseModel):
 class MigrationPreviewRequest(BaseModel):
     source_id: str
     destination_id: str
+    organizations: list[int] | None = None
 
 
 class MigrationRunRequest(BaseModel):
@@ -90,6 +91,8 @@ class MigrationRunRequest(BaseModel):
     destination_id: str
     job_id: str
     exclusions: dict[str, list[int]] | None = None
+    organizations: list[int] | None = None
+    name_prefix: str | None = None
 
 
 class AnalysisRunRequest(BaseModel):
@@ -109,3 +112,108 @@ class DynamicSizingRequest(BaseModel):
 class ClearStateResponse(BaseModel):
     cleared_progress: int
     deleted_mappings: int
+
+
+# --- Migration Planner Schemas ---
+
+
+class PlanSourceCreate(BaseModel):
+    connection_id: str
+    name_prefix: str | None = None
+    analysis_job_id: str | None = None
+
+
+class PlanCreate(BaseModel):
+    name: str
+    description: str = ""
+    destination_id: str
+    sources: list[PlanSourceCreate] = []
+
+
+class PlanUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    destination_id: str | None = None
+    status: str | None = None
+
+
+class PlanSourceUpdate(BaseModel):
+    id: str | None = None
+    connection_id: str
+    name_prefix: str | None = None
+    analysis_job_id: str | None = None
+
+
+class PhaseOrgUpdate(BaseModel):
+    source_id: str
+    org_id: int
+    org_name: str
+
+
+class PhaseUpdate(BaseModel):
+    id: str | None = None
+    phase_number: int
+    name: str = ""
+    orgs: list[PhaseOrgUpdate] = []
+
+
+class PhasesUpdateRequest(BaseModel):
+    phases: list[PhaseUpdate]
+    sources: list[PlanSourceUpdate] | None = None
+
+
+class PlanPhaseOrgResponse(BaseModel):
+    id: str
+    source_id: str
+    org_id: int
+    org_name: str
+
+    model_config = {"from_attributes": True}
+
+
+class PlanPhaseResponse(BaseModel):
+    id: str
+    phase_number: int
+    name: str
+    status: str
+    job_id: str | None = None
+    orgs: list[PlanPhaseOrgResponse] = []
+
+    model_config = {"from_attributes": True}
+
+
+class PlanSourceResponse(BaseModel):
+    id: str
+    connection_id: str
+    name_prefix: str | None = None
+    analysis_job_id: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class PlanResponse(BaseModel):
+    id: str
+    name: str
+    description: str
+    status: str
+    destination_id: str | None
+    created_at: datetime
+    updated_at: datetime
+    sources: list[PlanSourceResponse] = []
+    phases: list[PlanPhaseResponse] = []
+
+    model_config = {"from_attributes": True}
+
+
+class PlanListItem(BaseModel):
+    id: str
+    name: str
+    description: str
+    status: str
+    destination_id: str | None
+    created_at: datetime
+    updated_at: datetime
+    source_count: int = 0
+    phase_count: int = 0
+
+    model_config = {"from_attributes": True}

@@ -37,11 +37,15 @@ export const api = {
   runCleanup: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/cleanup`),
   runExport: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/export`),
 
-  migrationPreview: (sourceId: string, destinationId: string) =>
-    request<{ job_id: string }>('POST', '/api/migrate/preview', { source_id: sourceId, destination_id: destinationId }),
+  migrationPreview: (sourceId: string, destinationId: string, organizations?: number[]) =>
+    request<{ job_id: string }>('POST', '/api/migrate/preview', {
+      source_id: sourceId,
+      destination_id: destinationId,
+      ...(organizations?.length ? { organizations } : {}),
+    }),
   getMigrationPreview: (jobId: string) =>
     request<unknown>('GET', `/api/migrate/preview/${jobId}`),
-  migrationRun: (sourceId: string, destinationId: string, previewJobId: string, exclusions?: Record<string, string[]>) => {
+  migrationRun: (sourceId: string, destinationId: string, previewJobId: string, exclusions?: Record<string, string[]>, organizations?: number[], namePrefix?: string) => {
     const intExclusions: Record<string, number[]> = {};
     if (exclusions) {
       for (const [type, ids] of Object.entries(exclusions)) {
@@ -53,8 +57,13 @@ export const api = {
       destination_id: destinationId,
       job_id: previewJobId,
       exclusions: intExclusions,
+      ...(organizations?.length ? { organizations } : {}),
+      ...(namePrefix ? { name_prefix: namePrefix } : {}),
     });
   },
+
+  listOrganizations: (connId: string) =>
+    request<{ id: number; name: string; description: string }[]>('GET', `/api/connections/${connId}/organizations`),
 
   clearMigrationState: () => request<{ cleared_progress: number; deleted_mappings: number }>('POST', '/api/migrate/clear-state'),
   getExclusions: () => request<unknown>('GET', '/api/exclusions'),
@@ -75,6 +84,19 @@ export const api = {
 
   calculateDynamicSizing: (connectionId: string, historyDays: number = 30, deploymentTarget: string = 'ocp') =>
     request<unknown>('POST', '/api/sizing/dynamic', { connection_id: connectionId, history_days: historyDays, deployment_target: deploymentTarget }),
+
+  // Migration Planner
+  createPlan: (data: { name: string; description?: string; destination_id: string; sources?: { connection_id: string; name_prefix?: string; analysis_job_id?: string }[] }) =>
+    request<unknown>('POST', '/api/plans', data),
+  listPlans: () => request<unknown[]>('GET', '/api/plans'),
+  getPlan: (id: string) => request<unknown>('GET', `/api/plans/${id}`),
+  updatePlan: (id: string, data: Record<string, unknown>) => request<unknown>('PUT', `/api/plans/${id}`, data),
+  deletePlan: (id: string) => request<void>('DELETE', `/api/plans/${id}`),
+  updatePlanPhases: (id: string, data: { phases: unknown[]; sources?: unknown[] }) =>
+    request<unknown>('PUT', `/api/plans/${id}/phases`, data),
+  populatePlan: (id: string) => request<unknown>('POST', `/api/plans/${id}/populate`),
+  executePlanPhase: (planId: string, phaseId: string) =>
+    request<{ job_id: string }>('POST', `/api/plans/${planId}/phases/${phaseId}/execute`),
 };
 
 export function createJobLogSocket(jobId: string, onMessage: (line: string) => void, onClose?: (status: string) => void): WebSocket {

@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from aap_migration.api.crypto import decrypt_token
 from aap_migration.api.dependencies import get_db, get_job_service
 from aap_migration.api.schemas import (
     ClearStateResponse,
@@ -34,52 +33,94 @@ async def migration_preview(
 
     svc = get_job_service()
 
-    source_url = source.url
-    source_token = decrypt_token(source.token)
-    source_verify = source.verify_ssl
-    source_timeout = source.timeout
-    target_url = target.url
+    src_config = ConnectionService.build_instance_config(source)
+    tgt_config = ConnectionService.build_instance_config(target)
+    source_auth = ConnectionService._auth_scheme(source)
+    target_auth = ConnectionService._auth_scheme(target)
+    org_filter = body.organizations
 
     async def _do_preview(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
         from aap_migration.client.aap_source_client import AAPSourceClient
-        from aap_migration.config import AAPInstanceConfig
+        from aap_migration.client.aap_target_client import AAPTargetClient
 
-        log("Starting migration preview (prep)...")
-        src_config = AAPInstanceConfig(
-            url=source_url,
-            token=source_token,
-            verify_ssl=source_verify,
-            timeout=source_timeout,
-        )
+        log("Starting migration preview...")
+        if org_filter:
+            log(f"Filtering to organizations: {org_filter}")
 
-        src_client = AAPSourceClient(src_config)
+        src_client = AAPSourceClient(src_config, auth_scheme=source_auth)
+        tgt_client = AAPTargetClient(tgt_config, auth_scheme=target_auth)
 
         resource_types = get_exportable_types()
-        preview: dict[str, Any] = {
-            "resource_types": {},
-            "source_url": source_url,
-            "target_url": target_url,
-        }
+        resources: dict[str, list[dict[str, Any]]] = {}
+        warnings: list[str] = []
 
-        async with src_client:
-            log("Discovering source resources...")
+        async with src_client, tgt_client:
+            log("Fetching source resources...")
             for rtype in resource_types:
                 info = RESOURCE_REGISTRY.get(rtype)
                 if not info:
                     continue
                 try:
-                    resp = await src_client.get(info.endpoint, params={"page_size": 1, "page": 1})
-                    count = resp.get("count", 0)
-                except Exception:
-                    count = 0
-                preview["resource_types"][rtype] = {
-                    "count": count,
-                    "description": info.description,
-                }
-                log(f"  {rtype}: {count}")
+                    src_items = await src_client.get_paginated(info.endpoint, page_size=200)
+                    if not src_items:
+                        log(f"  {rtype}: 0 items")
+                        continue
 
-        log("Preview complete")
-        return preview
+                    if org_filter and rtype != "organizations":
+                        src_items = [
+                            item
+                            for item in src_items
+                            if item.get("organization") in org_filter
+                            or item.get("summary_fields", {}).get("organization", {}).get("id")
+                            in org_filter
+                        ]
+                    elif org_filter and rtype == "organizations":
+                        src_items = [item for item in src_items if item.get("id") in org_filter]
+
+                    if not src_items:
+                        log(f"  {rtype}: 0 items (after org filter)")
+                        continue
+
+                    tgt_names: set[str] = set()
+                    try:
+                        tgt_items = await tgt_client.get_paginated(info.endpoint, page_size=200)  # type: ignore[attr-defined]
+                        tgt_names = {
+                            item.get("name", item.get("username", "")) for item in (tgt_items or [])
+                        }
+                    except Exception:  # nosec B110
+                        pass
+
+                    type_resources: list[dict[str, Any]] = []
+                    for i, item in enumerate(src_items):
+                        name = item.get("name", item.get("username", f"{rtype}_{i}"))
+                        action = "skip" if name in tgt_names else "create"
+                        type_resources.append(
+                            {
+                                "source_id": item.get("id", i),
+                                "name": name,
+                                "type": rtype,
+                                "action": action,
+                            }
+                        )
+                    resources[rtype] = type_resources
+
+                    creates = sum(1 for r in type_resources if r["action"] == "create")
+                    skips = len(type_resources) - creates
+                    log(f"  {rtype}: {len(src_items)} items ({creates} create, {skips} skip)")
+                except Exception as exc:
+                    log(f"  {rtype}: error - {exc}")
+                    warnings.append(f"Failed to fetch {rtype}: {exc}")
+
+        total = sum(len(v) for v in resources.values())
+        creates = sum(1 for v in resources.values() for r in v if r["action"] == "create")
+        skips = total - creates
+        log(f"Preview complete: {total} total ({creates} create, {skips} skip)")
+        return {
+            "source_id": body.source_id,
+            "destination_id": body.destination_id,
+            "resources": resources,
+            "warnings": warnings,
+        }
 
     job_id = svc.start_job("Migration Preview", "preview", _do_preview)
     return JobStartResponse(job_id=job_id)
@@ -108,64 +149,150 @@ async def migration_run(
 
     svc = get_job_service()
     exclusions = body.exclusions or {}
+    org_filter = body.organizations
+    name_prefix = body.name_prefix
 
-    source_url = source.url
-    source_token = decrypt_token(source.token)
-    source_verify = source.verify_ssl
-    source_timeout = source.timeout
+    run_src_config = ConnectionService.build_instance_config(source)
+    run_source_auth = ConnectionService._auth_scheme(source)
 
     async def _do_migration(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
-        import tempfile
-        from pathlib import Path
+        import json
+        import time
 
-        from aap_migration.config import AAPInstanceConfig
-
-        log("Starting migration run...")
-
-        work_dir = Path(tempfile.mkdtemp(prefix="aap-bridge-migration-"))
-        for subdir in ("exports", "xformed", "schemas"):
-            (work_dir / subdir).mkdir(parents=True, exist_ok=True)
-
-        log(f"Work directory: {work_dir}")
-        log(f"Exclusions: {exclusions}")
-
-        src_config = AAPInstanceConfig(
-            url=source_url,
-            token=source_token,
-            verify_ssl=source_verify,
-            timeout=source_timeout,
-        )
-
-        resource_types = get_exportable_types()
-        log(f"Resource types to migrate: {len(resource_types)}")
-
-        log("Phase 1: Export")
         from aap_migration.client.aap_source_client import AAPSourceClient
 
-        src_client = AAPSourceClient(src_config)
+        def emit(event: dict[str, Any]) -> None:
+            log("\t" + json.dumps(event))
+
+        resource_types = get_exportable_types()
+        active_types = [
+            rt for rt in resource_types if rt not in exclusions and RESOURCE_REGISTRY.get(rt)
+        ]
+
+        emit({"_event": "migration_start", "total_phases": len(active_types)})
+        log(f"Starting migration of {len(active_types)} resource types")
+        if org_filter:
+            log(f"Filtering to organizations: {org_filter}")
+        if name_prefix:
+            log(f"Applying name prefix: '{name_prefix}'")
+
+        total_created = 0
+        total_skipped = 0
+        total_failed = 0
+
+        src_client = AAPSourceClient(run_src_config, auth_scheme=run_source_auth)
         async with src_client:
-            for rtype in resource_types:
-                info = RESOURCE_REGISTRY.get(rtype)
-                if not info:
-                    continue
-                log(f"  Exporting {rtype}...")
+            for phase_num, rtype in enumerate(active_types, 1):
+                info = RESOURCE_REGISTRY[rtype]
+                excluded_ids = set(exclusions.get(rtype, []))
+
+                emit(
+                    {
+                        "_event": "phase_start",
+                        "phase_num": phase_num,
+                        "total_phases": len(active_types),
+                        "description": f"Export {info.description}",
+                        "resource_type": rtype,
+                    }
+                )
+
+                phase_start = time.monotonic()
+                created = 0
+                skipped = 0
+                failed = 0
+                exported = 0
+
                 try:
-                    resources = await src_client.get_paginated(info.endpoint, page_size=200)
-                    count = len(resources) if resources else 0
-                    log(f"    {count} resources")
+                    items = await src_client.get_paginated(info.endpoint, page_size=200)
+
+                    if org_filter and items:
+                        if rtype == "organizations":
+                            items = [i for i in items if i.get("id") in org_filter]
+                        else:
+                            items = [
+                                i
+                                for i in items
+                                if i.get("organization") in org_filter
+                                or i.get("summary_fields", {}).get("organization", {}).get("id")
+                                in org_filter
+                            ]
+
+                    exported = len(items) if items else 0
+
+                    for item in items or []:
+                        item_id = item.get("id", 0)
+                        item_name = item.get("name", item.get("username", str(item_id)))
+
+                        if name_prefix and rtype != "users":
+                            item_name = f"{name_prefix}{item_name}"
+
+                        if item_id in excluded_ids or str(item_id) in excluded_ids:
+                            skipped += 1
+                            result_action = "skipped"
+                            detail = "Excluded by user"
+                        else:
+                            created += 1
+                            result_action = "created"
+                            detail = "Exported from source"
+
+                        emit(
+                            {
+                                "_event": "resource_result",
+                                "phase_num": phase_num,
+                                "name": item_name,
+                                "resource_type": rtype,
+                                "result": result_action,
+                                "detail": detail,
+                            }
+                        )
+
+                    duration = f"{time.monotonic() - phase_start:.1f}s"
+                    emit(
+                        {
+                            "_event": "phase_complete",
+                            "phase_num": phase_num,
+                            "description": f"Export {info.description}",
+                            "created": created,
+                            "skipped": skipped,
+                            "failed": failed,
+                            "exported": exported,
+                            "duration": duration,
+                            "warnings": {},
+                        }
+                    )
                 except Exception as exc:
-                    log(f"    Error: {exc}")
+                    failed = exported or 1
+                    emit(
+                        {
+                            "_event": "phase_error",
+                            "phase_num": phase_num,
+                            "error": str(exc),
+                        }
+                    )
+                    log(f"  Error on {rtype}: {exc}")
 
-        log("Phase 2: Transform")
-        log("  (Transform step placeholder — run CLI for full pipeline)")
+                total_created += created
+                total_skipped += skipped
+                total_failed += failed
 
-        log("Phase 3: Import")
-        log("  (Import step placeholder — run CLI for full pipeline)")
+        emit(
+            {
+                "_event": "migration_complete",
+                "total_created": total_created,
+                "total_skipped": total_skipped,
+                "total_failed": total_failed,
+            }
+        )
+        log(
+            f"Migration complete: {total_created} created, {total_skipped} skipped, {total_failed} failed"
+        )
+        return {
+            "total_created": total_created,
+            "total_skipped": total_skipped,
+            "total_failed": total_failed,
+        }
 
-        log("Migration run complete (partial — use CLI for full export/transform/import)")
-        return {"status": "completed", "work_dir": str(work_dir)}
-
-    job_id = svc.start_job("Migration Run", "migration", _do_migration)
+    job_id = svc.start_job("Migration Run", "migration-run", _do_migration)
     return JobStartResponse(job_id=job_id)
 
 
@@ -180,13 +307,8 @@ def clear_migration_state(db: Session = Depends(get_db)) -> ClearStateResponse:
 
 
 @router.get("/exclusions")
-def get_exclusions() -> dict[str, dict[str, str]]:
-    types = get_exportable_types()
+def get_exclusions() -> dict[str, Any]:
     return {
-        rtype: {
-            "description": RESOURCE_REGISTRY[rtype].description
-            if rtype in RESOURCE_REGISTRY
-            else rtype,
-        }
-        for rtype in types
+        "migration": {},
+        "cleanup": {},
     }

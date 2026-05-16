@@ -189,7 +189,7 @@ def detect_duplicates(
                 name=original_name,
                 resource_type=resource_type,
                 count=count,
-                ids=[r.get("id") for r in group if r.get("id")],
+                ids=[int(rid) for r in group if (rid := r.get("id")) is not None],
                 severity=severity,
                 impact=impact,
                 recommendation=recommendation,
@@ -326,9 +326,9 @@ def analyze_naming_patterns(resources: dict[str, list[dict[str, Any]]]) -> Namin
     Returns:
         NamingPattern with statistics
     """
-    case_counts = Counter()
-    prefix_counts = Counter()
-    separator_counts = Counter()
+    case_counts: Counter[str] = Counter()
+    prefix_counts: Counter[str] = Counter()
+    separator_counts: Counter[str] = Counter()
     total_count = 0
     violations = []
 

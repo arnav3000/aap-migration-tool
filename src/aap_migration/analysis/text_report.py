@@ -173,7 +173,7 @@ def format_detailed_report(org_report: OrgDependencyReport) -> str:
                 # Show what requires it
                 lines.append("│   Required by:                                                   │")
                 for usage in res.required_by:
-                    usage_line = f"│     • {usage['type'].replace('_', ' ').title()}: \"{usage['name']}\" (ID: {usage['id']})"  # noqa: E501
+                    usage_line = f'│     • {usage["type"].replace("_", " ").title()}: "{usage["name"]}" (ID: {usage["id"]})'  # noqa: E501
                     if len(usage_line) > 65:
                         usage_line = usage_line[:62] + "...│"
                     else:

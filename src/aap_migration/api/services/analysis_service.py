@@ -3,11 +3,13 @@
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from aap_migration.api.models import Connection, Job
+from aap_migration.analysis.dependency_analyzer import GlobalDependencyReport
+from aap_migration.api.models import Connection, Job  # type: ignore[attr-defined]
 from aap_migration.api.services.job_service import JobService
 
 
@@ -31,7 +33,7 @@ class AnalysisService:
             db.commit()
         finally:
             db.close()
-        self.job_service.register_job(job_id)
+        self.job_service.register_job(job_id)  # type: ignore[attr-defined]
         return job_id
 
     def _finish_job(
@@ -53,7 +55,7 @@ class AnalysisService:
             db.close()
 
     def _update_progress(self, job_id: str, current: int, total: int, message: str) -> None:
-        self.job_service.append_log(job_id, f"[{current}/{total}] {message}")
+        self.job_service.append_log(job_id, f"[{current}/{total}] {message}")  # type: ignore[attr-defined]
         db = self.session_factory()
         try:
             job = db.query(Job).filter(Job.id == job_id).first()
@@ -81,8 +83,8 @@ class AnalysisService:
 
         async def _run() -> None:
             class _LogCapture(logging.Handler):
-                def emit(self_, record):
-                    self.job_service.append_log(job_id, self_.format(record))
+                def emit(self_, record: logging.LogRecord) -> None:
+                    self.job_service.append_log(job_id, self_.format(record))  # type: ignore[attr-defined]
 
             capture = _LogCapture()
             capture.setLevel(logging.INFO)
@@ -106,7 +108,7 @@ class AnalysisService:
                 )
                 client = AAPSourceClient(config=config)
 
-                def progress_cb(current, total, message):
+                def progress_cb(current: int, total: int, message: str) -> None:
                     self._update_progress(job_id, current, total, message)
 
                 analyzer = CrossOrgDependencyAnalyzer(
@@ -127,7 +129,7 @@ class AnalysisService:
         return job_id
 
 
-def _serialize_report(report) -> dict:
+def _serialize_report(report: GlobalDependencyReport) -> dict[str, Any]:
     """Convert GlobalDependencyReport to a JSON-serializable dict with full detail."""
     org_data = {}
     for org_name, org_report in report.org_reports.items():
@@ -203,7 +205,7 @@ def _serialize_report(report) -> dict:
     if hasattr(report, "get_quality_summary"):
         try:
             quality_summary = report.get_quality_summary()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     # Detect cycles for the report

@@ -159,7 +159,7 @@ class PayloadValidator:
         if sample_size and len(payloads) > sample_size:
             import random
 
-            payloads_to_check = random.sample(payloads, sample_size)
+            payloads_to_check = random.sample(payloads, sample_size)  # nosec B311
             logger.info(
                 "validation_sampling",
                 resource_type=resource_type,

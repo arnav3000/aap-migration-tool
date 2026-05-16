@@ -146,7 +146,7 @@ def main() -> int:
         return 0
     except click.ClickException as e:
         e.show()
-        return e.exit_code
+        return int(e.exit_code)
     except Exception as e:
         logger.error("Unexpected error", error=str(e), exc_info=True)
         click.echo(f"Error: {e}", err=True)

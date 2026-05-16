@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Component, type ReactNode } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Title,
@@ -26,6 +26,22 @@ import type { AnalysisData } from '../components/AnalysisResults';
 import { useJobLogs } from '../hooks/useJobLogs';
 import { api } from '../api/client';
 import type { Job } from '../types/resources';
+
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <Alert variant="danger" isInline title="Component Error">
+          <p>{this.state.error.message}</p>
+          <pre style={{ fontSize: '0.8em', whiteSpace: 'pre-wrap' }}>{this.state.error.stack}</pre>
+        </Alert>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export function JobDetail() {
   const { id } = useParams<{ id: string }>();
@@ -159,7 +175,7 @@ export function JobDetail() {
         </SplitItem>
         <SplitItem isFilled>
           <Title headingLevel="h1" size="xl">
-            Job: {job.type}
+            Job #{job.seq_id ?? '—'}: {job.type}
           </Title>
         </SplitItem>
         {job.type === 'analysis' && job.status === 'completed' && (
@@ -247,7 +263,9 @@ export function JobDetail() {
         <Tabs activeKey={activeTab} onSelect={(_e, k) => setActiveTab(k as string)} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <Tab eventKey="results" title={<TabTitleText>Results</TabTitleText>}>
             <div style={{ padding: '16px 0' }}>
-              <AnalysisResults data={analysisData!} />
+              <ErrorBoundary>
+                <AnalysisResults data={analysisData!} />
+              </ErrorBoundary>
             </div>
           </Tab>
           <Tab eventKey="logs" title={<TabTitleText>Logs</TabTitleText>}>

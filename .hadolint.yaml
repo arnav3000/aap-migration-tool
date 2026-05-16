@@ -1,0 +1,16 @@
+---
+failure-threshold: error
+
+ignored:
+  # Info-level: Multiple consecutive RUN instructions
+  - DL3059
+  # Info-level: wget without progress bar
+  - DL3047
+  # Info-level: SC2012 use find instead of ls
+  - SC2012
+  # Info-level: A && B || C is not if-then-else
+  - SC2015
+
+trustedRegistries:
+  - registry.access.redhat.com
+  - registry.redhat.io

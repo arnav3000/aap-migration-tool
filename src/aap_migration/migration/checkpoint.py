@@ -144,7 +144,7 @@ class CheckpointManager:
                     progress_stats=progress_stats,
                 )
 
-                return checkpoint_id
+                return int(checkpoint_id)
 
         except Exception as e:
             logger.error("Failed to create checkpoint", phase=phase, error=str(e))

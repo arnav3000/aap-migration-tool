@@ -61,7 +61,10 @@ export function Dashboard() {
   };
 
   const handleDelete = async (id: string) => {
-    await api.deleteConnection(id);
+    setConnections(prev => prev.filter(c => c.id !== id));
+    try {
+      await api.deleteConnection(id);
+    } catch { /* already removed from UI */ }
     loadConnections();
   };
 
@@ -171,10 +174,12 @@ export function Dashboard() {
 
   return (
     <>
-      <Title headingLevel="h1" size="2xl">Connections</Title>
+      <Title headingLevel="h1" size="2xl">Settings</Title>
       <TextContent style={{ marginBottom: 16 }}>
-        <Text>Manage your AWX and AAP connections.</Text>
+        <Text>Configure connections and application settings.</Text>
       </TextContent>
+
+      <Title headingLevel="h2" size="xl" style={{ marginTop: 8, marginBottom: 8 }}>Connections</Title>
       <Button variant="primary" onClick={() => { setEditConn(null); setShowForm(true); }} style={{ marginBottom: 16 }}>
         Add Connection
       </Button>

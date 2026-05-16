@@ -12,10 +12,41 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import sessionmaker
 
 from aap_migration.api.dependencies import AppState, set_app_state
-from aap_migration.api.models import Connection  # noqa: F401 — registers table
+from aap_migration.api.models import (  # noqa: F401 — registers tables
+    Connection,
+    JobRecord,
+    MigrationPlan,
+    MigrationPlanPhase,
+    MigrationPlanPhaseOrg,
+    MigrationPlanSource,
+)
 from aap_migration.api.services.job_service import JobService
 from aap_migration.migration.database import create_database_engine
 from aap_migration.migration.models import Base
+
+
+def _migrate_add_seq_id(engine: object) -> None:
+    """Add seq_id column to api_jobs if it doesn't exist, backfill existing rows."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if not insp.has_table("api_jobs"):
+        return
+    columns = [c["name"] for c in insp.get_columns("api_jobs")]
+    if "seq_id" in columns:
+        return
+    with engine.begin() as conn:  # type: ignore[attr-defined]
+        conn.execute(text("ALTER TABLE api_jobs ADD COLUMN seq_id INTEGER"))
+        conn.execute(
+            text(
+                "UPDATE api_jobs SET seq_id = sub.rn FROM "
+                "(SELECT id, ROW_NUMBER() OVER (ORDER BY created_at) AS rn FROM api_jobs) sub "
+                "WHERE api_jobs.id = sub.id"
+            )
+        )
+        conn.execute(
+            text("CREATE UNIQUE INDEX IF NOT EXISTS ix_api_jobs_seq_id ON api_jobs (seq_id)")
+        )
 
 
 def create_app(db_url: str | None = None) -> FastAPI:
@@ -30,9 +61,10 @@ def create_app(db_url: str | None = None) -> FastAPI:
 
     engine = create_database_engine(effective_url)
     Base.metadata.create_all(engine)
+    _migrate_add_seq_id(engine)
 
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
-    job_service = JobService()
+    job_service = JobService(db_session_factory=session_factory)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -67,6 +99,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
         jobs,
         migration,
         operations,
+        planner,
         resources,
         sizing,
     )
@@ -75,6 +108,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
     app.include_router(resources.router, prefix="/api", tags=["resources"])
     app.include_router(operations.router, prefix="/api", tags=["operations"])
     app.include_router(migration.router, prefix="/api", tags=["migration"])
+    app.include_router(planner.router, prefix="/api", tags=["planner"])
     app.include_router(jobs.router, prefix="/api", tags=["jobs"])
     app.include_router(analysis.router, prefix="/api", tags=["analysis"])
     app.include_router(sizing.router, prefix="/api", tags=["sizing"])

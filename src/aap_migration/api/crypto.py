@@ -31,7 +31,7 @@ def encrypt_token(plaintext: str) -> str:
     """Encrypt a token string, returning the ciphertext as a string."""
     if not plaintext:
         return ""
-    return _get_fernet().encrypt(plaintext.encode()).decode()
+    return str(_get_fernet().encrypt(plaintext.encode()).decode())
 
 
 def decrypt_token(ciphertext: str) -> str:
@@ -39,6 +39,6 @@ def decrypt_token(ciphertext: str) -> str:
     if not ciphertext:
         return ""
     try:
-        return _get_fernet().decrypt(ciphertext.encode()).decode()
+        return str(_get_fernet().decrypt(ciphertext.encode()).decode())
     except Exception:
         return ciphertext

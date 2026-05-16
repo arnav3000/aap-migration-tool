@@ -45,7 +45,7 @@ async def list_resource_types(conn_id: str, db: Session = Depends(get_db)) -> li
 
     try:
         result = await asyncio.wait_for(_fetch_types(), timeout=15.0)
-    except (asyncio.TimeoutError, Exception):
+    except (TimeoutError, Exception):
         result = [
             {
                 "name": rtype,
@@ -53,12 +53,36 @@ async def list_resource_types(conn_id: str, db: Session = Depends(get_db)) -> li
                 "api_path": info.endpoint,
                 "count": -1,
             }
-            for rtype, info in sorted(
-                RESOURCE_REGISTRY.items(), key=lambda x: x[1].migration_order
-            )
+            for rtype, info in sorted(RESOURCE_REGISTRY.items(), key=lambda x: x[1].migration_order)
         ]
 
     return result
+
+
+@router.get("/connections/{conn_id}/organizations")
+async def list_organizations(conn_id: str, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    """List organizations from a connection (for org picker in migration)."""
+    conn = ConnectionService.get(db, conn_id)
+    if conn is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    client = ConnectionService.build_source_client(conn)
+    try:
+        async with client:
+            orgs = await client.get_paginated("organizations/", page_size=200)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to query organizations: {exc}"
+        ) from None
+
+    return [
+        {
+            "id": org.get("id"),
+            "name": org.get("name", ""),
+            "description": org.get("description", ""),
+        }
+        for org in (orgs or [])
+    ]
 
 
 @router.get("/connections/{conn_id}/resources/{resource_type}")

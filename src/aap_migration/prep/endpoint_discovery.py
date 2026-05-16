@@ -7,7 +7,7 @@ and AAP 2.6 (target) instances by fetching the API root.
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.aap_target_client import AAPTargetClient
@@ -174,4 +174,4 @@ def load_endpoints(endpoints_file: Path) -> dict[str, Any]:
         endpoint_count=len(data.get("endpoints", {})),
     )
 
-    return data
+    return cast(dict[str, Any], data)

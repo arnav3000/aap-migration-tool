@@ -16,11 +16,11 @@ class AppState:
     def __init__(
         self,
         db_session_factory: sessionmaker,
-        job_service: JobService,
-        loop: asyncio.AbstractEventLoop,
+        job_service: JobService | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         self.db_session_factory = db_session_factory
-        self.job_service = job_service
+        self.job_service = job_service or JobService(db_session_factory=db_session_factory)
         self.loop = loop
 
 

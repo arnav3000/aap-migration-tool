@@ -5,7 +5,7 @@ using AppRole authentication for managing AAP credentials.
 """
 
 import time
-from typing import Any
+from typing import Any, cast
 
 import hvac
 from hvac.exceptions import VaultError as HvacVaultError
@@ -184,7 +184,7 @@ class VaultClient:
                 version=response.get("data", {}).get("version"),
             )
 
-            return response
+            return cast(dict[str, Any], response)
 
         except HvacVaultError as e:
             logger.error("vault_write_failed", path=full_path, error=str(e))
@@ -223,7 +223,7 @@ class VaultClient:
 
             logger.info("vault_secret_read", path=full_path, fields=list(secret_data.keys()))
 
-            return secret_data
+            return cast(dict[str, Any], secret_data)
 
         except HvacVaultError as e:
             logger.error("vault_read_failed", path=full_path, error=str(e))
@@ -265,7 +265,7 @@ class VaultClient:
 
             logger.info("vault_secret_deleted", path=full_path)
 
-            return response
+            return cast(dict[str, Any], response)
 
         except HvacVaultError as e:
             logger.error("vault_delete_failed", path=full_path, error=str(e))
@@ -296,7 +296,7 @@ class VaultClient:
 
             logger.info("vault_secrets_listed", path=full_path, count=len(secrets))
 
-            return secrets
+            return list(secrets)
 
         except HvacVaultError as e:
             # Empty path returns 404
@@ -334,10 +334,8 @@ class VaultClient:
         Returns:
             Dictionary of results with success/failure information
         """
-        results = {
-            "successful": [],
-            "failed": [],
-        }
+        successful_paths: list[str] = []
+        failed_details: list[dict[str, str]] = []
 
         total = len(secrets)
         logger.info("vault_batch_write_starting", total_secrets=total)
@@ -345,7 +343,7 @@ class VaultClient:
         for idx, (path, secret_data) in enumerate(secrets.items(), 1):
             try:
                 self.write_secret(path, secret_data)
-                results["successful"].append(path)
+                successful_paths.append(path)
 
                 if idx % 10 == 0:
                     logger.info(
@@ -357,13 +355,18 @@ class VaultClient:
 
             except VaultError as e:
                 logger.error("vault_batch_write_item_failed", path=path, error=str(e))
-                results["failed"].append({"path": path, "error": str(e)})
+                failed_details.append({"path": path, "error": str(e)})
+
+        results: dict[str, Any] = {
+            "successful": successful_paths,
+            "failed": failed_details,
+        }
 
         logger.info(
             "vault_batch_write_completed",
             total=total,
-            successful=len(results["successful"]),
-            failed=len(results["failed"]),
+            successful=len(successful_paths),
+            failed=len(failed_details),
         )
 
         return results

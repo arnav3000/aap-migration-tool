@@ -1,7 +1,7 @@
 """Granular micro-phase import with step-by-step control."""
 
 import json
-import subprocess
+import subprocess  # nosec B404
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,42 +19,33 @@ logger = get_logger(__name__)
 
 # Define granular micro-phases in dependency order
 # Follows EXACT proven migration order from manual testing
-MICRO_PHASES = [
+MICRO_PHASES: list[dict[str, Any]] = [
     # Phase 1: Foundation
     {"id": "1.1", "name": "Organizations", "resource_type": "organizations"},
     {"id": "1.2", "name": "Users", "resource_type": "users"},
     {"id": "1.3", "name": "Teams", "resource_type": "teams"},
-
     # Phase 2: Credentials (CRITICAL - must be 100% complete)
     {"id": "2.1", "name": "Credential Types", "resource_type": "credential_types"},
     {"id": "2.2", "name": "Credentials", "resource_type": "credentials"},
-
     # Phase 3: Infrastructure (MUST follow this order)
     {"id": "3.1", "name": "Execution Environments", "resource_type": "execution_environments"},
     {"id": "3.2", "name": "Projects", "resource_type": "projects"},
     {"id": "3.3", "name": "Inventories", "resource_type": "inventories"},
     {"id": "3.4", "name": "Inventory Sources", "resource_type": "inventory_sources"},
     {"id": "3.5", "name": "Inventory Groups", "resource_type": "inventory_groups"},
-
     # Phase 4: Hosts
     {"id": "4.1", "name": "Hosts", "resource_type": "hosts"},
-
     # Phase 5: Instance Groups
     {"id": "5.1", "name": "Instance Groups", "resource_type": "instance_groups"},
-
     # Phase 6: Automation
     {"id": "6.1", "name": "Job Templates", "resource_type": "job_templates"},
     {"id": "6.2", "name": "Workflow Templates", "resource_type": "workflow_job_templates"},
-
     # Phase 7: Schedules
     {"id": "7.1", "name": "Schedules", "resource_type": "schedules"},
-
     # Phase 8: Applications (OAuth applications)
     {"id": "8.1", "name": "Applications", "resource_type": "applications"},
-
     # Phase 9: Settings (Optional - review before applying)
     {"id": "9.1", "name": "Settings", "resource_type": "settings"},
-
     # Phase 10: RBAC (Manual - run after all phases complete)
     # Note: Not an actual import phase - just shows in table as reminder
     {"id": "10.1", "name": "RBAC (Manual)", "resource_type": "_rbac_manual", "manual": True},
@@ -106,7 +97,7 @@ class GranularImporter:
                     # For now, return 1 if files exist (shows phase is available)
                     return 1
 
-        return count
+        return int(count)
 
     def get_import_stats(self, resource_type: str) -> dict[str, int]:
         """Get import statistics for a resource type.
@@ -117,9 +108,10 @@ class GranularImporter:
         Returns:
             Dictionary with completed, failed, pending counts
         """
+        from sqlalchemy import func
+
         from aap_migration.migration.database import get_session
         from aap_migration.migration.models import MigrationProgress
-        from sqlalchemy import func
 
         stats = self.state.get_import_stats(resource_type)
 
@@ -129,18 +121,20 @@ class GranularImporter:
                 session.query(func.count(MigrationProgress.id))
                 .filter(
                     MigrationProgress.resource_type == resource_type,
-                    MigrationProgress.status == 'completed'
+                    MigrationProgress.status == "completed",
                 )
-                .scalar() or 0
+                .scalar()
+                or 0
             )
 
             failed = (
                 session.query(func.count(MigrationProgress.id))
                 .filter(
                     MigrationProgress.resource_type == resource_type,
-                    MigrationProgress.status == 'failed'
+                    MigrationProgress.status == "failed",
                 )
-                .scalar() or 0
+                .scalar()
+                or 0
             )
 
         return {
@@ -174,7 +168,6 @@ class GranularImporter:
             resource_type = micro_phase["resource_type"]
             name = micro_phase["name"]
 
-            total = self.get_resource_count(resource_type)
             stats = self.get_import_stats(resource_type)
 
             # Progress bar
@@ -223,7 +216,7 @@ class GranularImporter:
 
         return table
 
-    def _import_micro_phase(self, micro_phase: dict) -> dict[str, Any]:
+    def _import_micro_phase(self, micro_phase: dict[str, Any]) -> dict[str, Any]:
         """Import a single micro-phase using the proven migrate command.
 
         Args:
@@ -249,28 +242,29 @@ class GranularImporter:
 
         # Build config path argument (only if config_path exists)
         config_arg = []
-        if hasattr(self.ctx, 'config_path') and self.ctx.config_path:
+        if hasattr(self.ctx, "config_path") and self.ctx.config_path:
             config_arg = ["--config", str(self.ctx.config_path)]
 
         # Build command using the proven migrate command
-        cmd = [
-            sys.executable, "-m", "aap_migration.cli.main",
-        ] + config_arg + [
-            "migrate",
-            "-r", resource_type,
-            "--skip-prep",
-            "--phase", "all"
-        ]
+        cmd = (
+            [
+                sys.executable,
+                "-m",
+                "aap_migration.cli.main",
+            ]
+            + config_arg
+            + ["migrate", "-r", resource_type, "--skip-prep", "--phase", "all"]
+        )
 
         echo_info(f"Importing {name}...")
 
         try:
             # Run the proven migrate command
-            result = subprocess.run(
+            subprocess.run(  # nosec B603
                 cmd,
                 check=False,
                 capture_output=False,  # Show output in real-time
-                text=True
+                text=True,
             )
 
             # Get stats AFTER import
@@ -344,7 +338,7 @@ class GranularImporter:
             # Show current status
             if not self.auto_mode:
                 self.console.clear()
-                self.console.print(f"\n[bold]Import Progress[/bold]\n")
+                self.console.print("\n[bold]Import Progress[/bold]\n")
                 self.console.print(self.create_phase_table(current_phase_id=phase_id))
                 self.console.print("\n")
 
@@ -360,7 +354,9 @@ class GranularImporter:
             else:
                 # Ask user what to do
                 self.console.print(f"[bold cyan]Phase {phase_id}: {name}[/bold cyan]")
-                self.console.print(f"  Total: {total}")  # Use get_resource_count value, not database stats
+                self.console.print(
+                    f"  Total: {total}"
+                )  # Use get_resource_count value, not database stats
                 self.console.print(f"  Completed: {stats['completed']}")
                 if stats["failed"] > 0:
                     self.console.print(f"  [red]Failed: {stats['failed']}[/red]")
@@ -400,11 +396,11 @@ class GranularImporter:
                             session.query(
                                 MigrationProgress.source_id,
                                 MigrationProgress.source_name,
-                                MigrationProgress.error_message
+                                MigrationProgress.error_message,
                             )
                             .filter(
                                 MigrationProgress.resource_type == resource_type,
-                                MigrationProgress.status == 'failed'
+                                MigrationProgress.status == "failed",
                             )
                             .limit(10)
                             .all()
@@ -460,7 +456,9 @@ class GranularImporter:
             # Special message for inventory sources about EE sync issues
             if resource_type == "inventory_sources" and result["completed"] > 0:
                 self.console.print()
-                self.console.print("[yellow]💡 Note:[/yellow] Check inventory sources manually for outdated EE's which are")
+                self.console.print(
+                    "[yellow]💡 Note:[/yellow] Check inventory sources manually for outdated EE's which are"
+                )
                 self.console.print("   pointing to older AAP-2.4 automation hub address.")
 
             if not self.auto_mode:
@@ -476,7 +474,9 @@ class GranularImporter:
         inv_src_stats = self.get_import_stats("inventory_sources")
         if inv_src_stats.get("completed", 0) > 0:
             self.console.print("[bold yellow]⚠️  Important Note:[/bold yellow]")
-            self.console.print("   Check inventory sources manually for outdated EE's which are pointing to")
+            self.console.print(
+                "   Check inventory sources manually for outdated EE's which are pointing to"
+            )
             self.console.print("   older AAP-2.4 automation hub address.")
             self.console.print()
 

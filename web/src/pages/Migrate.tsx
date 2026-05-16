@@ -18,6 +18,12 @@ import {
   Tabs,
   Tab,
   TabTitleText,
+  TextInput,
+  Spinner,
+  Checkbox,
+  FormHelperText,
+  HelperText,
+  HelperTextItem,
 } from '@patternfly/react-core';
 import TimesIcon from '@patternfly/react-icons/dist/esm/icons/times-icon';
 import ExternalLinkAltIcon from '@patternfly/react-icons/dist/esm/icons/external-link-alt-icon';
@@ -47,6 +53,10 @@ export function Migrate() {
   const [migrationDone, setMigrationDone] = useState(false);
   const [clearMsg, setClearMsg] = useState('');
   const [runActiveTab, setRunActiveTab] = useState<string>('output');
+  const [orgs, setOrgs] = useState<{ id: number; name: string; description: string }[]>([]);
+  const [selectedOrgIds, setSelectedOrgIds] = useState<number[]>([]);
+  const [orgsLoading, setOrgsLoading] = useState(false);
+  const [namePrefix, setNamePrefix] = useState('');
   const navigate = useNavigate();
 
   const jobLogs = useJobLogs(runJobId);
@@ -58,6 +68,28 @@ export function Migrate() {
 
   useEffect(() => { loadConnections(); }, [loadConnections]);
 
+  useEffect(() => {
+    if (!sourceId) {
+      setOrgs([]);
+      setSelectedOrgIds([]);
+      return;
+    }
+    let cancelled = false;
+    const fetchOrgs = async () => {
+      setOrgsLoading(true);
+      try {
+        const result = await api.listOrganizations(sourceId);
+        if (!cancelled) setOrgs(result);
+      } catch {
+        if (!cancelled) setOrgs([]);
+      } finally {
+        if (!cancelled) setOrgsLoading(false);
+      }
+    };
+    fetchOrgs();
+    return () => { cancelled = true; };
+  }, [sourceId]);
+
   const handlePreview = async () => {
     if (!sourceId || !destId) return;
     if (sourceId === destId) return;
@@ -68,7 +100,8 @@ export function Migrate() {
     setExclude({});
 
     try {
-      const result = await api.migrationPreview(sourceId, destId);
+      const orgIds = selectedOrgIds.length > 0 ? selectedOrgIds : undefined;
+      const result = await api.migrationPreview(sourceId, destId, orgIds);
       setPreviewJobId(result.job_id);
       setStep('preview');
       pollPreview(result.job_id);
@@ -83,7 +116,7 @@ export function Migrate() {
     const poll = async () => {
       try {
         const resp = await api.getMigrationPreview(jobId) as Record<string, unknown>;
-        if (resp.status === 'running') {
+        if (resp.status === 'running' || resp.status === 'pending') {
           setTimeout(poll, 1500);
           return;
         }
@@ -92,7 +125,11 @@ export function Migrate() {
           setPreviewError(typeof errMsg === 'string' ? errMsg : JSON.stringify(errMsg) || 'Preview failed');
           return;
         }
-        setPreviewData(resp as unknown as MigrationPreviewData);
+        if (resp.resources) {
+          setPreviewData(resp as unknown as MigrationPreviewData);
+        } else {
+          setPreviewError('Preview completed but returned no resource data');
+        }
       } catch {
         setTimeout(poll, 1500);
       }
@@ -106,7 +143,9 @@ export function Migrate() {
     setCancelling(false);
     setMigrationDone(false);
     try {
-      const result = await api.migrationRun(sourceId, destId, previewJobId, exclude);
+      const orgIds = selectedOrgIds.length > 0 ? selectedOrgIds : undefined;
+      const prefix = namePrefix.trim() || undefined;
+      const result = await api.migrationRun(sourceId, destId, previewJobId, exclude, orgIds, prefix);
       setRunJobId(result.job_id);
       setStep('run');
     } catch (err) {
@@ -136,6 +175,7 @@ export function Migrate() {
     setCancelling(false);
     setMigrationDone(false);
     setRunActiveTab('output');
+    setNamePrefix('');
   };
 
   const handleLogClose = (status: string) => {
@@ -223,6 +263,59 @@ export function Migrate() {
                   <Alert variant="danger" isInline title="Source and destination cannot be the same connection." />
                 </FlexItem>
               )}
+              {sourceId && (
+                <FlexItem>
+                  <FormGroup
+                    label="Organizations (optional — leave empty for all)"
+                    fieldId="org-select"
+                  >
+                    {orgsLoading ? (
+                      <Spinner size="md" />
+                    ) : orgs.length === 0 ? (
+                      <Text component="small">No organizations found on source</Text>
+                    ) : (
+                      <div style={{ maxHeight: 200, overflow: 'auto', border: '1px solid var(--pf-v5-global--BorderColor--100)', borderRadius: 4, padding: 8 }}>
+                        {orgs.map(org => (
+                          <Checkbox
+                            key={org.id}
+                            id={`org-${org.id}`}
+                            label={`${org.name}${org.description ? ` — ${org.description}` : ''}`}
+                            isChecked={selectedOrgIds.includes(org.id)}
+                            onChange={(_e, checked) => {
+                              setSelectedOrgIds(prev =>
+                                checked ? [...prev, org.id] : prev.filter(id => id !== org.id)
+                              );
+                            }}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    <FormHelperText>
+                      <HelperText>
+                        <HelperTextItem>Select specific organizations to migrate, or leave unchecked to migrate everything.</HelperTextItem>
+                      </HelperText>
+                    </FormHelperText>
+                  </FormGroup>
+                </FlexItem>
+              )}
+              <FlexItem>
+                <FormGroup
+                  label="Name Prefix (optional)"
+                  fieldId="name-prefix"
+                >
+                  <TextInput
+                    id="name-prefix"
+                    value={namePrefix}
+                    onChange={(_e, val) => setNamePrefix(val)}
+                    placeholder="e.g. prod-east-"
+                  />
+                  <FormHelperText>
+                    <HelperText>
+                      <HelperTextItem>Prepend this value to all migrated object names. Useful when consolidating multiple AAP instances.</HelperTextItem>
+                    </HelperText>
+                  </FormHelperText>
+                </FormGroup>
+              </FlexItem>
               <FlexItem>
                 <Flex spaceItems={{ default: 'spaceItemsMd' }}>
                   <FlexItem>

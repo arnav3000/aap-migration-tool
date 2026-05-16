@@ -1,11 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Button,
+  Checkbox,
   Title,
   TextContent,
   Text,
   Alert,
   Label,
+  Modal,
+  ModalVariant,
   Split,
   SplitItem,
   Flex,
@@ -33,6 +36,9 @@ export function Operations() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
+  const [cleanupAcknowledged, setCleanupAcknowledged] = useState(false);
+  const [cleanupTargetId, setCleanupTargetId] = useState<string | null>(null);
   const navigate = useNavigate();
 
   const loadConnections = useCallback(async () => {
@@ -174,7 +180,11 @@ export function Operations() {
                 <Button variant="secondary" onClick={() => handleOperation(selected.id, 'export')}>Export</Button>
               </FlexItem>
               <FlexItem>
-                <Button variant="warning" onClick={() => handleOperation(selected.id, 'cleanup')}>Cleanup</Button>
+                <Button variant="danger" onClick={() => {
+                  setCleanupTargetId(selected.id);
+                  setCleanupAcknowledged(false);
+                  setCleanupConfirmOpen(true);
+                }}>Cleanup</Button>
               </FlexItem>
             </Flex>
           </CardBody>
@@ -207,6 +217,45 @@ export function Operations() {
           <LogViewer jobId={job.id} />
         </div>
       ))}
+
+      <Modal
+        variant={ModalVariant.small}
+        isOpen={cleanupConfirmOpen}
+        onClose={() => setCleanupConfirmOpen(false)}
+        title="Confirm Cleanup"
+        titleIconVariant="warning"
+        actions={[
+          <Button
+            key="confirm"
+            variant="danger"
+            isDisabled={!cleanupAcknowledged}
+            onClick={() => {
+              setCleanupConfirmOpen(false);
+              if (cleanupTargetId) {
+                handleOperation(cleanupTargetId, 'cleanup');
+              }
+            }}
+          >
+            Confirm Cleanup
+          </Button>,
+          <Button key="cancel" variant="link" onClick={() => setCleanupConfirmOpen(false)}>
+            Cancel
+          </Button>,
+        ]}
+      >
+        <Alert variant="danger" isInline isPlain title="This operation is destructive and cannot be undone." style={{ marginBottom: 16 }} />
+        <Text component="p" style={{ marginBottom: 16 }}>
+          Cleanup will <strong>permanently delete all resources</strong> from the selected connection.
+          This includes organizations, teams, users, credentials, projects, inventories, job templates,
+          and all other managed resources.
+        </Text>
+        <Checkbox
+          id="cleanup-acknowledge"
+          label="I understand this will permanently delete all resources on this connection"
+          isChecked={cleanupAcknowledged}
+          onChange={(_e, checked) => setCleanupAcknowledged(checked)}
+        />
+      </Modal>
     </>
   );
 }

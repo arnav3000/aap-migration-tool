@@ -8,6 +8,7 @@ and importing them to target AAP independently.
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -71,6 +72,7 @@ def get_importer_dependencies(resource_type: str) -> dict[str, str]:
         # We don't need a real client/state here, just the class metadata
         # But create_importer requires them, so we'll import the class directly
         from aap_migration.migration.importer import (
+            ApplicationImporter,
             CredentialImporter,
             CredentialTypeImporter,
             ExecutionEnvironmentImporter,
@@ -81,12 +83,11 @@ def get_importer_dependencies(resource_type: str) -> dict[str, str]:
             JobTemplateImporter,
             LabelImporter,
             NotificationTemplateImporter,
-            ApplicationImporter,
-            SettingsImporter,
             OrganizationImporter,
             ProjectImporter,
             RBACImporter,
             ScheduleImporter,
+            SettingsImporter,
             TeamImporter,
             UserImporter,
             WorkflowImporter,
@@ -124,6 +125,11 @@ def get_importer_dependencies(resource_type: str) -> dict[str, str]:
     except Exception as e:
         logger.warning(f"Failed to get dependencies for {resource_type}: {e}")
         return {}
+
+
+def _registry_migration_order(resource_type: str) -> int:
+    info = RESOURCE_REGISTRY.get(resource_type)
+    return info.migration_order if info is not None else 999
 
 
 def build_dependency_closure(
@@ -172,10 +178,7 @@ def build_dependency_closure(
                 queue.append(dep_resource_type)
 
     # Sort by migration_order to ensure dependencies come first
-    sorted_types = sorted(
-        needed_types,
-        key=lambda t: RESOURCE_REGISTRY.get(t).migration_order if t in RESOURCE_REGISTRY else 999,
-    )
+    sorted_types = sorted(needed_types, key=_registry_migration_order)
 
     return sorted_types
 
@@ -356,7 +359,7 @@ def export(
         parallel_types=parallel_types_enabled,
     )
 
-    async def run_export():
+    async def run_export() -> None:
         import logging
         from datetime import datetime
 
@@ -461,7 +464,7 @@ def export(
                     )
 
                 # Get count from API WITH FILTERS
-                count = await temp_exporter.get_count(
+                count = await temp_exporter.get_count(  # type: ignore[attr-defined]
                     endpoint, filters=count_filters if count_filters else None
                 )
                 description = rtype.replace("_", " ").title()
@@ -497,7 +500,7 @@ def export(
                     )
 
                     # Create progress callback to update display
-                    def progress_callback(rtype: str, stats: dict):
+                    def progress_callback(rtype: str, stats: dict[str, Any]) -> None:
                         phase_id = rtype  # We use resource_type as phase_id
                         progress.update_phase(
                             phase_id, stats.get("exported", 0), stats.get("failed", 0)
@@ -741,7 +744,9 @@ def export(
         loop.run_until_complete(run_export())
 
 
-def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tuple[bool, dict]:
+def validate_pre_import_state(
+    input_dir: Path, state: MigrationState, yes: bool = False
+) -> tuple[bool, dict[str, Any]]:
     """Validate database state before import to prevent duplicates.
 
     Checks for missing ID mappings that could cause duplicate resource creation.
@@ -754,7 +759,7 @@ def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tupl
     Returns:
         Tuple of (should_continue, validation_stats)
     """
-    validation_stats = {
+    validation_stats: dict[str, Any] = {
         "transformed_count": 0,
         "mapped_count": 0,
         "missing_mappings": 0,
@@ -779,7 +784,7 @@ def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tupl
                             resource_count += len(data)
                         else:
                             resource_count += 1
-                except Exception:
+                except Exception:  # nosec B112
                     continue
 
             if resource_count > 0:
@@ -1057,7 +1062,9 @@ def import_cmd(
         from aap_migration.validation import DependencyValidator
 
         validator = DependencyValidator(ctx.migration_state, input_dir)
-        validation = validator.validate_all(requested_types if requested_types != available_types else None)
+        validation = validator.validate_all(
+            requested_types if requested_types != available_types else None
+        )
         validator.display_validation_report(validation)
 
         # Exit after showing validation report
@@ -1114,12 +1121,7 @@ def import_cmd(
             )
         # Always sort types_to_import by migration_order to ensure dependencies come first
         # This is critical for credential_types to be imported before credentials, etc.
-        types_to_import = sorted(
-            requested_types,
-            key=lambda t: RESOURCE_REGISTRY.get(t).migration_order
-            if t in RESOURCE_REGISTRY
-            else 999,
-        )
+        types_to_import = sorted(requested_types, key=_registry_migration_order)
 
     # Filter by phase if specified
     if phase == "phase1":
@@ -1204,13 +1206,13 @@ def import_cmd(
 
     async def batch_precheck_resources(
         resource_type: str,
-        resources: list[dict],
-        importer,
-        client,
-        state,
-        progress,
+        resources: list[dict[str, Any]],
+        importer: Any,
+        client: Any,
+        state: MigrationState,
+        progress: MigrationProgressDisplay,
         phase_id: str,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
         Proactively check which resources already exist in target environment.
 
@@ -1250,7 +1252,7 @@ def import_cmd(
         # Extract identifiers from resources
         # Track duplicates to report them in migration report
         resource_identifiers = []
-        resource_by_identifier = {}
+        resource_by_identifier: dict[Any, dict[str, Any]] = {}
         duplicates_skipped = []  # Track duplicates for reporting
 
         for resource in resources:
@@ -1259,6 +1261,7 @@ def import_cmd(
             org = None  # Initialize org for all resources (prevents UnboundLocalError)
             parent_id = None  # Initialize parent_id for parent-scoped resources
             if identifier and source_id:
+                dict_key: Any
                 # Use composite key for organization-scoped resources to avoid duplicates
                 if resource_type in ORGANIZATION_SCOPED_RESOURCES:
                     org = resource.get("organization")
@@ -1327,13 +1330,15 @@ def import_cmd(
                         reason=reason,
                     )
 
-                    duplicates_skipped.append({
-                        "source_id": source_id,
-                        "name": identifier,
-                        "organization": org,
-                        "parent_id": parent_id,
-                        "kept_source_id": existing_source_id,
-                    })
+                    duplicates_skipped.append(
+                        {
+                            "source_id": source_id,
+                            "name": identifier,
+                            "organization": org,
+                            "parent_id": parent_id,
+                            "kept_source_id": existing_source_id,
+                        }
+                    )
 
                     logger.warning(
                         "duplicate_resource_skipped",
@@ -1379,7 +1384,7 @@ def import_cmd(
         # Use character-based batching to avoid 414 URI Too Large errors
         # Long resource names (e.g., inventories) can cause URI to exceed 8KB limit
         MAX_QUERY_CHARS = 4000  # Safe limit for query parameters
-        existing_by_identifier = {}
+        existing_by_identifier: dict[Any, dict[str, Any]] = {}
 
         # Build batches based on character count, not fixed count
         current_batch: list[str] = []
@@ -1426,6 +1431,7 @@ def import_cmd(
                 # For credentials, also include credential_type to match AAP's uniqueness constraint
                 # For parent-scoped resources (inventory_sources, hosts, groups), use (name, parent_id)
                 for existing_resource in existing_batch:
+                    key: Any
                     if resource_type in ORGANIZATION_SCOPED_RESOURCES:
                         name = existing_resource.get("name")
                         org = existing_resource.get("organization")
@@ -1489,6 +1495,8 @@ def import_cmd(
                 lookup_key = dict_key
                 identifier = dict_key
 
+            source_name_label: str = identifier if isinstance(identifier, str) else str(identifier)
+
             # Debug: Log lookup key being used
             logger.debug(
                 "checking_resource_existence",
@@ -1507,7 +1515,7 @@ def import_cmd(
                     resource_type=resource_type,
                     source_id=source_id,
                     target_id=existing["id"],
-                    source_name=identifier,
+                    source_name=source_name_label,
                     target_name=existing.get(identifier_field),
                 )
                 # FIX: Mark as skipped (not completed) - resource already exists in target
@@ -1515,10 +1523,10 @@ def import_cmd(
                 state.mark_skipped(
                     resource_type=resource_type,
                     source_id=source_id,
-                    reason=f"Pre-existing in target (found in batch precheck)",
+                    reason="Pre-existing in target (found in batch precheck)",
                     target_id=existing["id"],
                     target_name=existing.get(identifier_field),
-                    source_name=identifier,
+                    source_name=source_name_label,
                 )
 
                 found_count += 1
@@ -1548,7 +1556,7 @@ def import_cmd(
 
         return to_import
 
-    async def run_import():
+    async def run_import() -> None:
         # PRE-IMPORT VALIDATION: Check for missing mappings to prevent duplicates
         should_continue, validation_stats = validate_pre_import_state(
             input_dir, ctx.migration_state, yes
@@ -1565,10 +1573,10 @@ def import_cmd(
         total_imported = 0
         total_failed = 0
         total_skipped = 0
-        skipped_no_importer = []
+        skipped_no_importer: list[str] = []
 
         # Track detailed stats per resource type
-        run_stats = {}
+        run_stats: dict[str, Any] = {}
 
         # Initialize phases
         phases = []
@@ -1587,7 +1595,7 @@ def import_cmd(
                             for resource in resources:
                                 if "_deferred_scm_details" in resource:
                                     patch_count += 1
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
 
         # Build phases list based on import phase
@@ -1626,9 +1634,6 @@ def import_cmd(
         phases = [(rtype, desc, count) for rtype, desc, count in phases if count > 0]
 
         try:
-            # Track skipped resource types (no importer available)
-            skipped_no_importer = []
-
             with MigrationProgressDisplay(title="🚀 AAP Import Progress", enabled=True) as progress:
                 # Set total phases BEFORE initialize_phases to avoid jitter
                 progress.set_total_phases(len(phases))
@@ -1788,16 +1793,20 @@ def import_cmd(
                         }
 
                         method_name = method_map.get(rtype)
-                        echo_info(f"📋 Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}")
+                        echo_info(
+                            f"📋 Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}"
+                        )
                         if method_name and hasattr(importer, method_name):
                             # TEMPORARY FIX: Skip batch precheck for automation resources to avoid hang
                             # TODO: Investigate why batch_precheck_resources blocks for these types
                             if rtype in ("job_templates", "workflow_job_templates", "schedules"):
-                                echo_warning(f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using database check)")
+                                echo_warning(
+                                    f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using database check)"
+                                )
                                 logger.warning(
                                     "batch_precheck_skipped_temporary_fix",
                                     resource_type=rtype,
-                                    message="Skipping batch precheck due to known hang issue, using database check instead"
+                                    message="Skipping batch precheck due to known hang issue, using database check instead",
                                 )
 
                                 # Database check to avoid re-importing already completed resources
@@ -1814,20 +1823,30 @@ def import_cmd(
                                         source_id = resource.get("_source_id")
 
                                         # Check if already successfully completed or intentionally skipped
-                                        existing = session.query(MigrationProgress).filter_by(
-                                            resource_type=rtype,
-                                            source_id=source_id
-                                        ).first()
+                                        existing = (
+                                            session.query(MigrationProgress)
+                                            .filter_by(resource_type=rtype, source_id=source_id)
+                                            .first()
+                                        )
 
                                         # If completed/skipped, need to validate target still exists
-                                        if existing and existing.status in ("completed", "skipped") and existing.target_id:
-                                            resources_needing_validation.append({
-                                                "resource": resource,
-                                                "source_id": source_id,
-                                                "target_id": existing.target_id,
-                                                "status": existing.status,
-                                            })
-                                        elif existing and existing.status in ("completed", "skipped"):
+                                        if (
+                                            existing
+                                            and existing.status in ("completed", "skipped")
+                                            and existing.target_id
+                                        ):
+                                            resources_needing_validation.append(
+                                                {
+                                                    "resource": resource,
+                                                    "source_id": source_id,
+                                                    "target_id": existing.target_id,
+                                                    "status": existing.status,
+                                                }
+                                            )
+                                        elif existing and existing.status in (
+                                            "completed",
+                                            "skipped",
+                                        ):
                                             # No target_id but marked completed/skipped (shouldn't happen)
                                             # Skip anyway to be safe
                                             already_completed_count += 1
@@ -1837,7 +1856,7 @@ def import_cmd(
                                                 source_id=source_id,
                                                 status=existing.status,
                                                 target_id=None,
-                                                verified="no_target_id"
+                                                verified="no_target_id",
                                             )
                                         else:
                                             # Not completed/skipped (pending, failed, or no record)
@@ -1858,7 +1877,7 @@ def import_cmd(
                                         ctx.migration_state.mark_skipped(
                                             resource_type=rtype,
                                             source_id=source_id,
-                                            reason=f"Pre-existing in target (validated via database check)",
+                                            reason="Pre-existing in target (validated via database check)",
                                             target_id=target_id,
                                             target_name=resource.get("name"),
                                             source_name=resource.get("name"),
@@ -1870,7 +1889,7 @@ def import_cmd(
                                             source_id=source_id,
                                             target_id=target_id,
                                             status=item["status"],
-                                            verified="target_exists"
+                                            verified="target_exists",
                                         )
                                     except Exception as e:
                                         # Target deleted from AAP - need to re-import
@@ -1880,17 +1899,20 @@ def import_cmd(
                                             source_id=source_id,
                                             target_id=target_id,
                                             error=str(e),
-                                            action="clearing_status_and_reimporting"
+                                            action="clearing_status_and_reimporting",
                                         )
                                         # Add to import list
                                         resources_to_import.append(resource)
 
                                         # Clear database status (new session)
-                                        with get_session(ctx.migration_state.database_url) as session:
-                                            existing = session.query(MigrationProgress).filter_by(
-                                                resource_type=rtype,
-                                                source_id=source_id
-                                            ).first()
+                                        with get_session(
+                                            ctx.migration_state.database_url
+                                        ) as session:
+                                            existing = (
+                                                session.query(MigrationProgress)
+                                                .filter_by(resource_type=rtype, source_id=source_id)
+                                                .first()
+                                            )
                                             if existing:
                                                 existing.status = "pending"
                                                 existing.target_id = None
@@ -1901,7 +1923,7 @@ def import_cmd(
                                     resource_type=rtype,
                                     total=len(transformed_resources),
                                     already_completed=already_completed_count,
-                                    to_import=len(resources_to_import)
+                                    to_import=len(resources_to_import),
                                 )
                             else:
                                 # Proactive batch pre-check: query target to find existing resources
@@ -1920,10 +1942,16 @@ def import_cmd(
                             skipped_count = len(transformed_resources) - len(resources_to_import)
 
                             if resources_to_import:
-                                echo_info(f"🔄 Starting import for {rtype}: {len(resources_to_import)} resources")
+                                echo_info(
+                                    f"🔄 Starting import for {rtype}: {len(resources_to_import)} resources"
+                                )
+
                                 # Create progress callback for live updates
                                 def update_progress(
-                                    success: int, failed: int, skipped: int, phase_id=phase_id
+                                    success: int,
+                                    failed: int,
+                                    skipped: int,
+                                    phase_id: str = phase_id,
                                 ) -> None:
                                     """Update progress display in real-time."""
                                     progress.update_phase(phase_id, success, failed, skipped)
@@ -1933,7 +1961,9 @@ def import_cmd(
                                 results = await method(
                                     resources_to_import, progress_callback=update_progress
                                 )
-                                echo_info(f"✅ {method_name} completed: {len(results) if results else 0} results")
+                                echo_info(
+                                    f"✅ {method_name} completed: {len(results) if results else 0} results"
+                                )
 
                                 # Calculate actual imported, failed, and skipped from results
                                 imported_count = len(
@@ -2048,7 +2078,7 @@ def import_cmd(
                                         skipped=base_skipped + skipped,
                                     )
 
-                                result = await importer.import_hosts_bulk(
+                                result = await importer.import_hosts_bulk(  # type: ignore[attr-defined]
                                     inventory_id=target_inv_id,
                                     hosts=inv_hosts,
                                     progress_callback=bulk_progress,
@@ -2168,11 +2198,21 @@ def import_cmd(
                 click.echo()
                 if len([r for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0]) == 1:
                     # Single resource type failed
-                    failed_rtype = next(r[0] for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0)
-                    click.echo(click.style(f"   aap-bridge migration-report --resource-type {failed_rtype}", fg="yellow", bold=True))
+                    failed_rtype = next(
+                        r[0] for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0
+                    )
+                    click.echo(
+                        click.style(
+                            f"   aap-bridge migration-report --resource-type {failed_rtype}",
+                            fg="yellow",
+                            bold=True,
+                        )
+                    )
                 else:
                     # Multiple resource types failed
-                    click.echo(click.style("   aap-bridge migration-report", fg="yellow", bold=True))
+                    click.echo(
+                        click.style("   aap-bridge migration-report", fg="yellow", bold=True)
+                    )
                 click.echo()
                 click.echo("=" * 80)
 

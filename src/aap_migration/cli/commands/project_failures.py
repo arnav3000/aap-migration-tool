@@ -69,35 +69,43 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
 
         if not target_id:
             # Failed to import at all
-            failed_to_import.append({
-                "source_id": source_id,
-                "name": name,
-                "organization": project.get("organization"),
-                "has_scm": has_deferred,
-                "deferred_details": project.get("_deferred_scm_details", {}),
-            })
+            failed_to_import.append(
+                {
+                    "source_id": source_id,
+                    "name": name,
+                    "organization": project.get("organization"),
+                    "has_scm": has_deferred,
+                    "deferred_details": project.get("_deferred_scm_details", {}),
+                }
+            )
         else:
-            imported_projects.append({
-                "source_id": source_id,
-                "target_id": target_id,
-                "name": name,
-                "has_scm": has_deferred,
-            })
+            imported_projects.append(
+                {
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "name": name,
+                    "has_scm": has_deferred,
+                }
+            )
 
             if has_deferred:
                 # TODO: Check if patch was successful by querying target
                 # For now, assume if imported + deferred, it needs patching
-                patch_failed.append({
-                    "source_id": source_id,
-                    "target_id": target_id,
-                    "name": name,
-                })
+                patch_failed.append(
+                    {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "name": name,
+                    }
+                )
             else:
-                fully_successful.append({
-                    "source_id": source_id,
-                    "target_id": target_id,
-                    "name": name,
-                })
+                fully_successful.append(
+                    {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "name": name,
+                    }
+                )
 
     # Generate report
     report_lines = []
@@ -107,7 +115,9 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
 
     report_lines.append("## Summary\n\n")
     report_lines.append(f"- ✅ **Fully Successful:** {len(fully_successful)} projects\n")
-    report_lines.append(f"- ✅ **Imported (needs patching):** {len(imported_projects) - len(fully_successful)} projects\n")
+    report_lines.append(
+        f"- ✅ **Imported (needs patching):** {len(imported_projects) - len(fully_successful)} projects\n"
+    )
     report_lines.append(f"- ❌ **Failed to Import:** {len(failed_to_import)} projects\n\n")
 
     if failed_to_import:
@@ -125,66 +135,80 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
 
             report_lines.append("**Manual Fix Steps:**\n\n")
             report_lines.append("1. **Check for name collision:**\n")
-            report_lines.append(f"   ```bash\n")
+            report_lines.append("   ```bash\n")
             report_lines.append(f"   # Check if '{proj['name']}' exists in target AAP\n")
-            report_lines.append(f"   curl -sk -H 'Authorization: Bearer $TOKEN' \\\n")
+            report_lines.append("   curl -sk -H 'Authorization: Bearer $TOKEN' \\\n")
             # Extract base URL without /api path
-            base_url = ctx.config.target.url.rstrip('/api/v2').rstrip('/api').rstrip('/')
-            report_lines.append(f"     '{base_url}/api/v2/projects/?name={proj['name'].replace(' ', '+')}'\n")
-            report_lines.append(f"   ```\n\n")
+            base_url = ctx.config.target.url.split("/api", 1)[0].rstrip("/")
+            report_lines.append(
+                f"     '{base_url}/api/v2/projects/?name={proj['name'].replace(' ', '+')}'\n"
+            )
+            report_lines.append("   ```\n\n")
 
             report_lines.append("2. **If name collision exists:**\n")
-            report_lines.append(f"   - Rename the existing project in target AAP, OR\n")
-            report_lines.append(f"   - Manually map this project to the existing one:\n")
-            report_lines.append(f"     ```sql\n")
-            report_lines.append(f"     -- In migration_state.db\n")
-            report_lines.append(f"     INSERT INTO id_mappings (resource_type, source_id, target_id, source_name, target_name)\n")
-            report_lines.append(f"     VALUES ('projects', {proj['source_id']}, <EXISTING_TARGET_ID>, '{proj['name']}', '{proj['name']}');\n")
-            report_lines.append(f"     ```\n\n")
+            report_lines.append("   - Rename the existing project in target AAP, OR\n")
+            report_lines.append("   - Manually map this project to the existing one:\n")
+            report_lines.append("     ```sql\n")
+            report_lines.append("     -- In migration_state.db\n")
+            report_lines.append(
+                "     INSERT INTO id_mappings (resource_type, source_id, target_id, source_name, target_name)\n"
+            )
+            report_lines.append(
+                f"     VALUES ('projects', {proj['source_id']}, <EXISTING_TARGET_ID>, '{proj['name']}', '{proj['name']}');\n"
+            )
+            report_lines.append("     ```\n\n")
 
             report_lines.append("3. **If no collision, create manually:**\n")
 
-            if proj['has_scm']:
-                deferred = proj['deferred_details']
-                scm_url = deferred.get('scm_url', 'N/A')
-                scm_type = deferred.get('scm_type', 'git')
-                scm_branch = deferred.get('scm_branch', '')
-                cred_id = deferred.get('credential')
+            if proj["has_scm"]:
+                deferred = proj["deferred_details"]
+                scm_url = deferred.get("scm_url", "N/A")
+                scm_type = deferred.get("scm_type", "git")
+                scm_branch = deferred.get("scm_branch", "")
+                cred_id = deferred.get("credential")
 
-                report_lines.append(f"   ```bash\n")
-                report_lines.append(f"   # Create project via API\n")
-                report_lines.append(f"   curl -sk -X POST -H 'Authorization: Bearer $TOKEN' \\\n")
-                report_lines.append(f"     -H 'Content-Type: application/json' \\\n")
+                report_lines.append("   ```bash\n")
+                report_lines.append("   # Create project via API\n")
+                report_lines.append("   curl -sk -X POST -H 'Authorization: Bearer $TOKEN' \\\n")
+                report_lines.append("     -H 'Content-Type: application/json' \\\n")
                 report_lines.append(f"     '{base_url}/api/v2/projects/' \\\n")
-                report_lines.append(f"     -d '{{\n")
-                report_lines.append(f"       \"name\": \"{proj['name']}\",\n")
-                report_lines.append(f"       \"organization\": <TARGET_ORG_ID>,\n")
-                report_lines.append(f"       \"scm_type\": \"{scm_type}\",\n")
-                report_lines.append(f"       \"scm_url\": \"{scm_url}\",\n")
+                report_lines.append("     -d '{\n")
+                report_lines.append(f'       "name": "{proj["name"]}",\n')
+                report_lines.append('       "organization": <TARGET_ORG_ID>,\n')
+                report_lines.append(f'       "scm_type": "{scm_type}",\n')
+                report_lines.append(f'       "scm_url": "{scm_url}",\n')
                 if scm_branch:
-                    report_lines.append(f"       \"scm_branch\": \"{scm_branch}\",\n")
+                    report_lines.append(f'       "scm_branch": "{scm_branch}",\n')
                 if cred_id:
-                    report_lines.append(f"       \"credential\": <TARGET_CREDENTIAL_ID>,\n")
-                report_lines.append(f"     }}'\n")
-                report_lines.append(f"   ```\n\n")
+                    report_lines.append('       "credential": <TARGET_CREDENTIAL_ID>,\n')
+                report_lines.append("     }'\n")
+                report_lines.append("   ```\n\n")
             else:
-                report_lines.append(f"   - Create as Manual project in AAP UI\n")
+                report_lines.append("   - Create as Manual project in AAP UI\n")
                 report_lines.append(f"   - Name: `{proj['name']}`\n")
-                report_lines.append(f"   - Organization: (check mapping for source org {proj['organization']})\n\n")
+                report_lines.append(
+                    f"   - Organization: (check mapping for source org {proj['organization']})\n\n"
+                )
 
             report_lines.append("4. **After manual creation, update mapping:**\n")
-            report_lines.append(f"   ```sql\n")
-            report_lines.append(f"   INSERT INTO id_mappings (resource_type, source_id, target_id, source_name, target_name)\n")
-            report_lines.append(f"   VALUES ('projects', {proj['source_id']}, <NEW_TARGET_ID>, '{proj['name']}', '{proj['name']}');\n")
-            report_lines.append(f"   ```\n\n")
+            report_lines.append("   ```sql\n")
+            report_lines.append(
+                "   INSERT INTO id_mappings (resource_type, source_id, target_id, source_name, target_name)\n"
+            )
+            report_lines.append(
+                f"   VALUES ('projects', {proj['source_id']}, <NEW_TARGET_ID>, '{proj['name']}', '{proj['name']}');\n"
+            )
+            report_lines.append("   ```\n\n")
 
             report_lines.append("---\n\n")
 
     if imported_projects:
-        needs_patch = [p for p in imported_projects if p['has_scm']]
+        needs_patch = [p for p in imported_projects if p["has_scm"]]
         if needs_patch:
             report_lines.append("## ⚠️  Imported Projects That Need SCM Patching\n\n")
-            report_lines.append(f"These {len(needs_patch)} projects imported as 'Manual' and need SCM details applied.\n\n")
+            report_lines.append(
+                f"These {len(needs_patch)} projects imported as 'Manual' and need SCM details applied.\n\n"
+            )
             report_lines.append("**To fix, run:**\n")
             report_lines.append("```bash\n")
             report_lines.append("aap-bridge patch-projects\n")
@@ -203,18 +227,22 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
 
     report_lines.append("2. **Verify completion:**\n")
     report_lines.append("   ```bash\n")
-    report_lines.append("   sqlite3 migration_state.db \"SELECT resource_type, COUNT(*) as total, \\\n")
-    report_lines.append("     SUM(CASE WHEN target_id IS NOT NULL THEN 1 ELSE 0 END) as imported \\\n")
-    report_lines.append("     FROM id_mappings GROUP BY resource_type;\"\n")
+    report_lines.append(
+        '   sqlite3 migration_state.db "SELECT resource_type, COUNT(*) as total, \\\n'
+    )
+    report_lines.append(
+        "     SUM(CASE WHEN target_id IS NOT NULL THEN 1 ELSE 0 END) as imported \\\n"
+    )
+    report_lines.append('     FROM id_mappings GROUP BY resource_type;"\n')
     report_lines.append("   ```\n\n")
 
     # Write report
-    with open(output, 'w') as f:
+    with open(output, "w") as f:
         f.writelines(report_lines)
 
     # Print summary
     echo_success(f"Analysis complete! Report saved to: {output}")
-    echo_info(f"\n📊 Summary:")
+    echo_info("\n📊 Summary:")
     echo_info(f"  ✅ Fully Successful: {len(fully_successful)}")
     echo_info(f"  ⚠️  Imported (needs patching): {len(imported_projects) - len(fully_successful)}")
     echo_info(f"  ❌ Failed to Import: {len(failed_to_import)}")

@@ -46,7 +46,7 @@ export function Analysis() {
     }
   };
 
-  const sources = connections.filter(c => c.ping_status === 'ok' || c.ping_status === 'unknown');
+  const sources = connections;
 
   return (
     <>

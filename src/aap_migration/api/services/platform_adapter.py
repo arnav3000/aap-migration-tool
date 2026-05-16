@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import httpx
 
 from aap_migration.api.models import Connection
@@ -14,7 +16,7 @@ class PlatformAdapter:
         if conn.token:
             self.headers["Authorization"] = f"Bearer {conn.token}"
 
-    def _get(self, path: str, params: dict | None = None) -> dict:
+    def _get(self, path: str, params: dict | None = None) -> dict[Any, Any]:
         resp = httpx.get(
             f"{self.base_url}{path}",
             headers=self.headers,
@@ -23,7 +25,7 @@ class PlatformAdapter:
             timeout=30,
         )
         resp.raise_for_status()
-        return resp.json()
+        return cast(dict[Any, Any], resp.json())
 
     def discover_resource_types(self) -> list[dict]:
         try:

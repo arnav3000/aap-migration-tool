@@ -10,7 +10,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 
-from aap_migration.api.crypto import decrypt_token
 from aap_migration.api.dependencies import get_db, get_job_service
 from aap_migration.api.schemas import AnalysisRunRequest, JobStartResponse
 from aap_migration.api.services.connection_service import ConnectionService
@@ -101,14 +100,14 @@ def _serialize_report(report: Any) -> dict[str, Any]:
 
     circular_deps: list[list[str]] = []
     try:
-        from aap_migration.analysis.dependency_graph import topological_sort
+        from aap_migration.analysis.dependency_graph import detect_cycles
 
         dep_map: dict[str, list[str]] = {}
         for name, org in report.org_reports.items():
             dep_map[name] = org.required_migrations_before
-        topological_sort(dep_map)
-    except ValueError:
-        pass
+        circular_deps = detect_cycles(dep_map)
+    except Exception:  # nosec B110
+        circular_deps = []
 
     return {
         "analysis_date": report.analysis_date.isoformat(),
@@ -118,7 +117,12 @@ def _serialize_report(report: Any) -> dict[str, Any]:
         "independent_orgs": report.independent_orgs,
         "dependent_orgs": report.dependent_orgs,
         "migration_order": report.migration_order,
-        "migration_phases": report.migration_phases,
+        "migration_phases": [
+            p
+            if isinstance(p, dict)
+            else {"phase": i + 1, "orgs": p, "description": f"Phase {i + 1}"}
+            for i, p in enumerate(report.migration_phases or [])
+        ],
         "organizations": orgs,
         "global_resources": global_resources_counts,
         "total_duplicates": report.total_duplicates,
@@ -135,25 +139,16 @@ async def run_analysis(body: AnalysisRunRequest, db: Session = Depends(get_db)) 
 
     svc = get_job_service()
 
-    conn_url = conn.url
-    conn_token = decrypt_token(conn.token)
-    conn_verify = conn.verify_ssl
-    conn_timeout = conn.timeout
+    inst_config = ConnectionService.build_instance_config(conn)
+    auth_scheme = ConnectionService._auth_scheme(conn)
 
     async def _do_analysis(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
         from aap_migration.analysis.dependency_analyzer import CrossOrgDependencyAnalyzer
         from aap_migration.client.aap_source_client import AAPSourceClient
-        from aap_migration.config import AAPInstanceConfig
 
-        log(f"Starting dependency analysis for {conn_url}")
+        log(f"Starting dependency analysis for {inst_config.url}")
 
-        config = AAPInstanceConfig(
-            url=conn_url,
-            token=conn_token,
-            verify_ssl=conn_verify,
-            timeout=conn_timeout,
-        )
-        client = AAPSourceClient(config)
+        client = AAPSourceClient(inst_config, auth_scheme=auth_scheme)
 
         def progress_cb(current: object, total: object = None, msg: object = None) -> None:
             if msg:
@@ -169,24 +164,21 @@ async def run_analysis(body: AnalysisRunRequest, db: Session = Depends(get_db)) 
             report = await analyzer.analyze_all_organizations()
 
         log(f"Analysis complete: {report.total_organizations} organizations analyzed")
-        log(
-            f"Independent: {len(report.independent_orgs)}, "
-            f"Dependent: {len(report.dependent_orgs)}"
-        )
+        log(f"Independent: {len(report.independent_orgs)}, Dependent: {len(report.dependent_orgs)}")
 
         serialized = _serialize_report(report)
 
-        job._html_report = None  # type: ignore[attr-defined]
+        job._html_report = None
         try:
             from aap_migration.analysis.html_report import generate_html_report
 
-            job._html_report = generate_html_report(report)  # type: ignore[attr-defined]
+            job._html_report = generate_html_report(report)
         except Exception as exc:
             log(f"Warning: HTML report generation failed: {exc}")
 
         return serialized
 
-    job_id = svc.start_job(f"Analysis {conn_url}", "analysis", _do_analysis)
+    job_id = svc.start_job(f"Analysis {inst_config.url}", "analysis", _do_analysis)
     return JobStartResponse(job_id=job_id)
 
 
@@ -198,8 +190,27 @@ def get_analysis_result(job_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Job not found")
     data = job.to_dict()
     if job.status == "completed" and job.result:
-        data["data"] = job.result
+        result = job.result
+        _fix_migration_phases(result)
+        data["data"] = result
     return data
+
+
+def _fix_migration_phases(result: dict[str, Any]) -> None:
+    """Repair double-wrapped migration_phases from earlier serialisation bug."""
+    phases = result.get("migration_phases")
+    if not isinstance(phases, list):
+        return
+    fixed = []
+    for p in phases:
+        if not isinstance(p, dict):
+            fixed.append(p)
+            continue
+        orgs = p.get("orgs")
+        if isinstance(orgs, dict) and "orgs" in orgs:
+            p["orgs"] = orgs["orgs"]
+        fixed.append(p)
+    result["migration_phases"] = fixed
 
 
 @router.get("/analysis/{job_id}/export/json")

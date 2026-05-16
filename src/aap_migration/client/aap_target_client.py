@@ -4,7 +4,7 @@ This client provides methods to create resources in AAP 2.5+ with
 Platform Gateway support (required for AAP 2.6+) and bulk operations.
 """
 
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.client.base_client import BaseAPIClient
 from aap_migration.client.exceptions import ConflictError
@@ -34,6 +34,7 @@ class AAPTargetClient(BaseAPIClient):
         max_payload_size: int = 10000,
         max_connections: int | None = None,
         max_keepalive_connections: int | None = None,
+        auth_scheme: str = "Bearer",
     ):
         """Initialize AAP target client.
 
@@ -44,6 +45,7 @@ class AAPTargetClient(BaseAPIClient):
             max_payload_size: Maximum payload size to log before truncation
             max_connections: Maximum number of connections in pool
             max_keepalive_connections: Maximum keep-alive connections
+            auth_scheme: Authorization header scheme (Bearer or Token)
         """
         # Ensure URL includes Platform Gateway path
         base_url = config.url
@@ -65,6 +67,7 @@ class AAPTargetClient(BaseAPIClient):
             max_payload_size=max_payload_size,
             max_connections=max_connections,
             max_keepalive_connections=max_keepalive_connections,
+            auth_scheme=auth_scheme,
         )
         logger.info("aap_target_client_initialized", url=base_url)
         self._version_cache: str | None = None
@@ -89,20 +92,20 @@ class AAPTargetClient(BaseAPIClient):
             if not version:
                 logger.warning(
                     "version_not_found_in_config",
-                    message="Version field not found in /config/ response, using fallback"
+                    message="Version field not found in /config/ response, using fallback",
                 )
                 # Try to extract from ansible_version or default to 2.6.0
                 version = config_data.get("ansible_version", "2.6.0")
 
             self._version_cache = version
             logger.info("aap_version_detected", version=version, url=self.base_url)
-            return version
+            return str(version)
 
         except Exception as e:
             logger.error(
                 "version_detection_failed",
                 error=str(e),
-                message="Failed to detect AAP version, defaulting to 2.6.0"
+                message="Failed to detect AAP version, defaulting to 2.6.0",
             )
             # Default to 2.6.0 if detection fails
             self._version_cache = "2.6.0"
@@ -531,7 +534,7 @@ class AAPTargetClient(BaseAPIClient):
         """
         endpoint = f"{resource_type}/"
         response = await self.get(endpoint, params={"page_size": 1})
-        return response.get("count", 0)
+        return int(response.get("count", 0))
 
     @retry_api_call
     async def list_resources(
@@ -559,7 +562,7 @@ class AAPTargetClient(BaseAPIClient):
         """
         # Use get_endpoint to map resource_type to correct API endpoint
         # (e.g., "inventory_groups" -> "groups/")
-        endpoint = get_endpoint(resource_type)
+        endpoint: str | None = get_endpoint(resource_type)
         params = {"page_size": page_size}
 
         if filters:
@@ -681,7 +684,7 @@ class AAPTargetClient(BaseAPIClient):
                 plugin_type=plugin_type,
                 authenticator_id=result.get("id"),
             )
-            return result
+            return cast(dict[str, Any], result)
 
         except Exception as e:
             logger.error(
@@ -709,7 +712,7 @@ class AAPTargetClient(BaseAPIClient):
             )
             response.raise_for_status()
             data = response.json()
-            return data.get("results", [])
+            return list(data.get("results", []))
 
         except Exception as e:
             logger.error("gateway_authenticators_list_failed", error=str(e))
@@ -791,7 +794,7 @@ class AAPTargetClient(BaseAPIClient):
                 map_type=map_type,
                 authenticator_id=authenticator_id,
             )
-            return result
+            return cast(dict[str, Any], result)
 
         except Exception as e:
             logger.error(

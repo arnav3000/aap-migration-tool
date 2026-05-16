@@ -40,10 +40,10 @@ ORGANIZATION_SCOPED_RESOURCES = {
 # Note: job_templates and workflow_job_templates inherit org from project/inventory
 #       credentials can be global or org-scoped (organization is optional for both)
 ORGANIZATION_REQUIRED_RESOURCES = {
-    "teams",                    # Must have org
-    "projects",                 # Must have org
-    "inventories",              # Must have org
-    "notification_templates",   # Must have org
+    "teams",  # Must have org
+    "projects",  # Must have org
+    "inventories",  # Must have org
+    "notification_templates",  # Must have org
 }
 
 
@@ -54,7 +54,7 @@ class ResourceImporter:
     """
 
     # Dependency mapping: field_name -> resource_type
-    DEPENDENCIES = {}
+    DEPENDENCIES: dict[str, str] = {}
 
     # Identifier field used for uniqueness checks (override in subclasses if different)
     IDENTIFIER_FIELD = "name"
@@ -435,9 +435,14 @@ class ResourceImporter:
                             dep_resource_type = self._infer_resource_type_from_field(field)
 
                         # Try to get the source dependency name from database
-                        dep_name = self._get_dependency_name(dep_resource_type, dep_source_id) if dep_resource_type else None
+                        dep_name = (
+                            self._get_dependency_name(dep_resource_type, dep_source_id)
+                            if dep_resource_type
+                            else None
+                        )
 
                         if dep_name:
+                            assert dep_resource_type is not None
                             enriched_parts.append(
                                 f"{field}: {dep_resource_type.rstrip('s').replace('_', ' ').title()} "
                                 f"'{dep_name}' (source ID: {dep_source_id}) does not exist in target AAP"
@@ -496,16 +501,15 @@ class ResourceImporter:
             Source resource name or None if not found
         """
         try:
-            session = get_session(self.state.database_url)
-            progress = (
-                session.query(MigrationProgress)
-                .filter_by(resource_type=resource_type, source_id=source_id)
-                .first()
-            )
-            session.close()
+            with get_session(self.state.database_url) as session:
+                progress = (
+                    session.query(MigrationProgress)
+                    .filter_by(resource_type=resource_type, source_id=source_id)
+                    .first()
+                )
 
-            if progress and progress.source_name:
-                return progress.source_name
+                if progress and progress.source_name:
+                    return str(progress.source_name)
 
         except Exception as e:
             logger.debug(
@@ -1045,7 +1049,7 @@ class ResourceImporter:
 class LabelImporter(ResourceImporter):
     """Importer for label resources."""
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
     }
 
@@ -1074,7 +1078,7 @@ class CredentialTypeImporter(ResourceImporter):
     This importer PATCHes existing resources instead of POSTing new ones.
     """
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
     }
 
@@ -1312,7 +1316,7 @@ class CredentialTypeImporter(ResourceImporter):
 class UserImporter(ResourceImporter):
     """Importer for user resources."""
 
-    DEPENDENCIES = {}  # No dependencies - users can exist independently
+    DEPENDENCIES: dict[str, str] = {}  # No dependencies - users can exist independently
     IDENTIFIER_FIELD = "username"  # Users use 'username' instead of 'name'
 
     async def import_resource(
@@ -1398,12 +1402,12 @@ class UserImporter(ResourceImporter):
 
             return result
 
-        except ConflictError as e:
+        except ConflictError:
             # Handle conflict (user already exists)
-            result = await self._handle_conflict(resource_type, source_id, data, e)
-            if result:
+            conflict_result = await self._handle_conflict(resource_type, source_id, data)
+            if conflict_result:
                 self.stats["conflict_count"] += 1
-            return result
+            return conflict_result
 
         except Exception as e:
             # Mark as failed
@@ -1464,7 +1468,7 @@ class UserImporter(ResourceImporter):
 class TeamImporter(ResourceImporter):
     """Importer for team resources."""
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
     }
 
@@ -1489,7 +1493,7 @@ class TeamImporter(ResourceImporter):
 class OrganizationImporter(ResourceImporter):
     """Importer for organization resources."""
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "default_environment": "execution_environments",
     }
 
@@ -1521,7 +1525,7 @@ class InstanceImporter(ResourceImporter):
     Uses config/mappings.yaml to map different hostnames between environments.
     """
 
-    DEPENDENCIES = {}  # No dependencies - instances are foundational
+    DEPENDENCIES: dict[str, str] = {}  # No dependencies - instances are foundational
     IDENTIFIER_FIELD = "hostname"  # Instances use 'hostname' instead of 'name'
 
     async def import_instances(
@@ -1565,7 +1569,20 @@ class InstanceImporter(ResourceImporter):
         )
 
         for instance in instances:
-            source_id = instance.get("_source_id") or instance.get("id")
+            raw_sid = instance.get("_source_id") or instance.get("id")
+            if raw_sid is None:
+                logger.warning(
+                    "instance_missing_source_id",
+                    hostname=instance.get("hostname"),
+                    message="Skipping instance without source id",
+                )
+                failed_count += 1
+                self.stats["error_count"] += 1
+                if progress_callback:
+                    progress_callback(success_count, failed_count, skipped_count)
+                continue
+
+            source_id = int(raw_sid)
             source_hostname = instance.get("hostname", "unknown")
 
             # Check if already mapped
@@ -1642,7 +1659,7 @@ class InstanceImporter(ResourceImporter):
 class InstanceGroupImporter(ResourceImporter):
     """Importer for instance group resources."""
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "credential": "credentials",  # For container instance groups
     }
 
@@ -1667,7 +1684,7 @@ class InstanceGroupImporter(ResourceImporter):
 class InventoryImporter(ResourceImporter):
     """Importer for inventory resources."""
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
     }
 
@@ -1697,7 +1714,7 @@ class InventoryGroupImporter(ResourceImporter):
     Uses optimized tier-based parallel import for performance.
     """
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "inventory": "inventories",
         "parent": "inventory_groups",  # Link to parent group
     }
@@ -1744,7 +1761,10 @@ class InventoryGroupImporter(ResourceImporter):
                 check_exists=True,
             )
 
-            target_id = result.get("id")
+            target_id_raw = result.get("id")
+            if target_id_raw is None:
+                raise TypeError("create_resource returned no id for inventory group")
+            target_id = int(target_id_raw)
             self.state.mark_completed(
                 resource_type=resource_type,
                 source_id=source_id,
@@ -1822,7 +1842,7 @@ class InventoryGroupImporter(ResourceImporter):
         )
 
         # Create a cumulative progress callback
-        def tier_progress_cb(success, failed, skipped):
+        def tier_progress_cb(success: int, failed: int, skipped: int) -> None:
             nonlocal total_success, total_failed, total_skipped
             # This callback receives totals for the CURRENT batch/tier
             # We need to accumulate them across tiers for the global progress bar
@@ -1880,7 +1900,7 @@ class InventoryGroupImporter(ResourceImporter):
         group_by_id = {g.get("_source_id", g.get("id")): g for g in groups}
 
         # Adjacency list: parent_id -> list of child_ids
-        children_map = {}
+        children_map: dict[Any, list[Any]] = {}
         # Parent map: child_id -> parent_id
         parent_map = {}
 
@@ -1960,7 +1980,7 @@ class InventorySourceImporter(ResourceImporter):
     - execution_environment (optional, for custom execution environments)
     """
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "inventory": "inventories",
         "source_project": "projects",
         "credential": "credentials",
@@ -1991,10 +2011,12 @@ class InventorySourceImporter(ResourceImporter):
             schedules = source.pop("schedules", None)
             if schedules:
                 source_id = source.get("_source_id", source.get("id"))
-                sources_with_schedules.append({
-                    "source_inventory_source_id": source_id,
-                    "schedules": schedules,
-                })
+                sources_with_schedules.append(
+                    {
+                        "source_inventory_source_id": source_id,
+                        "schedules": schedules,
+                    }
+                )
 
         # Import inventory sources
         results = await self._import_parallel("inventory_sources", sources, progress_callback)
@@ -2011,7 +2033,9 @@ class InventorySourceImporter(ResourceImporter):
                 schedules = schedule_data["schedules"]
 
                 # Get the target inventory source ID from the state mapping
-                target_inventory_source_id = self.state.get_mapped_id("inventory_sources", source_inventory_source_id)
+                target_inventory_source_id = self.state.get_mapped_id(
+                    "inventory_sources", source_inventory_source_id
+                )
                 if not target_inventory_source_id:
                     logger.warning(
                         "inventory_source_not_found_for_schedule",
@@ -2020,7 +2044,9 @@ class InventorySourceImporter(ResourceImporter):
                     continue
 
                 # Get inventory source name for logging
-                source_result = next((s for s in results if s.get("id") == target_inventory_source_id), None)
+                source_result = next(
+                    (s for s in results if s.get("id") == target_inventory_source_id), None
+                )
                 source_name = source_result.get("name", "unknown") if source_result else "unknown"
 
                 for schedule in schedules:
@@ -2029,11 +2055,24 @@ class InventorySourceImporter(ResourceImporter):
                     source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
-                    schedule_to_import = {k: v for k, v in schedule.items() if k not in [
-                        "id", "type", "url", "related", "summary_fields",
-                        "created", "modified", "last_run", "next_run",
-                        "status", "unified_job_template"
-                    ]}
+                    schedule_to_import = {
+                        k: v
+                        for k, v in schedule.items()
+                        if k
+                        not in [
+                            "id",
+                            "type",
+                            "url",
+                            "related",
+                            "summary_fields",
+                            "created",
+                            "modified",
+                            "last_run",
+                            "next_run",
+                            "status",
+                            "unified_job_template",
+                        ]
+                    }
 
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
@@ -2056,26 +2095,27 @@ class InventorySourceImporter(ResourceImporter):
 
                         # Track schedule in database if source_id is available
                         # This allows standalone schedule import to skip already-created schedules
-                        if source_schedule_id and result.get("id"):
+                        sched_tgt_id = result.get("id")
+                        if source_schedule_id and sched_tgt_id is not None:
                             try:
                                 self.state.save_id_mapping(
                                     resource_type="schedules",
-                                    source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    source_id=int(source_schedule_id),
+                                    target_id=int(sched_tgt_id),
                                     source_name=schedule_name,
                                     target_name=schedule_name,
                                 )
                                 self.state.mark_completed(
                                     resource_type="schedules",
-                                    source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    source_id=int(source_schedule_id),
+                                    target_id=int(sched_tgt_id),
                                     target_name=schedule_name,
                                     source_name=schedule_name,
                                 )
                                 logger.debug(
                                     "inventory_source_schedule_tracked",
                                     source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    target_id=int(sched_tgt_id),
                                     schedule_name=schedule_name,
                                 )
                             except Exception as tracking_error:
@@ -2083,7 +2123,7 @@ class InventorySourceImporter(ResourceImporter):
                                 logger.warning(
                                     "inventory_source_schedule_tracking_failed",
                                     source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    target_id=int(sched_tgt_id),
                                     schedule_name=schedule_name,
                                     error=str(tracking_error),
                                 )
@@ -2143,7 +2183,7 @@ class ScheduleImporter(ResourceImporter):
     - inventory_sources
     """
 
-    DEPENDENCIES = {}  # Handled manually in _resolve_dependencies
+    DEPENDENCIES: dict[str, str] = {}  # Handled manually in _resolve_dependencies
 
     async def _resolve_dependencies(
         self, resource_type: str, data: dict[str, Any]
@@ -2244,7 +2284,7 @@ class WorkflowNodeImporter(ResourceImporter):
     not the flat /workflow_nodes/ endpoint.
     """
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "workflow_job_template": "workflow_job_templates",
         "unified_job_template": "unified_job_templates",
     }
@@ -2328,13 +2368,15 @@ class WorkflowNodeImporter(ResourceImporter):
                     )
 
                     # Track for reporting
-                    self.import_errors.append({
-                        "resource_type": resource_type,
-                        "source_id": source_id,
-                        "name": data.get("identifier", "unknown"),
-                        "error": error_msg,
-                        "error_type": "DependencyError",
-                    })
+                    self.import_errors.append(
+                        {
+                            "resource_type": resource_type,
+                            "source_id": source_id,
+                            "name": data.get("identifier", "unknown"),
+                            "error": error_msg,
+                            "error_type": "DependencyError",
+                        }
+                    )
 
                     # Return None to stop processing this broken node
                     return None
@@ -2355,8 +2397,14 @@ class WorkflowNodeImporter(ResourceImporter):
 
             # Remove read-only/metadata fields that shouldn't be in POST
             read_only_fields = [
-                "id", "type", "url", "related", "summary_fields",
-                "created", "modified", "natural_key"
+                "id",
+                "type",
+                "url",
+                "related",
+                "summary_fields",
+                "created",
+                "modified",
+                "natural_key",
             ]
             for field in read_only_fields:
                 resolved.pop(field, None)
@@ -2519,7 +2567,7 @@ class ExecutionEnvironmentImporter(ResourceImporter):
     - credential (optional, for private registries)
     """
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
         "credential": "credentials",
     }
@@ -2677,7 +2725,7 @@ class RBACImporter(ResourceImporter):
 class HostImporter(ResourceImporter):
     """Importer for host resources with bulk operations support."""
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "inventory": "inventories",
     }
 
@@ -2747,9 +2795,7 @@ class HostImporter(ResourceImporter):
                 f"inventories/{inventory_id}/hosts/",
                 params={"page_size": 1000},  # Get many hosts to check duplicates
             )
-            existing_hosts_by_name = {
-                h["name"]: h for h in existing_hosts_data.get("results", [])
-            }
+            existing_hosts_by_name = {h["name"]: h for h in existing_hosts_data.get("results", [])}
 
             for host in batch:
                 source_id = host.pop("_source_id", host.get("id"))
@@ -2921,12 +2967,12 @@ class HostInventoryMembershipImporter(ResourceImporter):
     processes memberships for regular inventories.
     """
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "host_id": "hosts",
         "inventory_id": "inventories",
     }
 
-    async def import_resource(
+    async def import_resource(  # type: ignore[override]
         self,
         resource: dict[str, Any],
         xformed: dict[str, Any] | None = None,
@@ -2945,11 +2991,20 @@ class HostInventoryMembershipImporter(ResourceImporter):
         host_name = resource.get("host_name", f"host_{source_host_id}")
         inventory_name = resource.get("inventory_name", f"inventory_{source_inventory_id}")
 
-        # Generate a unique identifier for this membership
-        membership_id = f"{source_host_id}_{source_inventory_id}"
+        if source_host_id is None or source_inventory_id is None:
+            logger.warning(
+                "membership_missing_source_ids",
+                host_name=host_name,
+                inventory_name=inventory_name,
+                message="Skipping membership without host_id and inventory_id",
+            )
+            self.stats["skipped_count"] += 1
+            return {"status": "skipped", "reason": "missing_source_ids"}
+
+        source_membership_id = (int(source_host_id) << 32) | int(source_inventory_id)
 
         # Check if already imported
-        if self.state.is_migrated("host_inventory_memberships", membership_id):
+        if self.state.is_migrated("host_inventory_memberships", source_membership_id):
             logger.debug(
                 "membership_already_migrated",
                 host_id=source_host_id,
@@ -2960,8 +3015,8 @@ class HostInventoryMembershipImporter(ResourceImporter):
             return {"status": "skipped", "reason": "already_migrated"}
 
         # Map source IDs to target IDs
-        target_host_id = self.state.get_mapped_id("hosts", source_host_id)
-        target_inventory_id = self.state.get_mapped_id("inventories", source_inventory_id)
+        target_host_id = self.state.get_mapped_id("hosts", int(source_host_id))
+        target_inventory_id = self.state.get_mapped_id("inventories", int(source_inventory_id))
 
         if not target_host_id:
             logger.warning(
@@ -2983,6 +3038,8 @@ class HostInventoryMembershipImporter(ResourceImporter):
             self.stats["skipped_count"] += 1
             return {"status": "skipped", "reason": "inventory_not_found"}
 
+        target_membership_id = (int(target_host_id) << 32) | int(target_inventory_id)
+
         # Check if host is already in this inventory
         try:
             # Get host details to check current inventory
@@ -2999,10 +3056,15 @@ class HostInventoryMembershipImporter(ResourceImporter):
                 )
                 self.state.create_source_mapping(
                     "host_inventory_memberships",
-                    membership_id,
+                    source_membership_id,
                     source_name=f"{host_name} -> {inventory_name}",
                 )
-                self.state.mark_completed("host_inventory_memberships", membership_id)
+                self.state.mark_completed(
+                    resource_type="host_inventory_memberships",
+                    source_id=source_membership_id,
+                    target_id=target_membership_id,
+                    source_name=f"{host_name} -> {inventory_name}",
+                )
                 self.stats["skipped_count"] += 1
                 return {"status": "skipped", "reason": "already_primary_inventory"}
 
@@ -3021,10 +3083,15 @@ class HostInventoryMembershipImporter(ResourceImporter):
                 )
                 self.state.create_source_mapping(
                     "host_inventory_memberships",
-                    membership_id,
+                    source_membership_id,
                     source_name=f"{host_name} -> {inventory_name}",
                 )
-                self.state.mark_completed("host_inventory_memberships", membership_id)
+                self.state.mark_completed(
+                    resource_type="host_inventory_memberships",
+                    source_id=source_membership_id,
+                    target_id=target_membership_id,
+                    source_name=f"{host_name} -> {inventory_name}",
+                )
                 self.stats["skipped_count"] += 1
                 return {"status": "skipped", "reason": "already_in_inventory"}
 
@@ -3045,10 +3112,15 @@ class HostInventoryMembershipImporter(ResourceImporter):
             # Mark as successful
             self.state.create_source_mapping(
                 "host_inventory_memberships",
-                membership_id,
+                source_membership_id,
                 source_name=f"{host_name} -> {inventory_name}",
             )
-            self.state.mark_completed("host_inventory_memberships", membership_id)
+            self.state.mark_completed(
+                resource_type="host_inventory_memberships",
+                source_id=source_membership_id,
+                target_id=target_membership_id,
+                source_name=f"{host_name} -> {inventory_name}",
+            )
             self.stats["imported_count"] += 1
 
             logger.info(
@@ -3071,16 +3143,20 @@ class HostInventoryMembershipImporter(ResourceImporter):
 
             self.state.create_source_mapping(
                 "host_inventory_memberships",
-                membership_id,
+                source_membership_id,
                 source_name=f"{host_name} -> {inventory_name}",
             )
-            self.state.mark_failed("host_inventory_memberships", membership_id, error_msg)
+            self.state.mark_failed(
+                resource_type="host_inventory_memberships",
+                source_id=source_membership_id,
+                error_message=error_msg,
+            )
             self.stats["error_count"] += 1
 
             self.import_errors.append(
                 {
                     "resource_type": "host_inventory_memberships",
-                    "source_id": membership_id,
+                    "source_id": source_membership_id,
                     "name": f"{host_name} -> {inventory_name}",
                     "error": error_msg,
                     "error_type": type(e).__name__,
@@ -3097,7 +3173,7 @@ class CredentialImporter(ResourceImporter):
     This importer PATCHes existing resources instead of POSTing new ones.
     """
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
         "credential_type": "credential_types",
         "user": "users",
@@ -3504,7 +3580,7 @@ class CredentialImporter(ResourceImporter):
 class ProjectImporter(ResourceImporter):
     """Importer for project resources."""
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
         "credential": "credentials",
         "default_environment": "execution_environments",
@@ -3531,10 +3607,12 @@ class ProjectImporter(ResourceImporter):
             schedules = project.pop("schedules", None)
             if schedules:
                 source_id = project.get("_source_id", project.get("id"))
-                projects_with_schedules.append({
-                    "source_project_id": source_id,
-                    "schedules": schedules,
-                })
+                projects_with_schedules.append(
+                    {
+                        "source_project_id": source_id,
+                        "schedules": schedules,
+                    }
+                )
 
         # Import projects
         results = await self._import_parallel("projects", projects, progress_callback)
@@ -3560,8 +3638,12 @@ class ProjectImporter(ResourceImporter):
                     continue
 
                 # Get project name for logging
-                project_result = next((p for p in results if p.get("id") == target_project_id), None)
-                project_name = project_result.get("name", "unknown") if project_result else "unknown"
+                project_result = next(
+                    (p for p in results if p.get("id") == target_project_id), None
+                )
+                project_name = (
+                    project_result.get("name", "unknown") if project_result else "unknown"
+                )
 
                 for schedule in schedules:
                     schedule_name = schedule.get("name", "unknown")
@@ -3569,11 +3651,24 @@ class ProjectImporter(ResourceImporter):
                     source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
-                    schedule_to_import = {k: v for k, v in schedule.items() if k not in [
-                        "id", "type", "url", "related", "summary_fields",
-                        "created", "modified", "last_run", "next_run",
-                        "status", "unified_job_template"
-                    ]}
+                    schedule_to_import = {
+                        k: v
+                        for k, v in schedule.items()
+                        if k
+                        not in [
+                            "id",
+                            "type",
+                            "url",
+                            "related",
+                            "summary_fields",
+                            "created",
+                            "modified",
+                            "last_run",
+                            "next_run",
+                            "status",
+                            "unified_job_template",
+                        ]
+                    }
 
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
@@ -3596,26 +3691,27 @@ class ProjectImporter(ResourceImporter):
 
                         # Track schedule in database if source_id is available
                         # This allows standalone schedule import to skip already-created schedules
-                        if source_schedule_id and result.get("id"):
+                        sched_tgt_id = result.get("id")
+                        if source_schedule_id and sched_tgt_id is not None:
                             try:
                                 self.state.save_id_mapping(
                                     resource_type="schedules",
-                                    source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    source_id=int(source_schedule_id),
+                                    target_id=int(sched_tgt_id),
                                     source_name=schedule_name,
                                     target_name=schedule_name,
                                 )
                                 self.state.mark_completed(
                                     resource_type="schedules",
-                                    source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    source_id=int(source_schedule_id),
+                                    target_id=int(sched_tgt_id),
                                     target_name=schedule_name,
                                     source_name=schedule_name,
                                 )
                                 logger.debug(
                                     "project_schedule_tracked",
                                     source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    target_id=int(sched_tgt_id),
                                     schedule_name=schedule_name,
                                 )
                             except Exception as tracking_error:
@@ -3623,7 +3719,7 @@ class ProjectImporter(ResourceImporter):
                                 logger.warning(
                                     "project_schedule_tracking_failed",
                                     source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    target_id=int(sched_tgt_id),
                                     schedule_name=schedule_name,
                                     error=str(tracking_error),
                                 )
@@ -3757,7 +3853,7 @@ async def wait_for_project_sync(
 class JobTemplateImporter(ResourceImporter):
     """Importer for job template resources."""
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
         "inventory": "inventories",
         "project": "projects",
@@ -3769,8 +3865,9 @@ class JobTemplateImporter(ResourceImporter):
     async def import_resource(
         self,
         resource_type: str,
-        source_id: int | str,
+        source_id: int,
         data: dict[str, Any],
+        resolve_dependencies: bool = True,
     ) -> dict[str, Any] | None:
         """Import a job template with credential association.
 
@@ -3790,7 +3887,9 @@ class JobTemplateImporter(ResourceImporter):
         template_name = data.get("name")
 
         # Call base import_resource
-        result = await super().import_resource(resource_type, source_id, data)
+        result = await super().import_resource(
+            resource_type, source_id, data, resolve_dependencies=resolve_dependencies
+        )
 
         # Associate credentials if import succeeded and we have credentials
         if result and result.get("id") and credentials:
@@ -3876,30 +3975,36 @@ class JobTemplateImporter(ResourceImporter):
 
                     # Store schedules for later import
                     if schedules:
-                        templates_with_schedules.append({
-                            "source_template_id": source_id,
-                            "template_id": target_id,
-                            "template_name": result.get("name", "unknown"),
-                            "schedules": schedules,
-                        })
+                        templates_with_schedules.append(
+                            {
+                                "source_template_id": source_id,
+                                "template_id": target_id,
+                                "template_name": result.get("name", "unknown"),
+                                "schedules": schedules,
+                            }
+                        )
 
                     # Store survey spec for later import
                     if survey_spec:
-                        templates_with_surveys.append({
-                            "source_template_id": source_id,
-                            "template_id": target_id,
-                            "template_name": result.get("name", "unknown"),
-                            "survey_spec": survey_spec,
-                        })
+                        templates_with_surveys.append(
+                            {
+                                "source_template_id": source_id,
+                                "template_id": target_id,
+                                "template_name": result.get("name", "unknown"),
+                                "survey_spec": survey_spec,
+                            }
+                        )
 
                     # Store notification associations for later import
                     if notifications:
-                        templates_with_notifications.append({
-                            "source_template_id": source_id,
-                            "template_id": target_id,
-                            "template_name": result.get("name", "unknown"),
-                            "notifications": notifications,
-                        })
+                        templates_with_notifications.append(
+                            {
+                                "source_template_id": source_id,
+                                "template_id": target_id,
+                                "template_name": result.get("name", "unknown"),
+                                "notifications": notifications,
+                            }
+                        )
 
                     results.append(result)
                     success_count += 1
@@ -3945,11 +4050,24 @@ class JobTemplateImporter(ResourceImporter):
                     source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
-                    schedule_to_import = {k: v for k, v in schedule.items() if k not in [
-                        "id", "type", "url", "related", "summary_fields",
-                        "created", "modified", "last_run", "next_run",
-                        "status", "unified_job_template"
-                    ]}
+                    schedule_to_import = {
+                        k: v
+                        for k, v in schedule.items()
+                        if k
+                        not in [
+                            "id",
+                            "type",
+                            "url",
+                            "related",
+                            "summary_fields",
+                            "created",
+                            "modified",
+                            "last_run",
+                            "next_run",
+                            "status",
+                            "unified_job_template",
+                        ]
+                    }
 
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
@@ -3972,26 +4090,27 @@ class JobTemplateImporter(ResourceImporter):
 
                         # Track schedule in database if source_id is available
                         # This allows standalone schedule import to skip already-created schedules
-                        if source_schedule_id and result.get("id"):
+                        sched_tgt_id = result.get("id")
+                        if source_schedule_id and sched_tgt_id is not None:
                             try:
                                 self.state.save_id_mapping(
                                     resource_type="schedules",
-                                    source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    source_id=int(source_schedule_id),
+                                    target_id=int(sched_tgt_id),
                                     source_name=schedule_name,
                                     target_name=schedule_name,
                                 )
                                 self.state.mark_completed(
                                     resource_type="schedules",
-                                    source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    source_id=int(source_schedule_id),
+                                    target_id=int(sched_tgt_id),
                                     target_name=schedule_name,
                                     source_name=schedule_name,
                                 )
                                 logger.debug(
                                     "job_template_schedule_tracked",
                                     source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    target_id=int(sched_tgt_id),
                                     schedule_name=schedule_name,
                                 )
                             except Exception as tracking_error:
@@ -3999,7 +4118,7 @@ class JobTemplateImporter(ResourceImporter):
                                 logger.warning(
                                     "job_template_schedule_tracking_failed",
                                     source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    target_id=int(sched_tgt_id),
                                     schedule_name=schedule_name,
                                     error=str(tracking_error),
                                 )
@@ -4052,7 +4171,9 @@ class JobTemplateImporter(ResourceImporter):
             )
 
             # Track notification association warnings for migration report
-            notification_warnings = {}  # template_id -> list of warning messages
+            notification_warnings: dict[
+                Any, list[str]
+            ] = {}  # template_id -> list of warning messages
 
             for notif_data in templates_with_notifications:
                 template_id = notif_data["template_id"]
@@ -4063,7 +4184,9 @@ class JobTemplateImporter(ResourceImporter):
                 for notif_type, source_notif_ids in notifications.items():
                     for source_notif_id in source_notif_ids:
                         # Map notification template ID from source to target
-                        target_notif_id = self.state.get_mapped_id("notification_templates", source_notif_id)
+                        target_notif_id = self.state.get_mapped_id(
+                            "notification_templates", source_notif_id
+                        )
 
                         if not target_notif_id:
                             warning_msg = f"Notification template (source ID: {source_notif_id}) not migrated - {notif_type} notification not associated"
@@ -4171,7 +4294,7 @@ class JobTemplateImporter(ResourceImporter):
 class WorkflowImporter(ResourceImporter):
     """Importer for workflow job template resources."""
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
         "inventory": "inventories",
         "webhook_credential": "credentials",
@@ -4275,15 +4398,22 @@ class WorkflowImporter(ResourceImporter):
                         # Check if this node references a FAILED template
                         if ujt_type == "job" and ujt_source_id in failed_job_template_ids:
                             missing_dependencies.append((ujt_source_id, ujt_type, ujt_name))
-                        elif ujt_type == "workflow_job" and ujt_source_id in failed_workflow_template_ids:
+                        elif (
+                            ujt_type == "workflow_job"
+                            and ujt_source_id in failed_workflow_template_ids
+                        ):
                             missing_dependencies.append((ujt_source_id, ujt_type, ujt_name))
                         elif ujt_type is None or ujt_type not in ["job", "workflow_job"]:
                             # Unknown/missing type - check both sets to be safe
                             # This handles data corruption or unexpected ujt_type values
                             if ujt_source_id in failed_job_template_ids:
-                                missing_dependencies.append((ujt_source_id, "job (assumed)", ujt_name))
+                                missing_dependencies.append(
+                                    (ujt_source_id, "job (assumed)", ujt_name)
+                                )
                             elif ujt_source_id in failed_workflow_template_ids:
-                                missing_dependencies.append((ujt_source_id, "workflow_job (assumed)", ujt_name))
+                                missing_dependencies.append(
+                                    (ujt_source_id, "workflow_job (assumed)", ujt_name)
+                                )
 
                 if missing_dependencies:
                     # Don't import this workflow - has failed dependencies
@@ -4291,7 +4421,7 @@ class WorkflowImporter(ResourceImporter):
 
                     # Deduplicate and count missing dependencies
                     # Key: (source_id, type, name), Value: count of references
-                    dep_counts = {}
+                    dep_counts: dict[tuple[Any, Any, Any], int] = {}
                     for source_id_val, dep_type, dep_name in missing_dependencies:
                         key = (source_id_val, dep_type, dep_name)
                         dep_counts[key] = dep_counts.get(key, 0) + 1
@@ -4300,9 +4430,13 @@ class WorkflowImporter(ResourceImporter):
                     missing_items = []
                     for (source_id_val, dep_type, dep_name), count in dep_counts.items():
                         if count > 1:
-                            missing_items.append(f"'{dep_name}' ({dep_type} template, ID: {source_id_val}) [referenced by {count} nodes]")
+                            missing_items.append(
+                                f"'{dep_name}' ({dep_type} template, ID: {source_id_val}) [referenced by {count} nodes]"
+                            )
                         else:
-                            missing_items.append(f"'{dep_name}' ({dep_type} template, ID: {source_id_val})")
+                            missing_items.append(
+                                f"'{dep_name}' ({dep_type} template, ID: {source_id_val})"
+                            )
 
                     error_msg = (
                         f"Cannot import workflow: {len(dep_counts)} unique template(s) "
@@ -4315,7 +4449,7 @@ class WorkflowImporter(ResourceImporter):
                     self.state.mark_in_progress(
                         resource_type="workflow_job_templates",
                         source_id=source_id,
-                        source_name=workflow.get("name"),
+                        source_name=str(workflow.get("name") or ""),
                         phase="import",
                     )
 
@@ -4380,29 +4514,35 @@ class WorkflowImporter(ResourceImporter):
 
                 # Store survey spec for later import
                 if survey_spec:
-                    workflows_with_surveys.append({
-                        "workflow_id": result["id"],
-                        "workflow_name": result.get("name", "unknown"),
-                        "survey_spec": survey_spec,
-                    })
+                    workflows_with_surveys.append(
+                        {
+                            "workflow_id": result["id"],
+                            "workflow_name": result.get("name", "unknown"),
+                            "survey_spec": survey_spec,
+                        }
+                    )
 
                 # Store schedules for later import
                 if schedules:
-                    workflows_with_schedules.append({
-                        "source_workflow_id": source_id,
-                        "workflow_id": result["id"],
-                        "workflow_name": result.get("name", "unknown"),
-                        "schedules": schedules,
-                    })
+                    workflows_with_schedules.append(
+                        {
+                            "source_workflow_id": source_id,
+                            "workflow_id": result["id"],
+                            "workflow_name": result.get("name", "unknown"),
+                            "schedules": schedules,
+                        }
+                    )
 
                 # Store notification associations for later import
                 if notifications:
-                    workflows_with_notifications.append({
-                        "source_workflow_id": source_id,
-                        "workflow_id": result["id"],
-                        "workflow_name": result.get("name", "unknown"),
-                        "notifications": notifications,
-                    })
+                    workflows_with_notifications.append(
+                        {
+                            "source_workflow_id": source_id,
+                            "workflow_id": result["id"],
+                            "workflow_name": result.get("name", "unknown"),
+                            "notifications": notifications,
+                        }
+                    )
 
                 results.append(result)
                 success_count += 1
@@ -4452,7 +4592,7 @@ class WorkflowImporter(ResourceImporter):
                 # Note: This is now a backup - main validation happens before workflow import
                 if nodes_failed > 0:
                     # Group failed nodes by their parent workflow
-                    failed_by_workflow = {}
+                    failed_by_workflow: dict[Any, list[dict[str, Any]]] = {}
                     for error_record in node_importer.import_errors:
                         # Find the node in all_pending_nodes to get its parent workflow
                         node_source_id = error_record.get("source_id")
@@ -4613,11 +4753,24 @@ class WorkflowImporter(ResourceImporter):
                     source_schedule_id = schedule.get("id")
 
                     # Remove read-only fields
-                    schedule_to_import = {k: v for k, v in schedule.items() if k not in [
-                        "id", "type", "url", "related", "summary_fields",
-                        "created", "modified", "last_run", "next_run",
-                        "status", "unified_job_template"
-                    ]}
+                    schedule_to_import = {
+                        k: v
+                        for k, v in schedule.items()
+                        if k
+                        not in [
+                            "id",
+                            "type",
+                            "url",
+                            "related",
+                            "summary_fields",
+                            "created",
+                            "modified",
+                            "last_run",
+                            "next_run",
+                            "status",
+                            "unified_job_template",
+                        ]
+                    }
 
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
@@ -4640,26 +4793,27 @@ class WorkflowImporter(ResourceImporter):
 
                         # Track schedule in database if source_id is available
                         # This allows standalone schedule import to skip already-created schedules
-                        if source_schedule_id and result.get("id"):
+                        sched_tgt_id = result.get("id")
+                        if source_schedule_id and sched_tgt_id is not None:
                             try:
                                 self.state.save_id_mapping(
                                     resource_type="schedules",
-                                    source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    source_id=int(source_schedule_id),
+                                    target_id=int(sched_tgt_id),
                                     source_name=schedule_name,
                                     target_name=schedule_name,
                                 )
                                 self.state.mark_completed(
                                     resource_type="schedules",
-                                    source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    source_id=int(source_schedule_id),
+                                    target_id=int(sched_tgt_id),
                                     target_name=schedule_name,
                                     source_name=schedule_name,
                                 )
                                 logger.debug(
                                     "workflow_schedule_tracked",
                                     source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    target_id=int(sched_tgt_id),
                                     schedule_name=schedule_name,
                                 )
                             except Exception as tracking_error:
@@ -4667,7 +4821,7 @@ class WorkflowImporter(ResourceImporter):
                                 logger.warning(
                                     "workflow_schedule_tracking_failed",
                                     source_id=source_schedule_id,
-                                    target_id=result.get("id"),
+                                    target_id=int(sched_tgt_id),
                                     schedule_name=schedule_name,
                                     error=str(tracking_error),
                                 )
@@ -4688,7 +4842,9 @@ class WorkflowImporter(ResourceImporter):
             )
 
             # Track notification association warnings for migration report
-            notification_warnings = {}  # workflow_id -> list of warning messages
+            notification_warnings: dict[
+                Any, list[str]
+            ] = {}  # workflow_id -> list of warning messages
 
             for notif_data in workflows_with_notifications:
                 workflow_id = notif_data["workflow_id"]
@@ -4699,7 +4855,9 @@ class WorkflowImporter(ResourceImporter):
                 for notif_type, source_notif_ids in notifications.items():
                     for source_notif_id in source_notif_ids:
                         # Map notification template ID from source to target
-                        target_notif_id = self.state.get_mapped_id("notification_templates", source_notif_id)
+                        target_notif_id = self.state.get_mapped_id(
+                            "notification_templates", source_notif_id
+                        )
 
                         if not target_notif_id:
                             warning_msg = f"Notification template (source ID: {source_notif_id}) not migrated - {notif_type} notification not associated"
@@ -4777,7 +4935,6 @@ class WorkflowImporter(ResourceImporter):
         failed_edges = 0
 
         for node in nodes:
-            source_node_id = node.get("_source_id")
             target_node_id = node.get("id")
             edge_data = node.get("_edge_data", {})
 
@@ -4791,7 +4948,7 @@ class WorkflowImporter(ResourceImporter):
                     try:
                         await self.client.post(
                             f"workflow_job_template_nodes/{target_node_id}/success_nodes/",
-                            json_data={"id": target_child_id}
+                            json_data={"id": target_child_id},
                         )
                         edge_count += 1
                         logger.debug(
@@ -4817,7 +4974,7 @@ class WorkflowImporter(ResourceImporter):
                     try:
                         await self.client.post(
                             f"workflow_job_template_nodes/{target_node_id}/failure_nodes/",
-                            json_data={"id": target_child_id}
+                            json_data={"id": target_child_id},
                         )
                         edge_count += 1
                         logger.debug(
@@ -4843,7 +5000,7 @@ class WorkflowImporter(ResourceImporter):
                     try:
                         await self.client.post(
                             f"workflow_job_template_nodes/{target_node_id}/always_nodes/",
-                            json_data={"id": target_child_id}
+                            json_data={"id": target_child_id},
                         )
                         edge_count += 1
                         logger.debug(
@@ -4884,7 +5041,7 @@ class NotificationTemplateImporter(ResourceImporter):
     job status (email, Slack, webhook, etc.).
     """
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
     }
 
@@ -4914,7 +5071,7 @@ class SystemJobTemplateImporter(ResourceImporter):
     System job templates are built-in and read-only. We only map them.
     """
 
-    DEPENDENCIES = {}
+    DEPENDENCIES: dict[str, str] = {}
 
     async def import_resource(
         self,
@@ -4992,10 +5149,12 @@ class SystemJobTemplateImporter(ResourceImporter):
             schedules = template.pop("schedules", None)
             if schedules:
                 source_id = template.get("_source_id", template.get("id"))
-                templates_with_schedules.append({
-                    "source_template_id": source_id,
-                    "schedules": schedules,
-                })
+                templates_with_schedules.append(
+                    {
+                        "source_template_id": source_id,
+                        "schedules": schedules,
+                    }
+                )
 
         # Import (map) system job templates
         results = await self._import_parallel("system_job_templates", templates, progress_callback)
@@ -5012,7 +5171,9 @@ class SystemJobTemplateImporter(ResourceImporter):
                 schedules = schedule_data["schedules"]
 
                 # Get the target system job template ID from the state mapping
-                target_template_id = self.state.get_mapped_id("system_job_templates", source_template_id)
+                target_template_id = self.state.get_mapped_id(
+                    "system_job_templates", source_template_id
+                )
                 if not target_template_id:
                     logger.warning(
                         "system_job_template_not_found_for_schedule",
@@ -5021,18 +5182,35 @@ class SystemJobTemplateImporter(ResourceImporter):
                     continue
 
                 # Get system job template name for logging
-                template_result = next((t for t in results if t.get("id") == target_template_id), None)
-                template_name = template_result.get("name", "unknown") if template_result else "unknown"
+                template_result = next(
+                    (t for t in results if t.get("id") == target_template_id), None
+                )
+                template_name = (
+                    template_result.get("name", "unknown") if template_result else "unknown"
+                )
 
                 for schedule in schedules:
                     schedule_name = schedule.get("name", "unknown")
 
                     # Remove read-only fields
-                    schedule_to_import = {k: v for k, v in schedule.items() if k not in [
-                        "id", "type", "url", "related", "summary_fields",
-                        "created", "modified", "last_run", "next_run",
-                        "status", "unified_job_template"
-                    ]}
+                    schedule_to_import = {
+                        k: v
+                        for k, v in schedule.items()
+                        if k
+                        not in [
+                            "id",
+                            "type",
+                            "url",
+                            "related",
+                            "summary_fields",
+                            "created",
+                            "modified",
+                            "last_run",
+                            "next_run",
+                            "status",
+                            "unified_job_template",
+                        ]
+                    }
 
                     try:
                         result = await self.client.post(
@@ -5065,7 +5243,7 @@ class CredentialInputSourceImporter(ResourceImporter):
     from other credentials (e.g., a Vault credential).
     """
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "credential": "credentials",  # The credential being modified
         "source_credential": "credentials",  # The credential providing the input
     }
@@ -5101,13 +5279,11 @@ class CredentialInputSourceImporter(ResourceImporter):
             source_source_credential_id = input_source.get("source_credential")
             source_source_credential_field_name = input_source.get("source_credential_field_name")
 
-            if not all(
-                [
-                    source_target_credential_id,
-                    source_input_field_name,
-                    source_source_credential_id,
-                    source_source_credential_field_name,
-                ]
+            if (
+                source_target_credential_id is None
+                or not source_input_field_name
+                or source_source_credential_id is None
+                or not source_source_credential_field_name
             ):
                 logger.warning(
                     "credential_input_source_missing_fields",
@@ -5123,9 +5299,11 @@ class CredentialInputSourceImporter(ResourceImporter):
                     )
                 continue
 
+            source_id_int = int(source_id)
+
             # Check if the credential associated with this input source has already been migrated.
             target_credential_id = self.state.get_mapped_id(
-                "credentials", source_target_credential_id
+                "credentials", int(source_target_credential_id)
             )
             if not target_credential_id:
                 logger.warning(
@@ -5145,7 +5323,7 @@ class CredentialInputSourceImporter(ResourceImporter):
 
             # Resolve the source_credential to its target ID
             target_source_credential_id = self.state.get_mapped_id(
-                "credentials", source_source_credential_id
+                "credentials", int(source_source_credential_id)
             )
             if not target_source_credential_id:
                 logger.warning(
@@ -5192,9 +5370,9 @@ class CredentialInputSourceImporter(ResourceImporter):
                 # Mark as completed (even though it's a PATCH, not CREATE)
                 self.state.mark_completed(
                     resource_type="credential_input_sources",
-                    source_id=source_id,
+                    source_id=source_id_int,
                     target_id=target_credential_id,  # Link to the patched credential
-                    source_name=input_source.get("name", f"CIS-{source_id}"),
+                    source_name=input_source.get("name", f"CIS-{source_id_int}"),
                     target_name=target_credential_obj.get("name"),
                 )
                 self.stats["imported_count"] += 1
@@ -5220,7 +5398,7 @@ class CredentialInputSourceImporter(ResourceImporter):
                 )
                 self.state.mark_failed(
                     resource_type="credential_input_sources",
-                    source_id=source_id,
+                    source_id=source_id_int,
                     error_message=str(e),
                 )
 
@@ -5245,7 +5423,7 @@ class ApplicationImporter(ResourceImporter):
     - Optionally uses provided secrets from config
     """
 
-    DEPENDENCIES = {
+    DEPENDENCIES: dict[str, str] = {
         "organization": "organizations",
     }
 
@@ -5283,26 +5461,22 @@ class ApplicationImporter(ResourceImporter):
             data = await self._resolve_dependencies(resource_type, data)
 
         # Handle client secret
-        if data.get('_requires_new_secret'):
+        if data.get("_requires_new_secret"):
             # Client secret will be auto-generated by AAP on creation
             # Remove the redacted placeholder
-            data.pop('client_secret', None)
-            logger.info(
-                "application_will_generate_new_secret",
-                name=name,
-                source_id=source_id
-            )
+            data.pop("client_secret", None)
+            logger.info("application_will_generate_new_secret", name=name, source_id=source_id)
 
         # Remove fields that AAP auto-generates or shouldn't be sent in POST
         # client_id and client_secret are auto-generated by AAP
-        data.pop('client_id', None)
-        if not data.get('_requires_new_secret'):
+        data.pop("client_id", None)
+        if not data.get("_requires_new_secret"):
             # Also remove client_secret if it exists (AAP masks it anyway)
-            data.pop('client_secret', None)
+            data.pop("client_secret", None)
 
         # Remove migration metadata
         for key in list(data.keys()):
-            if key.startswith('_'):
+            if key.startswith("_"):
                 data.pop(key)
 
         # Create application
@@ -5331,19 +5505,21 @@ class ApplicationImporter(ResourceImporter):
                 target_id=target_id,
                 name=name,
                 client_id=new_client_id,
-                message=f"⚠️  Update external systems with new credentials"
+                message="⚠️  Update external systems with new credentials",
             )
 
             # Add to report for user
-            self.import_errors.append({
-                "resource_type": "applications",
-                "source_id": source_id,
-                "name": name,
-                "action_required": "UPDATE_EXTERNAL_SYSTEMS",
-                "new_client_id": new_client_id,
-                "new_client_secret": new_client_secret,
-                "message": f"Application '{name}' created with NEW credentials. Update external systems."
-            })
+            self.import_errors.append(
+                {
+                    "resource_type": "applications",
+                    "source_id": source_id,
+                    "name": name,
+                    "action_required": "UPDATE_EXTERNAL_SYSTEMS",
+                    "new_client_id": new_client_id,
+                    "new_client_secret": new_client_secret,
+                    "message": f"Application '{name}' created with NEW credentials. Update external systems.",
+                }
+            )
 
             return result
 
@@ -5406,17 +5582,17 @@ class SettingsImporter(ResourceImporter):
             Result of settings import
         """
         # Settings are imported as a single resource
-        safe = data.get('safe_to_copy', {})
-        review_required = data.get('review_required', {})
-        sensitive = data.get('sensitive', {})
-        summary = data.get('_summary', {})
+        safe = data.get("safe_to_copy", {})
+        review_required = data.get("review_required", {})
+        sensitive = data.get("sensitive", {})
+        summary = data.get("_summary", {})
 
         logger.info(
             "settings_import_starting",
             total_safe=len(safe),
             total_review=len(review_required),
             total_sensitive=len(sensitive),
-            auto_import_percentage=summary.get('auto_import_percentage', 0)
+            auto_import_percentage=summary.get("auto_import_percentage", 0),
         )
 
         imported_count = 0
@@ -5424,7 +5600,6 @@ class SettingsImporter(ResourceImporter):
         ldap_migrated = False
 
         # Detect AAP version
-        from packaging import version
         target_version = await self.client.get_version()
         is_aap_26 = version.parse(target_version) >= version.parse("2.6.0")
 
@@ -5436,12 +5611,14 @@ class SettingsImporter(ResourceImporter):
             )
 
             # Remove migrated auth settings from categories
-            for prefix in migration_result.get('migrated_prefixes', []):
+            for prefix in migration_result.get("migrated_prefixes", []):
                 safe = {k: v for k, v in safe.items() if not k.startswith(prefix)}
-                review_required = {k: v for k, v in review_required.items() if not k.startswith(prefix)}
+                review_required = {
+                    k: v for k, v in review_required.items() if not k.startswith(prefix)
+                }
                 sensitive = {k: v for k, v in sensitive.items() if not k.startswith(prefix)}
 
-            ldap_migrated = migration_result.get('ldap_migrated', False)
+            ldap_migrated = migration_result.get("ldap_migrated", False)
 
         # Import safe settings automatically (non-LDAP for AAP 2.6)
         if safe:
@@ -5451,7 +5628,7 @@ class SettingsImporter(ResourceImporter):
                 logger.info(
                     "settings_safe_imported",
                     count=imported_count,
-                    message=f"✓ Auto-imported {imported_count} safe settings"
+                    message=f"✓ Auto-imported {imported_count} safe settings",
                 )
             except Exception as e:
                 logger.error("settings_safe_import_failed", error=str(e))
@@ -5460,7 +5637,9 @@ class SettingsImporter(ResourceImporter):
         # Generate review report
         if review_required or sensitive:
             # Pass migration result if AAP 2.6, otherwise just ldap_migrated boolean
-            auth_migration_info = migration_result if is_aap_26 else {'ldap_migrated': ldap_migrated}
+            auth_migration_info = (
+                migration_result if is_aap_26 else {"ldap_migrated": ldap_migrated}
+            )
             self._generate_settings_review_report(review_required, sensitive, auth_migration_info)
 
         self.stats["imported_count"] += imported_count
@@ -5470,7 +5649,7 @@ class SettingsImporter(ResourceImporter):
             "safe_imported": imported_count,
             "review_required": len(review_required),
             "sensitive_requires_manual": len(sensitive),
-            "report_generated": "SETTINGS-REVIEW-REPORT.md"
+            "report_generated": "SETTINGS-REVIEW-REPORT.md",
         }
 
         if ldap_migrated:
@@ -5479,10 +5658,7 @@ class SettingsImporter(ResourceImporter):
         return result
 
     async def _migrate_all_authentication_to_gateway(
-        self,
-        safe: dict,
-        review_required: dict,
-        sensitive: dict
+        self, safe: dict, review_required: dict, sensitive: dict
     ) -> dict[str, Any]:
         """Migrate all authentication methods to Platform Gateway (AAP 2.6+).
 
@@ -5510,14 +5686,14 @@ class SettingsImporter(ResourceImporter):
                 'migrated_prefixes': list  # Settings prefixes to remove
             }
         """
-        result = {
-            'ldap_migrated': False,
-            'saml_migrated': False,
-            'azure_ad_migrated': False,
-            'github_migrated': False,
-            'total_authenticators': 0,
-            'total_maps': 0,
-            'migrated_prefixes': []
+        result: dict[str, Any] = {
+            "ldap_migrated": False,
+            "saml_migrated": False,
+            "azure_ad_migrated": False,
+            "github_migrated": False,
+            "total_authenticators": 0,
+            "total_maps": 0,
+            "migrated_prefixes": [],
         }
 
         # 1. LDAP Migration (existing implementation - keep as-is)
@@ -5526,82 +5702,78 @@ class SettingsImporter(ResourceImporter):
             logger.info(
                 "ldap_settings_detected",
                 count=len(ldap_settings),
-                message="LDAP settings detected - will migrate to Platform Gateway"
+                message="LDAP settings detected - will migrate to Platform Gateway",
             )
             ldap_migrated = await self._migrate_ldap_to_gateway(ldap_settings)
             if ldap_migrated:
-                result['ldap_migrated'] = True
-                result['total_authenticators'] += 1
-                result['migrated_prefixes'].append('AUTH_LDAP_')
+                result["ldap_migrated"] = True
+                result["total_authenticators"] += 1
+                result["migrated_prefixes"].append("AUTH_LDAP_")
 
         # 2. SAML Migration
         saml_settings = self._extract_auth_settings(
-            safe, review_required, sensitive, 'SOCIAL_AUTH_SAML_'
+            safe, review_required, sensitive, "SOCIAL_AUTH_SAML_"
         )
         if saml_settings:
             logger.info(
                 "saml_settings_detected",
                 count=len(saml_settings),
-                message="SAML settings detected - will migrate to Platform Gateway"
+                message="SAML settings detected - will migrate to Platform Gateway",
             )
             saml_migrated = await self._migrate_saml_to_gateway(saml_settings)
             if saml_migrated:
-                result['saml_migrated'] = True
-                result['total_authenticators'] += 1
-                result['migrated_prefixes'].append('SOCIAL_AUTH_SAML_')
+                result["saml_migrated"] = True
+                result["total_authenticators"] += 1
+                result["migrated_prefixes"].append("SOCIAL_AUTH_SAML_")
 
         # 3. Azure AD OAuth2 Migration
         azure_settings = self._extract_auth_settings(
-            safe, review_required, sensitive, 'SOCIAL_AUTH_AZUREAD_OAUTH2_'
+            safe, review_required, sensitive, "SOCIAL_AUTH_AZUREAD_OAUTH2_"
         )
         if azure_settings:
             logger.info(
                 "azure_ad_settings_detected",
                 count=len(azure_settings),
-                message="Azure AD OAuth2 settings detected - will migrate to Platform Gateway"
+                message="Azure AD OAuth2 settings detected - will migrate to Platform Gateway",
             )
             azure_migrated = await self._migrate_azure_ad_to_gateway(azure_settings)
             if azure_migrated:
-                result['azure_ad_migrated'] = True
-                result['total_authenticators'] += 1
-                result['migrated_prefixes'].append('SOCIAL_AUTH_AZUREAD_OAUTH2_')
+                result["azure_ad_migrated"] = True
+                result["total_authenticators"] += 1
+                result["migrated_prefixes"].append("SOCIAL_AUTH_AZUREAD_OAUTH2_")
 
         # 4. GitHub Enterprise Migration
         github_settings = self._extract_auth_settings(
-            safe, review_required, sensitive, 'SOCIAL_AUTH_GITHUB_ENTERPRISE_'
+            safe, review_required, sensitive, "SOCIAL_AUTH_GITHUB_ENTERPRISE_"
         )
         if github_settings:
             logger.info(
                 "github_settings_detected",
                 count=len(github_settings),
-                message="GitHub Enterprise settings detected - will migrate to Platform Gateway"
+                message="GitHub Enterprise settings detected - will migrate to Platform Gateway",
             )
             github_migrated = await self._migrate_github_to_gateway(github_settings)
             if github_migrated:
-                result['github_migrated'] = True
-                result['total_authenticators'] += 1
-                result['migrated_prefixes'].append('SOCIAL_AUTH_GITHUB_ENTERPRISE_')
+                result["github_migrated"] = True
+                result["total_authenticators"] += 1
+                result["migrated_prefixes"].append("SOCIAL_AUTH_GITHUB_ENTERPRISE_")
 
         # Log overall migration summary
-        if result['total_authenticators'] > 0:
+        if result["total_authenticators"] > 0:
             logger.info(
                 "authentication_migration_completed",
-                total_authenticators=result['total_authenticators'],
-                ldap=result['ldap_migrated'],
-                saml=result['saml_migrated'],
-                azure_ad=result['azure_ad_migrated'],
-                github=result['github_migrated'],
-                message=f"✓ Migrated {result['total_authenticators']} authentication method(s) to Platform Gateway"
+                total_authenticators=result["total_authenticators"],
+                ldap=result["ldap_migrated"],
+                saml=result["saml_migrated"],
+                azure_ad=result["azure_ad_migrated"],
+                github=result["github_migrated"],
+                message=f"✓ Migrated {result['total_authenticators']} authentication method(s) to Platform Gateway",
             )
 
         return result
 
     def _extract_auth_settings(
-        self,
-        safe: dict,
-        review_required: dict,
-        sensitive: dict,
-        prefix: str
+        self, safe: dict, review_required: dict, sensitive: dict, prefix: str
     ) -> dict[str, Any]:
         """Extract authentication settings by prefix (generic method).
 
@@ -5621,8 +5793,8 @@ class SettingsImporter(ResourceImporter):
             for key, value in category.items():
                 if key.startswith(prefix):
                     # For review_required and sensitive, extract the actual value
-                    if isinstance(value, dict) and 'source_value' in value:
-                        settings[key] = value['source_value']
+                    if isinstance(value, dict) and "source_value" in value:
+                        settings[key] = value["source_value"]
                     else:
                         settings[key] = value
 
@@ -5641,10 +5813,7 @@ class SettingsImporter(ResourceImporter):
             # Transform SAML settings to Gateway format
             gateway_config = self._transform_saml_to_gateway(saml_settings)
             if not gateway_config:
-                logger.warning(
-                    "saml_migration_skipped",
-                    reason="Insufficient SAML configuration"
-                )
+                logger.warning("saml_migration_skipped", reason="Insufficient SAML configuration")
                 return False
 
             # Create SAML authenticator
@@ -5654,29 +5823,28 @@ class SettingsImporter(ResourceImporter):
                 configuration=gateway_config,
                 enabled=True,
                 create_objects=True,
-                order=2
+                order=2,
             )
 
             logger.info(
                 "saml_authenticator_created",
-                authenticator_id=authenticator.get('id'),
-                name=authenticator.get('name'),
-                message="✓ SAML authenticator migrated to Platform Gateway"
+                authenticator_id=authenticator.get("id"),
+                name=authenticator.get("name"),
+                message="✓ SAML authenticator migrated to Platform Gateway",
             )
 
             # Create authenticator maps for organization/team mappings if present
             # (SAML may have organization/team mapping configuration)
             maps_created = 0
-            if 'SOCIAL_AUTH_SAML_ORGANIZATION_MAP' in saml_settings:
+            if "SOCIAL_AUTH_SAML_ORGANIZATION_MAP" in saml_settings:
                 maps_created = await self._create_saml_authenticator_maps(
-                    authenticator['id'],
-                    saml_settings
+                    authenticator["id"], saml_settings
                 )
                 if maps_created > 0:
                     logger.info(
                         "saml_authenticator_maps_created",
                         count=maps_created,
-                        message=f"✓ Created {maps_created} SAML authenticator maps"
+                        message=f"✓ Created {maps_created} SAML authenticator maps",
                     )
 
             return True
@@ -5685,7 +5853,7 @@ class SettingsImporter(ResourceImporter):
             logger.error(
                 "saml_migration_failed",
                 error=str(e),
-                message="✗ Failed to migrate SAML settings to Gateway"
+                message="✗ Failed to migrate SAML settings to Gateway",
             )
             return False
 
@@ -5703,8 +5871,7 @@ class SettingsImporter(ResourceImporter):
             gateway_config = self._transform_azure_ad_to_gateway(azure_settings)
             if not gateway_config:
                 logger.warning(
-                    "azure_ad_migration_skipped",
-                    reason="Insufficient Azure AD configuration"
+                    "azure_ad_migration_skipped", reason="Insufficient Azure AD configuration"
                 )
                 return False
 
@@ -5715,14 +5882,14 @@ class SettingsImporter(ResourceImporter):
                 configuration=gateway_config,
                 enabled=True,
                 create_objects=True,
-                order=3
+                order=3,
             )
 
             logger.info(
                 "azure_ad_authenticator_created",
-                authenticator_id=authenticator.get('id'),
-                name=authenticator.get('name'),
-                message="✓ Azure AD authenticator migrated to Platform Gateway"
+                authenticator_id=authenticator.get("id"),
+                name=authenticator.get("name"),
+                message="✓ Azure AD authenticator migrated to Platform Gateway",
             )
 
             return True
@@ -5731,7 +5898,7 @@ class SettingsImporter(ResourceImporter):
             logger.error(
                 "azure_ad_migration_failed",
                 error=str(e),
-                message="✗ Failed to migrate Azure AD settings to Gateway"
+                message="✗ Failed to migrate Azure AD settings to Gateway",
             )
             return False
 
@@ -5749,8 +5916,7 @@ class SettingsImporter(ResourceImporter):
             gateway_config = self._transform_github_to_gateway(github_settings)
             if not gateway_config:
                 logger.warning(
-                    "github_migration_skipped",
-                    reason="Insufficient GitHub configuration"
+                    "github_migration_skipped", reason="Insufficient GitHub configuration"
                 )
                 return False
 
@@ -5761,14 +5927,14 @@ class SettingsImporter(ResourceImporter):
                 configuration=gateway_config,
                 enabled=True,
                 create_objects=True,
-                order=4
+                order=4,
             )
 
             logger.info(
                 "github_authenticator_created",
-                authenticator_id=authenticator.get('id'),
-                name=authenticator.get('name'),
-                message="✓ GitHub authenticator migrated to Platform Gateway"
+                authenticator_id=authenticator.get("id"),
+                name=authenticator.get("name"),
+                message="✓ GitHub authenticator migrated to Platform Gateway",
             )
 
             return True
@@ -5777,7 +5943,7 @@ class SettingsImporter(ResourceImporter):
             logger.error(
                 "github_migration_failed",
                 error=str(e),
-                message="✗ Failed to migrate GitHub settings to Gateway"
+                message="✗ Failed to migrate GitHub settings to Gateway",
             )
             return False
 
@@ -5798,7 +5964,7 @@ class SettingsImporter(ResourceImporter):
             Gateway authenticator configuration or None if insufficient data
         """
         # Required field - at least one IDP must be configured
-        enabled_idps = saml_settings.get('SOCIAL_AUTH_SAML_ENABLED_IDPS')
+        enabled_idps = saml_settings.get("SOCIAL_AUTH_SAML_ENABLED_IDPS")
         if not enabled_idps:
             return None
 
@@ -5806,14 +5972,14 @@ class SettingsImporter(ResourceImporter):
 
         # Map fields from AAP 2.4 to Gateway format
         field_mapping = {
-            'SOCIAL_AUTH_SAML_SP_ENTITY_ID': 'SP_ENTITY_ID',
-            'SOCIAL_AUTH_SAML_SP_PUBLIC_CERT': 'SP_PUBLIC_CERT',
+            "SOCIAL_AUTH_SAML_SP_ENTITY_ID": "SP_ENTITY_ID",
+            "SOCIAL_AUTH_SAML_SP_PUBLIC_CERT": "SP_PUBLIC_CERT",
             # SP_PRIVATE_KEY excluded for security (manual entry required)
-            'SOCIAL_AUTH_SAML_ORG_INFO': 'ORG_INFO',
-            'SOCIAL_AUTH_SAML_TECHNICAL_CONTACT': 'TECHNICAL_CONTACT',
-            'SOCIAL_AUTH_SAML_SUPPORT_CONTACT': 'SUPPORT_CONTACT',
-            'SOCIAL_AUTH_SAML_ENABLED_IDPS': 'ENABLED_IDPS',
-            'SOCIAL_AUTH_SAML_SECURITY_CONFIG': 'SECURITY_CONFIG',
+            "SOCIAL_AUTH_SAML_ORG_INFO": "ORG_INFO",
+            "SOCIAL_AUTH_SAML_TECHNICAL_CONTACT": "TECHNICAL_CONTACT",
+            "SOCIAL_AUTH_SAML_SUPPORT_CONTACT": "SUPPORT_CONTACT",
+            "SOCIAL_AUTH_SAML_ENABLED_IDPS": "ENABLED_IDPS",
+            "SOCIAL_AUTH_SAML_SECURITY_CONFIG": "SECURITY_CONFIG",
         }
 
         for old_key, new_key in field_mapping.items():
@@ -5822,7 +5988,9 @@ class SettingsImporter(ResourceImporter):
 
         return config
 
-    def _transform_azure_ad_to_gateway(self, azure_settings: dict[str, Any]) -> dict[str, Any] | None:
+    def _transform_azure_ad_to_gateway(
+        self, azure_settings: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Transform AAP 2.4 Azure AD settings to Gateway authenticator format.
 
         Field mapping:
@@ -5837,7 +6005,7 @@ class SettingsImporter(ResourceImporter):
             Gateway authenticator configuration or None if insufficient data
         """
         # Required field
-        client_id = azure_settings.get('SOCIAL_AUTH_AZUREAD_OAUTH2_KEY')
+        client_id = azure_settings.get("SOCIAL_AUTH_AZUREAD_OAUTH2_KEY")
         if not client_id:
             return None
 
@@ -5845,9 +6013,9 @@ class SettingsImporter(ResourceImporter):
 
         # Map fields from AAP 2.4 to Gateway format
         field_mapping = {
-            'SOCIAL_AUTH_AZUREAD_OAUTH2_KEY': 'KEY',
+            "SOCIAL_AUTH_AZUREAD_OAUTH2_KEY": "KEY",
             # SECRET excluded for security (manual entry required)
-            'SOCIAL_AUTH_AZUREAD_OAUTH2_URL': 'URL',
+            "SOCIAL_AUTH_AZUREAD_OAUTH2_URL": "URL",
         }
 
         for old_key, new_key in field_mapping.items():
@@ -5856,7 +6024,9 @@ class SettingsImporter(ResourceImporter):
 
         return config
 
-    def _transform_github_to_gateway(self, github_settings: dict[str, Any]) -> dict[str, Any] | None:
+    def _transform_github_to_gateway(
+        self, github_settings: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Transform AAP 2.4 GitHub settings to Gateway authenticator format.
 
         Field mapping:
@@ -5873,7 +6043,7 @@ class SettingsImporter(ResourceImporter):
             Gateway authenticator configuration or None if insufficient data
         """
         # Required field
-        url = github_settings.get('SOCIAL_AUTH_GITHUB_ENTERPRISE_URL')
+        url = github_settings.get("SOCIAL_AUTH_GITHUB_ENTERPRISE_URL")
         if not url:
             return None
 
@@ -5881,9 +6051,9 @@ class SettingsImporter(ResourceImporter):
 
         # Map fields from AAP 2.4 to Gateway format
         field_mapping = {
-            'SOCIAL_AUTH_GITHUB_ENTERPRISE_URL': 'URL',
-            'SOCIAL_AUTH_GITHUB_ENTERPRISE_API_URL': 'API_URL',
-            'SOCIAL_AUTH_GITHUB_ENTERPRISE_KEY': 'KEY',
+            "SOCIAL_AUTH_GITHUB_ENTERPRISE_URL": "URL",
+            "SOCIAL_AUTH_GITHUB_ENTERPRISE_API_URL": "API_URL",
+            "SOCIAL_AUTH_GITHUB_ENTERPRISE_KEY": "KEY",
             # SECRET excluded for security (manual entry required)
         }
 
@@ -5894,9 +6064,7 @@ class SettingsImporter(ResourceImporter):
         return config
 
     async def _create_saml_authenticator_maps(
-        self,
-        authenticator_id: int,
-        saml_settings: dict[str, Any]
+        self, authenticator_id: int, saml_settings: dict[str, Any]
     ) -> int:
         """Create authenticator maps for SAML organization/team mappings.
 
@@ -5910,8 +6078,8 @@ class SettingsImporter(ResourceImporter):
         maps_created = 0
 
         # Extract organization/team mappings if present
-        org_map = saml_settings.get('SOCIAL_AUTH_SAML_ORGANIZATION_MAP', {})
-        team_map = saml_settings.get('SOCIAL_AUTH_SAML_TEAM_MAP', {})
+        org_map = saml_settings.get("SOCIAL_AUTH_SAML_ORGANIZATION_MAP", {})
+        team_map = saml_settings.get("SOCIAL_AUTH_SAML_TEAM_MAP", {})
 
         try:
             # Create organization maps
@@ -5919,7 +6087,7 @@ class SettingsImporter(ResourceImporter):
                 for org_name, org_config in org_map.items():
                     # SAML uses SAML attributes instead of LDAP groups
                     # Trigger based on SAML attribute values
-                    users_attr = org_config.get('users')
+                    users_attr = org_config.get("users")
                     if users_attr:
                         try:
                             await self.client.create_authenticator_map(
@@ -5928,13 +6096,9 @@ class SettingsImporter(ResourceImporter):
                                 map_type="organization",
                                 organization=org_name,
                                 role="Organization Member",
-                                triggers={
-                                    "attributes": {
-                                        "has_or": [users_attr]
-                                    }
-                                },
-                                revoke=org_config.get('remove_users', False),
-                                order=10
+                                triggers={"attributes": {"has_or": [users_attr]}},
+                                revoke=org_config.get("remove_users", False),
+                                order=10,
                             )
                             maps_created += 1
                         except Exception as e:
@@ -5942,10 +6106,10 @@ class SettingsImporter(ResourceImporter):
                                 "saml_authenticator_map_creation_failed",
                                 org=org_name,
                                 role="member",
-                                error=str(e)
+                                error=str(e),
                             )
 
-                    admins_attr = org_config.get('admins')
+                    admins_attr = org_config.get("admins")
                     if admins_attr:
                         try:
                             await self.client.create_authenticator_map(
@@ -5954,13 +6118,9 @@ class SettingsImporter(ResourceImporter):
                                 map_type="organization",
                                 organization=org_name,
                                 role="Organization Admin",
-                                triggers={
-                                    "attributes": {
-                                        "has_or": [admins_attr]
-                                    }
-                                },
-                                revoke=org_config.get('remove_admins', False),
-                                order=10
+                                triggers={"attributes": {"has_or": [admins_attr]}},
+                                revoke=org_config.get("remove_admins", False),
+                                order=10,
                             )
                             maps_created += 1
                         except Exception as e:
@@ -5968,14 +6128,14 @@ class SettingsImporter(ResourceImporter):
                                 "saml_authenticator_map_creation_failed",
                                 org=org_name,
                                 role="admin",
-                                error=str(e)
+                                error=str(e),
                             )
 
             # Create team maps
             if team_map:
                 for team_name, team_config in team_map.items():
-                    users_attr = team_config.get('users')
-                    org_name = team_config.get('organization')
+                    users_attr = team_config.get("users")
+                    org_name = team_config.get("organization")
 
                     if users_attr and org_name:
                         try:
@@ -5986,36 +6146,29 @@ class SettingsImporter(ResourceImporter):
                                 organization=org_name,
                                 team=team_name,
                                 role="Team Member",
-                                triggers={
-                                    "attributes": {
-                                        "has_or": [users_attr]
-                                    }
-                                },
-                                revoke=team_config.get('remove', False),
-                                order=20
+                                triggers={"attributes": {"has_or": [users_attr]}},
+                                revoke=team_config.get("remove", False),
+                                order=20,
                             )
                             maps_created += 1
                         except Exception as e:
                             logger.error(
                                 "saml_authenticator_map_creation_failed",
                                 team=team_name,
-                                error=str(e)
+                                error=str(e),
                             )
 
         except Exception as e:
             logger.error(
                 "saml_authenticator_maps_creation_error",
                 authenticator_id=authenticator_id,
-                error=str(e)
+                error=str(e),
             )
 
         return maps_created
 
     def _extract_ldap_settings(
-        self,
-        safe: dict,
-        review_required: dict,
-        sensitive: dict
+        self, safe: dict, review_required: dict, sensitive: dict
     ) -> dict[str, Any]:
         """Extract all LDAP settings from categorized settings.
 
@@ -6032,10 +6185,10 @@ class SettingsImporter(ResourceImporter):
         # Collect LDAP settings from all categories
         for category in [safe, review_required, sensitive]:
             for key, value in category.items():
-                if key.startswith('AUTH_LDAP_'):
+                if key.startswith("AUTH_LDAP_"):
                     # For review_required and sensitive, extract the actual value
-                    if isinstance(value, dict) and 'source_value' in value:
-                        ldap_settings[key] = value['source_value']
+                    if isinstance(value, dict) and "source_value" in value:
+                        ldap_settings[key] = value["source_value"]
                     else:
                         ldap_settings[key] = value
 
@@ -6065,7 +6218,7 @@ class SettingsImporter(ResourceImporter):
                     logger.warning(
                         "ldap_server_skipped",
                         server_name=server_name,
-                        message="Insufficient LDAP configuration"
+                        message="Insufficient LDAP configuration",
                     )
                     continue
 
@@ -6084,7 +6237,10 @@ class SettingsImporter(ResourceImporter):
                         order=order,
                     )
 
-                    authenticator_id = authenticator.get('id')
+                    authenticator_id_raw = authenticator.get("id")
+                    if authenticator_id_raw is None:
+                        raise TypeError("LDAP gateway authenticator response missing id")
+                    authenticator_id = int(authenticator_id_raw)
                     authenticators_created += 1
 
                     logger.info(
@@ -6092,14 +6248,14 @@ class SettingsImporter(ResourceImporter):
                         server_name=server_name,
                         authenticator_id=authenticator_id,
                         order=order,
-                        message=f"✓ Created Gateway authenticator: {server_name}"
+                        message=f"✓ Created Gateway authenticator: {server_name}",
                     )
 
                     # Create authenticator maps for organization/team/user flag mappings
                     maps_created = await self._create_authenticator_maps(
                         authenticator_id=authenticator_id,
                         server_name=server_name,
-                        server_settings=server_settings
+                        server_settings=server_settings,
                     )
 
                     total_maps_created += maps_created
@@ -6110,7 +6266,7 @@ class SettingsImporter(ResourceImporter):
                             server_name=server_name,
                             authenticator_id=authenticator_id,
                             maps_count=maps_created,
-                            message=f"✓ Created {maps_created} authenticator map(s)"
+                            message=f"✓ Created {maps_created} authenticator map(s)",
                         )
 
                 except Exception as e:
@@ -6125,13 +6281,12 @@ class SettingsImporter(ResourceImporter):
                     "ldap_migration_to_gateway_completed",
                     authenticators_count=authenticators_created,
                     maps_count=total_maps_created,
-                    message=f"✓ Migrated {authenticators_created} LDAP server(s) with {total_maps_created} mapping(s) to Platform Gateway"
+                    message=f"✓ Migrated {authenticators_created} LDAP server(s) with {total_maps_created} mapping(s) to Platform Gateway",
                 )
                 return True
             else:
                 logger.warning(
-                    "ldap_migration_to_gateway_failed",
-                    message="No LDAP authenticators created"
+                    "ldap_migration_to_gateway_failed", message="No LDAP authenticators created"
                 )
                 return False
 
@@ -6157,26 +6312,29 @@ class SettingsImporter(ResourceImporter):
 
         # Primary server (no number suffix)
         primary = {
-            k: v for k, v in ldap_settings.items()
-            if k.startswith('AUTH_LDAP_') and not k.startswith('AUTH_LDAP_1_') and not k.startswith('AUTH_LDAP_2_')
+            k: v
+            for k, v in ldap_settings.items()
+            if k.startswith("AUTH_LDAP_")
+            and not k.startswith("AUTH_LDAP_1_")
+            and not k.startswith("AUTH_LDAP_2_")
         }
         if primary:
             servers["Primary LDAP"] = primary
 
         # Secondary server (AUTH_LDAP_1_*)
         secondary = {
-            k.replace('AUTH_LDAP_1_', 'AUTH_LDAP_'): v
+            k.replace("AUTH_LDAP_1_", "AUTH_LDAP_"): v
             for k, v in ldap_settings.items()
-            if k.startswith('AUTH_LDAP_1_')
+            if k.startswith("AUTH_LDAP_1_")
         }
         if secondary:
             servers["Secondary LDAP"] = secondary
 
         # Tertiary server (AUTH_LDAP_2_*)
         tertiary = {
-            k.replace('AUTH_LDAP_2_', 'AUTH_LDAP_'): v
+            k.replace("AUTH_LDAP_2_", "AUTH_LDAP_"): v
             for k, v in ldap_settings.items()
-            if k.startswith('AUTH_LDAP_2_')
+            if k.startswith("AUTH_LDAP_2_")
         }
         if tertiary:
             servers["Tertiary LDAP"] = tertiary
@@ -6184,10 +6342,7 @@ class SettingsImporter(ResourceImporter):
         return servers
 
     async def _create_authenticator_maps(
-        self,
-        authenticator_id: int,
-        server_name: str,
-        server_settings: dict[str, Any]
+        self, authenticator_id: int, server_name: str, server_settings: dict[str, Any]
     ) -> int:
         """Create authenticator maps for organization/team/user flag mappings.
 
@@ -6205,9 +6360,9 @@ class SettingsImporter(ResourceImporter):
         maps_created = 0
 
         # Extract mapping fields from server settings
-        org_map = server_settings.get('AUTH_LDAP_ORGANIZATION_MAP', {})
-        team_map = server_settings.get('AUTH_LDAP_TEAM_MAP', {})
-        user_flags = server_settings.get('AUTH_LDAP_USER_FLAGS_BY_GROUP', {})
+        org_map = server_settings.get("AUTH_LDAP_ORGANIZATION_MAP", {})
+        team_map = server_settings.get("AUTH_LDAP_TEAM_MAP", {})
+        user_flags = server_settings.get("AUTH_LDAP_USER_FLAGS_BY_GROUP", {})
 
         try:
             # 1. Create user flag maps (superuser, auditor, etc.)
@@ -6221,26 +6376,20 @@ class SettingsImporter(ResourceImporter):
                             authenticator_id=authenticator_id,
                             name=f"LDAP - {flag_name.replace('_', ' ').title()}",
                             map_type=flag_name,  # e.g., "is_superuser", "is_system_auditor"
-                            triggers={
-                                "groups": {
-                                    "has_or": [ldap_group]
-                                }
-                            },
-                            order=5  # High priority for user flags
+                            triggers={"groups": {"has_or": [ldap_group]}},
+                            order=5,  # High priority for user flags
                         )
                         maps_created += 1
                     except Exception as e:
                         logger.error(
-                            "authenticator_map_creation_failed",
-                            flag=flag_name,
-                            error=str(e)
+                            "authenticator_map_creation_failed", flag=flag_name, error=str(e)
                         )
 
             # 2. Create organization maps
             if org_map:
                 for org_name, org_config in org_map.items():
                     # Create member map
-                    users_group = org_config.get('users')
+                    users_group = org_config.get("users")
                     if users_group:
                         try:
                             await self.client.create_authenticator_map(
@@ -6249,13 +6398,9 @@ class SettingsImporter(ResourceImporter):
                                 map_type="organization",
                                 organization=org_name,
                                 role="Organization Member",
-                                triggers={
-                                    "groups": {
-                                        "has_or": [users_group]
-                                    }
-                                },
-                                revoke=org_config.get('remove_users', False),
-                                order=10
+                                triggers={"groups": {"has_or": [users_group]}},
+                                revoke=org_config.get("remove_users", False),
+                                order=10,
                             )
                             maps_created += 1
                         except Exception as e:
@@ -6263,11 +6408,11 @@ class SettingsImporter(ResourceImporter):
                                 "authenticator_map_creation_failed",
                                 org=org_name,
                                 role="member",
-                                error=str(e)
+                                error=str(e),
                             )
 
                     # Create admin map
-                    admins_group = org_config.get('admins')
+                    admins_group = org_config.get("admins")
                     if admins_group:
                         try:
                             await self.client.create_authenticator_map(
@@ -6276,13 +6421,9 @@ class SettingsImporter(ResourceImporter):
                                 map_type="organization",
                                 organization=org_name,
                                 role="Organization Admin",
-                                triggers={
-                                    "groups": {
-                                        "has_or": [admins_group]
-                                    }
-                                },
-                                revoke=org_config.get('remove_admins', False),
-                                order=10
+                                triggers={"groups": {"has_or": [admins_group]}},
+                                revoke=org_config.get("remove_admins", False),
+                                order=10,
                             )
                             maps_created += 1
                         except Exception as e:
@@ -6290,14 +6431,14 @@ class SettingsImporter(ResourceImporter):
                                 "authenticator_map_creation_failed",
                                 org=org_name,
                                 role="admin",
-                                error=str(e)
+                                error=str(e),
                             )
 
             # 3. Create team maps
             if team_map:
                 for team_name, team_config in team_map.items():
-                    users_group = team_config.get('users')
-                    org_name = team_config.get('organization')
+                    users_group = team_config.get("users")
+                    org_name = team_config.get("organization")
 
                     if users_group and org_name:
                         try:
@@ -6308,27 +6449,19 @@ class SettingsImporter(ResourceImporter):
                                 organization=org_name,
                                 team=team_name,
                                 role="Team Member",
-                                triggers={
-                                    "groups": {
-                                        "has_or": [users_group]
-                                    }
-                                },
-                                revoke=team_config.get('remove', False),
-                                order=20  # Lower priority than org maps
+                                triggers={"groups": {"has_or": [users_group]}},
+                                revoke=team_config.get("remove", False),
+                                order=20,  # Lower priority than org maps
                             )
                             maps_created += 1
                         except Exception as e:
                             logger.error(
-                                "authenticator_map_creation_failed",
-                                team=team_name,
-                                error=str(e)
+                                "authenticator_map_creation_failed", team=team_name, error=str(e)
                             )
 
         except Exception as e:
             logger.error(
-                "authenticator_maps_creation_error",
-                authenticator_id=authenticator_id,
-                error=str(e)
+                "authenticator_maps_creation_error", authenticator_id=authenticator_id, error=str(e)
             )
 
         return maps_created
@@ -6352,7 +6485,7 @@ class SettingsImporter(ResourceImporter):
             Gateway authenticator configuration or None if insufficient data
         """
         # Required fields
-        server_uri = server_settings.get('AUTH_LDAP_SERVER_URI')
+        server_uri = server_settings.get("AUTH_LDAP_SERVER_URI")
         if not server_uri:
             return None
 
@@ -6362,21 +6495,19 @@ class SettingsImporter(ResourceImporter):
         # Organization/Team mappings are handled separately via authenticator_maps API
         field_mapping = {
             # Connection settings
-            'AUTH_LDAP_SERVER_URI': 'SERVER_URI',
-            'AUTH_LDAP_BIND_DN': 'BIND_DN',
+            "AUTH_LDAP_SERVER_URI": "SERVER_URI",
+            "AUTH_LDAP_BIND_DN": "BIND_DN",
             # BIND_PASSWORD excluded for security (manual entry required)
-            'AUTH_LDAP_CONNECTION_OPTIONS': 'CONNECTION_OPTIONS',
-            'AUTH_LDAP_START_TLS': 'START_TLS',
-
+            "AUTH_LDAP_CONNECTION_OPTIONS": "CONNECTION_OPTIONS",
+            "AUTH_LDAP_START_TLS": "START_TLS",
             # User settings
-            'AUTH_LDAP_USER_SEARCH': 'USER_SEARCH',
-            'AUTH_LDAP_USER_DN_TEMPLATE': 'USER_DN_TEMPLATE',
-            'AUTH_LDAP_USER_ATTR_MAP': 'USER_ATTR_MAP',
-
+            "AUTH_LDAP_USER_SEARCH": "USER_SEARCH",
+            "AUTH_LDAP_USER_DN_TEMPLATE": "USER_DN_TEMPLATE",
+            "AUTH_LDAP_USER_ATTR_MAP": "USER_ATTR_MAP",
             # Group settings
-            'AUTH_LDAP_GROUP_TYPE': 'GROUP_TYPE',
-            'AUTH_LDAP_GROUP_TYPE_PARAMS': 'GROUP_TYPE_PARAMS',
-            'AUTH_LDAP_GROUP_SEARCH': 'GROUP_SEARCH',
+            "AUTH_LDAP_GROUP_TYPE": "GROUP_TYPE",
+            "AUTH_LDAP_GROUP_TYPE_PARAMS": "GROUP_TYPE_PARAMS",
+            "AUTH_LDAP_GROUP_SEARCH": "GROUP_SEARCH",
             # Note: REQUIRE_GROUP and DENY_GROUP may need to be authenticator_maps too
         }
 
@@ -6384,7 +6515,7 @@ class SettingsImporter(ResourceImporter):
             if old_key in server_settings:
                 value = server_settings[old_key]
                 # Ensure SERVER_URI is a list
-                if new_key == 'SERVER_URI' and isinstance(value, str):
+                if new_key == "SERVER_URI" and isinstance(value, str):
                     value = [value]
                 config[new_key] = value
 
@@ -6394,7 +6525,7 @@ class SettingsImporter(ResourceImporter):
         self,
         review_required: dict,
         sensitive: dict,
-        auth_migration_info: dict[str, Any] | None = None
+        auth_migration_info: dict[str, Any] | None = None,
     ) -> None:
         """Generate markdown report for settings that need review.
 
@@ -6413,80 +6544,106 @@ class SettingsImporter(ResourceImporter):
         if auth_migration_info:
             # Check if any authentication was migrated
             auth_types_migrated = []
-            if auth_migration_info.get('ldap_migrated'):
-                auth_types_migrated.append('LDAP')
-            if auth_migration_info.get('saml_migrated'):
-                auth_types_migrated.append('SAML')
-            if auth_migration_info.get('azure_ad_migrated'):
-                auth_types_migrated.append('Azure AD OAuth2')
-            if auth_migration_info.get('github_migrated'):
-                auth_types_migrated.append('GitHub Enterprise')
+            if auth_migration_info.get("ldap_migrated"):
+                auth_types_migrated.append("LDAP")
+            if auth_migration_info.get("saml_migrated"):
+                auth_types_migrated.append("SAML")
+            if auth_migration_info.get("azure_ad_migrated"):
+                auth_types_migrated.append("Azure AD OAuth2")
+            if auth_migration_info.get("github_migrated"):
+                auth_types_migrated.append("GitHub Enterprise")
 
             if auth_types_migrated:
-                auth_list = ', '.join(auth_types_migrated)
-                report_lines.append(f"✅ **Authentication Settings Migrated to Gateway:** {auth_list} settings have been ")
-                report_lines.append("automatically migrated to Platform Gateway authenticators. After migration:\n")
-                report_lines.append("1. Manually enter sensitive credentials in Gateway UI (Settings → Authentication → Authenticators):\n")
+                auth_list = ", ".join(auth_types_migrated)
+                report_lines.append(
+                    f"✅ **Authentication Settings Migrated to Gateway:** {auth_list} settings have been "
+                )
+                report_lines.append(
+                    "automatically migrated to Platform Gateway authenticators. After migration:\n"
+                )
+                report_lines.append(
+                    "1. Manually enter sensitive credentials in Gateway UI (Settings → Authentication → Authenticators):\n"
+                )
 
                 # List specific credentials needed per auth type
-                if auth_migration_info.get('ldap_migrated'):
+                if auth_migration_info.get("ldap_migrated"):
                     report_lines.append("   - LDAP: `BIND_PASSWORD`\n")
-                if auth_migration_info.get('saml_migrated'):
+                if auth_migration_info.get("saml_migrated"):
                     report_lines.append("   - SAML: `SP_PRIVATE_KEY`\n")
-                if auth_migration_info.get('azure_ad_migrated'):
+                if auth_migration_info.get("azure_ad_migrated"):
                     report_lines.append("   - Azure AD: `SECRET`\n")
-                if auth_migration_info.get('github_migrated'):
+                if auth_migration_info.get("github_migrated"):
                     report_lines.append("   - GitHub: `SECRET`\n")
 
-                report_lines.append("2. Test login with a test user from each authentication source\n")
-                report_lines.append("3. Verify authenticators: `https://target-aap/api/gateway/v1/authenticators/`\n")
-                report_lines.append("4. Verify authenticator maps: `https://target-aap/api/gateway/v1/authenticator_maps/`\n\n")
+                report_lines.append(
+                    "2. Test login with a test user from each authentication source\n"
+                )
+                report_lines.append(
+                    "3. Verify authenticators: `https://target-aap/api/gateway/v1/authenticators/`\n"
+                )
+                report_lines.append(
+                    "4. Verify authenticator maps: `https://target-aap/api/gateway/v1/authenticator_maps/`\n\n"
+                )
             else:
                 # No authentication migrated (AAP 2.5 or earlier)
-                report_lines.append("⚠️ **Authentication Settings:** Authentication settings imported to Controller API. ")
+                report_lines.append(
+                    "⚠️ **Authentication Settings:** Authentication settings imported to Controller API. "
+                )
                 report_lines.append("In AAP 2.6+, authentication is managed by Platform Gateway. ")
                 report_lines.append("After migration, verify authentication works:\n")
                 report_lines.append("1. Test login with a test user\n")
-                report_lines.append("2. Manually enter sensitive credentials (passwords, secrets, private keys)\n")
-                report_lines.append("3. If authentication fails, configure via Platform Gateway (Settings → Authentication in UI)\n")
-                report_lines.append("4. See README.md 'Post-Migration: Verify Authentication' section for details\n\n")
+                report_lines.append(
+                    "2. Manually enter sensitive credentials (passwords, secrets, private keys)\n"
+                )
+                report_lines.append(
+                    "3. If authentication fails, configure via Platform Gateway (Settings → Authentication in UI)\n"
+                )
+                report_lines.append(
+                    "4. See README.md 'Post-Migration: Verify Authentication' section for details\n\n"
+                )
         else:
             # Fallback for backward compatibility (if called with old signature)
-            report_lines.append("⚠️ **Authentication Settings:** Please verify authentication configuration after migration.\n\n")
+            report_lines.append(
+                "⚠️ **Authentication Settings:** Please verify authentication configuration after migration.\n\n"
+            )
 
         report_lines.append("---\n\n")
 
         if review_required:
             report_lines.append("## ⚠️  Environment-Specific Settings (Review Required)\n\n")
-            report_lines.append("These settings contain URLs, paths, or hostnames that may differ between environments:\n\n")
+            report_lines.append(
+                "These settings contain URLs, paths, or hostnames that may differ between environments:\n\n"
+            )
 
             for key, value_info in sorted(review_required.items()):
-                source_value = value_info.get('source_value')
+                source_value = value_info.get("source_value")
                 report_lines.append(f"### `{key}`\n")
                 report_lines.append(f"**Source value:** `{source_value}`\n\n")
                 report_lines.append("**Action:** Review and update if needed:\n")
-                report_lines.append(f"```bash\n")
-                report_lines.append(f"curl -sk -X PATCH -H 'Authorization: Bearer $TOKEN' \\\n")
-                report_lines.append(f"  'https://target-aap/api/v2/settings/all/' \\\n")
+                report_lines.append("```bash\n")
+                report_lines.append("curl -sk -X PATCH -H 'Authorization: Bearer $TOKEN' \\\n")
+                report_lines.append("  'https://target-aap/api/v2/settings/all/' \\\n")
                 report_lines.append(f"  -d '{{'{key}': 'NEW_VALUE'}}'\n")
-                report_lines.append(f"```\n\n")
+                report_lines.append("```\n\n")
 
         if sensitive:
             report_lines.append("## 🔒 Sensitive Settings (Manual Input Required)\n\n")
-            report_lines.append("These settings contain passwords, secrets, or API keys that were redacted:\n\n")
+            report_lines.append(
+                "These settings contain passwords, secrets, or API keys that were redacted:\n\n"
+            )
 
             for key in sorted(sensitive.keys()):
                 report_lines.append(f"### `{key}`\n")
                 report_lines.append("**Action:** Provide new value:\n")
-                report_lines.append(f"```bash\n")
-                report_lines.append(f"curl -sk -X PATCH -H 'Authorization: Bearer $TOKEN' \\\n")
-                report_lines.append(f"  'https://target-aap/api/v2/settings/all/' \\\n")
+                report_lines.append("```bash\n")
+                report_lines.append("curl -sk -X PATCH -H 'Authorization: Bearer $TOKEN' \\\n")
+                report_lines.append("  'https://target-aap/api/v2/settings/all/' \\\n")
                 report_lines.append(f"  -d '{{'{key}': 'YOUR_NEW_VALUE'}}'\n")
-                report_lines.append(f"```\n\n")
+                report_lines.append("```\n\n")
 
         # Write report
         report_path = Path("SETTINGS-REVIEW-REPORT.md")
-        with open(report_path, 'w') as f:
+        with open(report_path, "w") as f:
             f.writelines(report_lines)
 
         logger.info("settings_review_report_generated", path=str(report_path))
@@ -6514,7 +6671,7 @@ class SettingsImporter(ResourceImporter):
             resource_type="settings",
             source_id=0,  # Settings have no real ID
             data=settings_data,
-            resolve_dependencies=False
+            resolve_dependencies=False,
         )
 
         if progress_callback:
