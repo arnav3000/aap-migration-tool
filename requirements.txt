@@ -34,7 +34,7 @@ sqlalchemy==2.0.23
 alembic==1.13.0
 
 # Utilities
-python-dateutil==2.8.2
+python-dateutil==2.9.0.post0
 psutil==6.1.1
 psycopg2-binary>=2.9.11
 cryptography>=46.0.3
