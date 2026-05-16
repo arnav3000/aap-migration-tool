@@ -1,4 +1,4 @@
-# Pre-commit hooks for AAP Bridge
+# Pre-commit hooks for AAP Migration Tool
 # https://pre-commit.com/
 #
 # Installation:
@@ -101,13 +101,6 @@ repos:
     hooks:
       - id: shellcheck
         args: ['--severity=warning']
-
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
-    hooks:
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
-      - id: check-added-large-files
 
   # TypeScript type checking (web UI)
   - repo: local

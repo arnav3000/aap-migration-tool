@@ -208,10 +208,10 @@ export function App() {
                   isPlain
                   position="right"
                   dropdownItems={[
-                    <DropdownItem key="docs" component="a" href="https://redhat-cop.github.io/aap-bridge/" target="_blank">
+                    <DropdownItem key="docs" component="a" href="https://github.com/arnav3000/aap-migration-tool" target="_blank">
                       Documentation
                     </DropdownItem>,
-                    <DropdownItem key="repo" component="a" href="https://github.com/redhat-cop/aap-bridge" target="_blank">
+                    <DropdownItem key="repo" component="a" href="https://github.com/arnav3000/aap-migration-tool" target="_blank">
                       Source Code
                     </DropdownItem>,
                   ]}

@@ -163,4 +163,4 @@ pre-commit install
 
 - [Pre-commit documentation](https://pre-commit.com/)
 - [Gitleaks documentation](https://github.com/gitleaks/gitleaks)
-- [AAP Bridge Security Rules](CRITICAL-RULES.md)
+- [Security Policy](SECURITY.md)

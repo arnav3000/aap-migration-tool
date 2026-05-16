@@ -1,8 +1,8 @@
-site_name: AAP Bridge
+site_name: AAP Migration Tool
 site_description: Production-grade migration tool for Ansible Automation Platform
 site_author: Antony Sallas
-repo_url: https://github.com/antonysallas/aap-bridge
-repo_name: antonysallas/aap-bridge
+repo_url: https://github.com/arnav3000/aap-migration-tool
+repo_name: arnav3000/aap-migration-tool
 
 theme:
   name: material
@@ -31,33 +31,11 @@ theme:
 
 nav:
 - Home: index.md
-- Getting Started:
-  - Installation: getting-started/installation.md
-  - Quick Start: getting-started/quickstart.md
-  - Configuration: getting-started/configuration.md
-- User Guide:
-  - CLI Reference: user-guide/cli-reference.md
-  - Migration Workflow: user-guide/migration-workflow.md
-  - Filtering and Skipping: user-guide/filtering-and-skipping.md
-  - Troubleshooting: user-guide/troubleshooting.md
-- Guides:
-  - Getting Started Guide: guides/GETTING-STARTED.md
-  - Quick Start: guides/QUICK-START.md
-  - Migration Guide: guides/MIGRATION-GUIDE.md
-  - Complete User Guide: guides/USER-GUIDE.md
-  - Selective Migration: guides/SELECTIVE-MIGRATION-GUIDE.md
-  - Credential Migration: guides/credential-migration.md
-  - What Is Not Migrated: guides/WHAT-IS-NOT-MIGRATED.md
-- Workflows:
-  - Credential-First Workflow: workflows/CREDENTIAL-FIRST-WORKFLOW.md
-  - Migration Workflow Diagrams: workflows/MIGRATION-WORKFLOW-DIAGRAM.md
-  - RBAC Migration: workflows/RBAC-MIGRATION-GUIDE.md
-- Developer Guide:
-  - Contributing: developer-guide/contributing.md
-  - Adding Resource Types: developer-guide/adding-resource-types.md
-  - Architecture: developer-guide/architecture.md
-- Reference:
-  - Changelog: reference/changelog.md
+- Architecture: architecture.md
+- Quick Start:
+  - Local Install: quickstart-local.md
+  - Containerized CLI: quickstart-container-cli.md
+  - Web UI: quickstart-web.md
 
 markdown_extensions:
 - admonition
