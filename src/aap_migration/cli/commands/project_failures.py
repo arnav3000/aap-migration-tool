@@ -176,26 +176,26 @@ def analyze_project_failures(ctx: MigrationContext, output: Path) -> None:
 
                 import json as json_mod
 
-                json_name = json_mod.dumps(proj["name"])[1:-1]
-                json_scm_url = json_mod.dumps(scm_url)[1:-1]
-                json_scm_type = json_mod.dumps(scm_type)[1:-1]
-
                 report_lines.append("   ```bash\n")
                 report_lines.append("   # Create project via API\n")
                 report_lines.append("   curl -sk -X POST -H 'Authorization: Bearer $TOKEN' \\\n")
                 report_lines.append("     -H 'Content-Type: application/json' \\\n")
                 report_lines.append(f"     '{base_url}/api/v2/projects/' \\\n")
-                report_lines.append("     -d '{\n")
-                report_lines.append(f'       "name": "{json_name}",\n')
-                report_lines.append('       "organization": <TARGET_ORG_ID>,\n')
-                report_lines.append(f'       "scm_type": "{json_scm_type}",\n')
-                report_lines.append(f'       "scm_url": "{json_scm_url}",\n')
+                report_lines.append("     -d @- <<'EOF'\n")
+                payload: dict = {
+                    "name": proj["name"],
+                    "organization": "<TARGET_ORG_ID>",
+                    "scm_type": scm_type,
+                    "scm_url": scm_url,
+                }
                 if scm_branch:
-                    json_scm_branch = json_mod.dumps(scm_branch)[1:-1]
-                    report_lines.append(f'       "scm_branch": "{json_scm_branch}",\n')
+                    payload["scm_branch"] = scm_branch
                 if cred_id:
-                    report_lines.append('       "credential": <TARGET_CREDENTIAL_ID>,\n')
-                report_lines.append("     }'\n")
+                    payload["credential"] = "<TARGET_CREDENTIAL_ID>"
+                report_lines.append(
+                    f"   {json_mod.dumps(payload, indent=2).replace(chr(10), chr(10) + '   ')}\n"
+                )
+                report_lines.append("   EOF\n")
                 report_lines.append("   ```\n\n")
             else:
                 report_lines.append("   - Create as Manual project in AAP UI\n")

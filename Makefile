@@ -129,7 +129,7 @@ COMPOSE          := podman compose -f container/docker-compose.yml
 BRIDGE_SVC       := aap-bridge
 BRIDGE_IMAGE     := localhost/aap-bridge:latest
 PROJECT_NAME     := $(notdir $(CURDIR))
-PGDATA_VOLUME    := $(PROJECT_NAME)_pgdata
+PGDATA_VOLUME    := $(PROJECT_NAME)_postgres-data
 
 define run-bridge
 	$(COMPOSE) exec $(BRIDGE_SVC)

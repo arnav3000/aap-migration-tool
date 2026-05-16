@@ -209,14 +209,25 @@ def group_into_phases_with_cycles(
 
     Independent orgs go first, then orgs whose deps are satisfied, then cycle
     members are placed together in their own phase so users can manually reorder.
+    Downstream orgs that merely depend on a cycle are placed in subsequent phases
+    after the cycle, not lumped into the cycle phase itself.
 
     Returns:
         (migration_order, phases)
     """
-    sorted_orgs, cycle_members = _partial_topological_sort(graph)
+    sorted_orgs, remaining = _partial_topological_sort(graph)
 
-    if not cycle_members:
+    if not remaining:
         return sorted_orgs, group_into_phases(graph, sorted_orgs)
+
+    # Use SCC detection to find only the actual cycle members
+    sccs = detect_cycles(graph)
+    actual_cycle_members: set[str] = set()
+    for scc in sccs:
+        actual_cycle_members.update(scc)
+
+    # Orgs in remaining but not in any SCC are downstream dependents
+    downstream = remaining - actual_cycle_members
 
     # Build phases from the non-cycle orgs first
     phases: list[dict[str, int | str | list[str]]] = []
@@ -228,7 +239,7 @@ def group_into_phases_with_cycles(
             if org in processed:
                 continue
             deps = graph.get(org, [])
-            if all(d in processed or d in cycle_members for d in deps):
+            if all(d in processed or d in actual_cycle_members for d in deps):
                 phase_orgs.append(org)
 
         if not phase_orgs:
@@ -248,21 +259,18 @@ def group_into_phases_with_cycles(
         )
         processed.update(phase_orgs)
 
-    # Add cycle members as their own phase
+    # Add actual cycle members as their own phase
     phases.append(
         {
             "phase": len(phases) + 1,
-            "orgs": sorted(cycle_members),
+            "orgs": sorted(actual_cycle_members),
             "description": "Organizations with circular dependencies (review and reorder manually)",
         }
     )
-    cycle_processed = set(cycle_members)
+    processed.update(actual_cycle_members)
 
-    # Any remaining orgs that depend on cycle members go in subsequent phases
-    all_orgs = set(graph.keys())
-    remaining = all_orgs - processed - cycle_processed
-    remaining_order = sorted(remaining)
-    processed.update(cycle_processed)
+    # Place downstream orgs (depend on cycle but not cyclic themselves) in subsequent phases
+    remaining_order = sorted(downstream)
 
     while remaining_order:
         phase_orgs = []
@@ -274,7 +282,6 @@ def group_into_phases_with_cycles(
                 phase_orgs.append(org)
 
         if not phase_orgs:
-            # Remaining orgs can't be resolved — dump them into final phase
             leftover = sorted(set(remaining_order) - processed)
             if leftover:
                 phases.append(
@@ -296,5 +303,5 @@ def group_into_phases_with_cycles(
         processed.update(phase_orgs)
         remaining_order = [o for o in remaining_order if o not in processed]
 
-    migration_order = sorted_orgs + sorted(cycle_members) + sorted(remaining)
+    migration_order = sorted_orgs + sorted(actual_cycle_members) + sorted(downstream)
     return migration_order, phases
