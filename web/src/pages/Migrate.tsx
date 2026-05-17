@@ -51,7 +51,6 @@ export function Migrate() {
   const [exclude, setExclude] = useState<Record<string, string[]>>({});
   const [cancelling, setCancelling] = useState(false);
   const [migrationDone, setMigrationDone] = useState(false);
-  const [clearMsg, setClearMsg] = useState('');
   const [runActiveTab, setRunActiveTab] = useState<string>('output');
   const [orgs, setOrgs] = useState<{ id: number; name: string; description: string }[]>([]);
   const [selectedOrgIds, setSelectedOrgIds] = useState<number[]>([]);
@@ -210,10 +209,6 @@ export function Migrate() {
         <Alert variant="info" isInline title="You need at least 2 connections configured to perform a migration." />
       )}
 
-      {clearMsg && (
-        <Alert variant="success" isInline title={clearMsg} style={{ marginBottom: 16 }} />
-      )}
-
       {step === 'select' && (
         <Card>
           <CardBody>
@@ -317,34 +312,14 @@ export function Migrate() {
                 </FormGroup>
               </FlexItem>
               <FlexItem>
-                <Flex spaceItems={{ default: 'spaceItemsMd' }}>
-                  <FlexItem>
-                    <Button
-                      variant="primary"
-                      onClick={handlePreview}
-                      isDisabled={!sourceId || !destId || sourceId === destId || loading}
-                      isLoading={loading}
-                    >
-                      Preview Migration
-                    </Button>
-                  </FlexItem>
-                  <FlexItem>
-                    <Button
-                      variant="warning"
-                      onClick={async () => {
-                        setClearMsg('');
-                        try {
-                          const result = await api.clearMigrationState();
-                          setClearMsg(`Cleared ${result.cleared_progress} progress records and ${result.deleted_mappings} ID mappings`);
-                        } catch (err) {
-                          setClearMsg(`Error: ${err instanceof Error ? err.message : String(err)}`);
-                        }
-                      }}
-                    >
-                      Clear Migration State
-                    </Button>
-                  </FlexItem>
-                </Flex>
+                <Button
+                  variant="primary"
+                  onClick={handlePreview}
+                  isDisabled={!sourceId || !destId || sourceId === destId || loading}
+                  isLoading={loading}
+                >
+                  Preview Migration
+                </Button>
               </FlexItem>
             </Flex>
           </CardBody>
