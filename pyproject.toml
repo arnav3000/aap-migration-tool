@@ -27,7 +27,8 @@ classifiers = [
 
 dependencies = [
     "awxkit==24.6.1",
-    "httpx==0.25.0",
+    "httpx==0.28.1",
+    "h11>=0.16.0",
     "requests>=2.33.0",
     "click==8.3.3",
     "rich>=13.0.0",

@@ -4,7 +4,8 @@
 awxkit==24.6.1
 
 # HTTP Clients
-httpx==0.25.0
+httpx==0.28.1
+h11>=0.16.0
 requests>=2.33.0
 aiofiles==25.1.0
 
