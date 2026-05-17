@@ -721,6 +721,8 @@ async def execute_phase(
                                         if res_org is not None or sf_org is not None:
                                             continue
 
+                            raw_summary = resource.get("summary_fields", {})
+
                             if transformer:
                                 try:
                                     resource = transformer.transform_resource(
@@ -773,15 +775,11 @@ async def execute_phase(
                                         }
                                     )
                                     if rtype == "credentials":
-                                        cred_type_name = (
-                                            resource.get("summary_fields", {})
-                                            .get("credential_type", {})
-                                            .get("name", "Unknown")
+                                        cred_type_name = raw_summary.get("credential_type", {}).get(
+                                            "name", "Unknown"
                                         )
-                                        cred_org_name = (
-                                            resource.get("summary_fields", {})
-                                            .get("organization", {})
-                                            .get("name", "")
+                                        cred_org_name = raw_summary.get("organization", {}).get(
+                                            "name", ""
                                         )
                                         created_creds.append(
                                             {
