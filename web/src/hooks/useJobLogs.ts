@@ -70,6 +70,16 @@ export interface MigrationCompleteEvent extends MigrationEvent {
   total_failed: number;
 }
 
+export interface CredentialPauseEvent extends MigrationEvent {
+  _event: 'credential_pause';
+  credentials: Array<{
+    name: string;
+    credential_type: string;
+    organization: string;
+    used_by: Array<{ resource_type: string; resource_name: string }>;
+  }>;
+}
+
 function isEventMessage(line: string): boolean {
   return line.charAt(0) === EVENT_WS_PREFIX;
 }

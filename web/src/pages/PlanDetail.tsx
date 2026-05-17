@@ -28,8 +28,9 @@ import TimesIcon from '@patternfly/react-icons/dist/esm/icons/times-icon';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { PhaseEditor } from '../components/PhaseEditor';
+import type { AnalysisDataMap } from '../components/PhaseEditor';
 import type { Connection } from '../types/connection';
-import type { MigrationPlan, PlanPhase, PlanSource, ResourceTypeInfo } from '../types/resources';
+import type { MigrationPlan, PlanPhase, PlanSource } from '../types/resources';
 
 interface AnalysisJob {
   id: string;
@@ -53,7 +54,7 @@ export function PlanDetail() {
   const [success, setSuccess] = useState('');
   const [activeTab, setActiveTab] = useState(0);
   const [dirty, setDirty] = useState(false);
-  const [resourceTypesMeta, setResourceTypesMeta] = useState<ResourceTypeInfo[]>([]);
+  const [analysisData, setAnalysisData] = useState<AnalysisDataMap>({});
 
   // Source addition form
   const [addSourceConn, setAddSourceConn] = useState('');
@@ -85,14 +86,25 @@ export function PlanDetail() {
     } catch { /* ignore */ }
   }, []);
 
-  const loadResourceTypes = useCallback(async () => {
-    try {
-      const rt = await api.listMigratableResourceTypes();
-      setResourceTypesMeta(rt as ResourceTypeInfo[]);
-    } catch { /* ignore */ }
-  }, []);
+  const loadAnalysisData = useCallback(async () => {
+    if (!plan) return;
+    const data: AnalysisDataMap = {};
+    for (const src of plan.sources) {
+      if (!src.analysis_job_id) continue;
+      if (data[src.analysis_job_id]) continue;
+      try {
+        const result = await api.getAnalysisResult(src.analysis_job_id) as Record<string, unknown>;
+        const inner = (result.result ?? result) as Record<string, unknown>;
+        if (inner.organizations) {
+          data[src.analysis_job_id] = inner as AnalysisDataMap[string];
+        }
+      } catch { /* ignore */ }
+    }
+    setAnalysisData(data);
+  }, [plan]);
 
-  useEffect(() => { loadPlan(); loadConnections(); loadAnalysisJobs(); loadResourceTypes(); }, [loadPlan, loadConnections, loadAnalysisJobs, loadResourceTypes]);
+  useEffect(() => { loadPlan(); loadConnections(); loadAnalysisJobs(); }, [loadPlan, loadConnections, loadAnalysisJobs]);
+  useEffect(() => { loadAnalysisData(); }, [loadAnalysisData]);
 
   const sourceNames: Record<string, string> = {};
   if (plan) {
@@ -119,8 +131,6 @@ export function PlanDetail() {
           id: p.id.startsWith('new-') ? undefined : p.id,
           phase_number: p.phase_number,
           name: p.name,
-          update_mode: p.update_mode,
-          resource_types: p.resource_types.length > 0 ? p.resource_types : null,
           orgs: p.orgs.map(o => ({
             source_id: o.source_id,
             org_id: o.org_id,
@@ -161,8 +171,6 @@ export function PlanDetail() {
           id: p.id.startsWith('new-') ? undefined : p.id,
           phase_number: p.phase_number,
           name: p.name,
-          update_mode: p.update_mode,
-          resource_types: p.resource_types.length > 0 ? p.resource_types : null,
           orgs: p.orgs.map(o => ({
             source_id: o.source_id,
             org_id: o.org_id,
@@ -408,7 +416,7 @@ export function PlanDetail() {
                   phases={plan.phases}
                   sources={plan.sources}
                   sourceNames={sourceNames}
-                  resourceTypesMeta={resourceTypesMeta}
+                  analysisData={analysisData}
                   onChange={handlePhaseChange}
                 />
               </>
@@ -434,14 +442,6 @@ export function PlanDetail() {
                             <strong>{phase.name || `Phase ${phase.phase_number}`}</strong>
                             {' — '}
                             {phase.orgs.length} org(s)
-                            {phase.resource_types.length > 0 && (
-                              <Label color="cyan" isCompact style={{ marginLeft: 8 }}>
-                                {phase.resource_types.length} resource type(s)
-                              </Label>
-                            )}
-                            {phase.update_mode && (
-                              <Label color="purple" isCompact style={{ marginLeft: 4 }}>update</Label>
-                            )}
                             {phase.job_id && (
                               <Button variant="link" size="sm" onClick={() => navigate(`/jobs/${phase.job_id}`)} style={{ marginLeft: 8 }}>
                                 View Job

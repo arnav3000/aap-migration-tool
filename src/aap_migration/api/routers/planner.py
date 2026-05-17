@@ -30,10 +30,74 @@ from aap_migration.api.services.job_service import Job
 router = APIRouter()
 
 
+def _get_importer_deps() -> dict[str, list[str]]:
+    """Build resource_type -> list of dependency resource types from importer classes."""
+    from aap_migration.migration.importer import (
+        ApplicationImporter,
+        CredentialImporter,
+        CredentialInputSourceImporter,
+        CredentialTypeImporter,
+        ExecutionEnvironmentImporter,
+        HostImporter,
+        HostInventoryMembershipImporter,
+        InstanceGroupImporter,
+        InstanceImporter,
+        InventoryGroupImporter,
+        InventoryImporter,
+        InventorySourceImporter,
+        JobTemplateImporter,
+        LabelImporter,
+        NotificationTemplateImporter,
+        OrganizationImporter,
+        ProjectImporter,
+        ScheduleImporter,
+        SettingsImporter,
+        SystemJobTemplateImporter,
+        TeamImporter,
+        UserImporter,
+        WorkflowImporter,
+    )
+
+    _importer_map: dict[str, type] = {
+        "organizations": OrganizationImporter,
+        "labels": LabelImporter,
+        "instances": InstanceImporter,
+        "instance_groups": InstanceGroupImporter,
+        "users": UserImporter,
+        "teams": TeamImporter,
+        "credential_types": CredentialTypeImporter,
+        "credentials": CredentialImporter,
+        "credential_input_sources": CredentialInputSourceImporter,
+        "projects": ProjectImporter,
+        "execution_environments": ExecutionEnvironmentImporter,
+        "inventories": InventoryImporter,
+        "inventory_sources": InventorySourceImporter,
+        "inventory_groups": InventoryGroupImporter,
+        "hosts": HostImporter,
+        "host_inventory_memberships": HostInventoryMembershipImporter,
+        "job_templates": JobTemplateImporter,
+        "workflow_job_templates": WorkflowImporter,
+        "schedules": ScheduleImporter,
+        "notification_templates": NotificationTemplateImporter,
+        "applications": ApplicationImporter,
+        "settings": SettingsImporter,
+        "system_job_templates": SystemJobTemplateImporter,
+    }
+
+    result: dict[str, list[str]] = {}
+    for rtype, cls in _importer_map.items():
+        dep_dict: dict[str, str] = getattr(cls, "DEPENDENCIES", {}) or {}
+        deps = sorted(set(dep_dict.values())) if dep_dict else []
+        result[rtype] = deps
+    return result
+
+
 @router.get("/resource-types")
 def list_resource_types() -> list[dict[str, Any]]:
-    """Return ordered list of migratable resource types with metadata."""
+    """Return ordered list of migratable resource types with metadata and dependencies."""
     from aap_migration.resources import RESOURCE_REGISTRY, get_migration_order
+
+    importer_deps = _get_importer_deps()
 
     result = []
     for rtype in get_migration_order():
@@ -45,6 +109,7 @@ def list_resource_types() -> list[dict[str, Any]]:
                 "name": rtype,
                 "description": info.description,
                 "migration_order": info.migration_order,
+                "dependencies": importer_deps.get(rtype, []),
             }
         )
     return result
@@ -265,67 +330,9 @@ def update_phases(
     return _build_plan_response(db, plan)
 
 
-_DEFAULT_PHASES: list[dict[str, Any]] = [
-    {
-        "name": "Foundation",
-        "resource_types": ["settings", "instances", "instance_groups"],
-        "update_mode": False,
-    },
-    {
-        "name": "Organizations & Identity",
-        "resource_types": [
-            "organizations",
-            "labels",
-            "users",
-            "teams",
-            "credential_types",
-        ],
-        "update_mode": False,
-    },
-    {
-        "name": "Credentials & Environments",
-        "resource_types": [
-            "credentials",
-            "credential_input_sources",
-            "execution_environments",
-            "notification_templates",
-        ],
-        "update_mode": False,
-    },
-    {
-        "name": "Organizations (update assignments)",
-        "resource_types": ["organizations"],
-        "update_mode": True,
-    },
-    {
-        "name": "Projects & Inventories",
-        "resource_types": [
-            "projects",
-            "inventories",
-            "inventory_sources",
-            "applications",
-            "hosts",
-            "host_inventory_memberships",
-            "inventory_groups",
-        ],
-        "update_mode": False,
-    },
-    {
-        "name": "Job Configuration",
-        "resource_types": [
-            "job_templates",
-            "workflow_job_templates",
-            "system_job_templates",
-            "schedules",
-        ],
-        "update_mode": False,
-    },
-]
-
-
 @router.post("/plans/{plan_id}/populate")
 def populate_plan(plan_id: str, db: Session = Depends(get_db)) -> dict[str, Any]:
-    """Auto-populate phases using CaC-style dependency ordering."""
+    """Auto-populate phases — one phase per analysis wave."""
     plan = db.get(MigrationPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="Plan not found")
@@ -336,8 +343,8 @@ def populate_plan(plan_id: str, db: Session = Depends(get_db)) -> dict[str, Any]
 
     svc = get_job_service()
 
-    # Collect all orgs from all sources' analysis results
-    all_orgs: list[tuple[str, int, str]] = []
+    waves: dict[int, list[tuple[str, int, str]]] = {}
+
     for source in sources:
         if not source.analysis_job_id:
             continue
@@ -346,9 +353,22 @@ def populate_plan(plan_id: str, db: Session = Depends(get_db)) -> dict[str, Any]
             continue
 
         orgs_dict = job.result.get("organizations", {})
+        migration_phases = job.result.get("migration_phases", [])
+
+        org_wave: dict[str, int] = {}
+        for phase_data in migration_phases:
+            wave_num = phase_data.get("phase", 1)
+            raw_orgs = phase_data.get("orgs", [])
+            if isinstance(raw_orgs, dict) and "orgs" in raw_orgs:
+                raw_orgs = raw_orgs["orgs"]
+            for org_name in raw_orgs if isinstance(raw_orgs, list) else []:
+                org_wave[org_name] = wave_num
+
         for org_name, org_info in orgs_dict.items():
             org_id = org_info.get("org_id", 0)
-            all_orgs.append((source.id, org_id, org_name))
+            wave = org_wave.get(org_name, 1)
+            entry = (source.id, org_id, org_name)
+            waves.setdefault(wave, []).append(entry)
 
     # Clear existing phases
     phase_ids = db.query(MigrationPlanPhase.id).filter_by(plan_id=plan_id)
@@ -361,29 +381,23 @@ def populate_plan(plan_id: str, db: Session = Depends(get_db)) -> dict[str, Any]
     db.query(MigrationPlanPhase).filter_by(plan_id=plan_id).delete()
     db.flush()
 
-    # Create the 6 default phases
-    for phase_num, phase_def in enumerate(_DEFAULT_PHASES, start=1):
+    num_waves = len(waves)
+    use_wave_prefix = num_waves > 1
+
+    for wave_num in sorted(waves.keys()):
+        wave_orgs = waves[wave_num]
+        name = f"Wave {wave_num}" if use_wave_prefix else f"Phase {wave_num}"
         phase = MigrationPlanPhase(
             id=str(uuid.uuid4()),
             plan_id=plan_id,
-            phase_number=phase_num,
-            name=phase_def["name"],
-            update_mode=phase_def["update_mode"],
+            phase_number=wave_num,
+            name=f"{name} ({len(wave_orgs)} orgs)",
+            update_mode=False,
             status="pending",
         )
         db.add(phase)
         db.flush()
-
-        for rt in phase_def["resource_types"]:
-            db.add(
-                MigrationPlanPhaseResourceType(
-                    id=str(uuid.uuid4()),
-                    phase_id=phase.id,
-                    resource_type=rt,
-                )
-            )
-
-        for source_id, org_id, org_name in all_orgs:
+        for source_id, org_id, org_name in wave_orgs:
             db.add(
                 MigrationPlanPhaseOrg(
                     id=str(uuid.uuid4()),
@@ -396,6 +410,96 @@ def populate_plan(plan_id: str, db: Session = Depends(get_db)) -> dict[str, Any]
 
     db.flush()
     return _build_plan_response(db, plan)
+
+
+_CRITICAL_CRED_CONSUMERS = [
+    ("projects", "credential"),
+    ("execution_environments", "credential"),
+    ("inventory_sources", "credential"),
+    ("credential_input_sources", "source_credential"),
+]
+
+_CONTAINER_GROUP_CONSUMERS = [
+    ("instance_groups", "credential"),
+]
+
+
+async def _build_credential_review(
+    src_client: Any,
+    created_creds: list[dict[str, str]],
+    org_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Query source AAP to find which created credentials are actually used."""
+    cred_source_ids = {c["source_id"] for c in created_creds}
+    used_by: dict[str, list[dict[str, str]]] = {sid: [] for sid in cred_source_ids}
+
+    for resource_type, field_name in _CRITICAL_CRED_CONSUMERS:
+        try:
+            resp = await src_client.get(f"{resource_type}/", params={"page_size": 200})
+            for item in resp.get("results", []):
+                cred_ref = item.get(field_name)
+                if cred_ref is not None and str(cred_ref) in cred_source_ids:
+                    item_org = item.get("organization") or (
+                        item.get("summary_fields", {}).get("organization", {}).get("id")
+                    )
+                    if org_ids and item_org and item_org not in org_ids:
+                        continue
+                    used_by[str(cred_ref)].append(
+                        {
+                            "resource_type": resource_type,
+                            "resource_name": item.get("name", str(item.get("id", "?"))),
+                        }
+                    )
+        except Exception:  # nosec B110
+            pass
+
+    for resource_type, field_name in _CONTAINER_GROUP_CONSUMERS:
+        try:
+            resp = await src_client.get(f"{resource_type}/", params={"page_size": 200})
+            for item in resp.get("results", []):
+                cred_ref = item.get(field_name)
+                if cred_ref is not None and str(cred_ref) in cred_source_ids:
+                    used_by[str(cred_ref)].append(
+                        {
+                            "resource_type": "instance_groups",
+                            "resource_name": item.get("name", str(item.get("id", "?"))),
+                        }
+                    )
+        except Exception:  # nosec B110
+            pass
+
+    for org_id in org_ids:
+        try:
+            resp = await src_client.get(
+                f"organizations/{org_id}/galaxy_credentials/",
+            )
+            for gc in resp.get("results", []):
+                gc_id = str(gc.get("id", ""))
+                if gc_id in cred_source_ids:
+                    used_by[gc_id].append(
+                        {
+                            "resource_type": "organizations (galaxy)",
+                            "resource_name": f"Org {org_id}",
+                        }
+                    )
+        except Exception:  # nosec B110
+            pass
+
+    result: list[dict[str, Any]] = []
+    for cred in created_creds:
+        sid = cred["source_id"]
+        usages = used_by.get(sid, [])
+        result.append(
+            {
+                "name": cred["name"],
+                "credential_type": cred["credential_type"],
+                "organization": cred["organization"],
+                "used_by": usages,
+            }
+        )
+
+    result.sort(key=lambda c: (len(c["used_by"]) == 0, c["credential_type"], c["name"]))
+    return result
 
 
 @router.post("/plans/{plan_id}/phases/{phase_id}/execute", response_model=JobStartResponse)
@@ -454,10 +558,6 @@ async def execute_phase(
     dest_auth_scheme = ConnectionService._auth_scheme(dest)
 
     phase_name = phase.name or f"Phase {phase.phase_number}"
-    phase_update_mode = phase.update_mode
-
-    rt_rows = db.query(MigrationPlanPhaseResourceType).filter_by(phase_id=phase_id).all()
-    phase_allowed_types: set[str] | None = {r.resource_type for r in rt_rows} if rt_rows else None
 
     db_url = get_db_url()
 
@@ -490,12 +590,15 @@ async def execute_phase(
         resource_order = [
             rt
             for rt in get_migration_order()
-            if RESOURCE_REGISTRY[rt].has_exporter
-            and RESOURCE_REGISTRY[rt].has_importer
-            and (phase_allowed_types is None or rt in phase_allowed_types)
+            if RESOURCE_REGISTRY[rt].has_exporter and RESOURCE_REGISTRY[rt].has_importer
         ]
-        num_resource_types = len(resource_order) * len(source_configs)
+        num_resource_types = len(resource_order)
 
+        CRED_PAUSE_AFTER = {"credentials", "credential_input_sources"}
+        created_creds: list[dict[str, str]] = []
+
+        # Pre-build per-source objects
+        _sources: list[dict[str, Any]] = []
         try:
             target_config = AAPInstanceConfig(
                 url=dest_cfg.url,
@@ -505,8 +608,6 @@ async def execute_phase(
             )
             target_client = AAPTargetClient(target_config, auth_scheme=dest_auth_scheme)
 
-            phase_num = 0
-
             for src_cfg in source_configs:
                 src_config = AAPInstanceConfig(
                     url=src_cfg["url"],
@@ -514,40 +615,56 @@ async def execute_phase(
                     verify_ssl=src_cfg["verify_ssl"],
                     timeout=src_cfg["timeout"],
                 )
-                org_ids: list[int] = src_cfg["org_ids"]
-
-                log(f"Processing source: {src_cfg['url']} (orgs={org_ids})")
-
                 migration_config = MigrationConfig(
                     source=src_config,
                     target=target_config,
                     state=StateConfig(db_path=db_url),
                 )
-
-                src_client = AAPSourceClient(
-                    src_config, auth_scheme=src_cfg.get("auth_scheme", "Bearer")
+                _sources.append(
+                    {
+                        "src_config": src_config,
+                        "migration_config": migration_config,
+                        "src_client": AAPSourceClient(
+                            src_config,
+                            auth_scheme=src_cfg.get("auth_scheme", "Bearer"),
+                        ),
+                        "state": MigrationState(migration_config.state),
+                        "name_prefix": src_cfg.get("name_prefix", ""),
+                        "org_ids": src_cfg["org_ids"],
+                        "url": src_cfg["url"],
+                    }
                 )
-                state = MigrationState(migration_config.state)
 
-                for rtype in resource_order:
-                    info = RESOURCE_REGISTRY[rtype]
-                    phase_num += 1
+            # Outer loop: resource types; inner loop: sources
+            phase_num = 0
+            for rtype in resource_order:
+                info = RESOURCE_REGISTRY[rtype]
+                phase_num += 1
 
-                    emit(
-                        {
-                            "_event": "phase_start",
-                            "phase_num": phase_num,
-                            "total_phases": num_resource_types,
-                            "description": info.description,
-                            "resource_type": rtype,
-                        }
-                    )
+                emit(
+                    {
+                        "_event": "phase_start",
+                        "phase_num": phase_num,
+                        "total_phases": num_resource_types,
+                        "description": info.description,
+                        "resource_type": rtype,
+                    }
+                )
 
-                    phase_start = time.monotonic()
-                    created = 0
-                    skipped = 0
-                    failed = 0
-                    updated = 0
+                phase_start = time.monotonic()
+                created = 0
+                skipped = 0
+                failed = 0
+                exported = 0
+                last_progress = time.monotonic()
+                PROGRESS_INTERVAL = 2.0
+
+                for src in _sources:
+                    src_client = src["src_client"]
+                    state = src["state"]
+                    migration_config = src["migration_config"]
+                    name_prefix: str = src["name_prefix"]
+                    org_ids: list[int] = src["org_ids"]
 
                     try:
                         exporter = create_exporter(
@@ -573,10 +690,6 @@ async def execute_phase(
                             performance_config=migration_config.performance,
                             resource_mappings=migration_config.resource_mappings,
                         )
-
-                        exported = 0
-                        last_progress = time.monotonic()
-                        PROGRESS_INTERVAL = 2.0
 
                         async for resource in exporter.export():
                             source_id = resource.get("id")
@@ -622,6 +735,14 @@ async def execute_phase(
                                     failed += 1
                                     continue
 
+                            if name_prefix and rtype not in (
+                                "users",
+                                "settings",
+                                "host_inventory_memberships",
+                            ):
+                                if "name" in resource:
+                                    resource["name"] = f"{name_prefix}{resource['name']}"
+
                             exported += 1
 
                             try:
@@ -651,40 +772,25 @@ async def execute_phase(
                                             "detail": "",
                                         }
                                     )
-                                elif phase_update_mode and rtype != "host_inventory_memberships":
-                                    target_id = state.get_mapped_id(rtype, int(source_id))
-                                    if target_id is not None:
-                                        try:
-                                            await target_client.update_resource(
-                                                rtype,
-                                                target_id,
-                                                resource,
-                                            )
-                                            updated += 1
-                                            emit(
-                                                {
-                                                    "_event": "resource_result",
-                                                    "phase_num": phase_num,
-                                                    "name": res_name,
-                                                    "resource_type": rtype,
-                                                    "result": "updated",
-                                                    "detail": "",
-                                                }
-                                            )
-                                        except Exception as upd_exc:
-                                            failed += 1
-                                            emit(
-                                                {
-                                                    "_event": "resource_result",
-                                                    "phase_num": phase_num,
-                                                    "name": res_name,
-                                                    "resource_type": rtype,
-                                                    "result": "failed",
-                                                    "detail": f"update: {upd_exc!s}"[:200],
-                                                }
-                                            )
-                                    else:
-                                        skipped += 1
+                                    if rtype == "credentials":
+                                        cred_type_name = (
+                                            resource.get("summary_fields", {})
+                                            .get("credential_type", {})
+                                            .get("name", "Unknown")
+                                        )
+                                        cred_org_name = (
+                                            resource.get("summary_fields", {})
+                                            .get("organization", {})
+                                            .get("name", "")
+                                        )
+                                        created_creds.append(
+                                            {
+                                                "name": res_name,
+                                                "credential_type": cred_type_name,
+                                                "organization": cred_org_name,
+                                                "source_id": str(source_id),
+                                            }
+                                        )
                                 else:
                                     skipped += 1
                             except Exception as exc:
@@ -720,30 +826,141 @@ async def execute_phase(
                                 )
                                 last_progress = now
 
-                        duration = f"{time.monotonic() - phase_start:.1f}s"
-                        emit(
-                            {
-                                "_event": "phase_complete",
-                                "phase_num": phase_num,
-                                "description": info.description,
-                                "created": created,
-                                "updated": updated,
-                                "skipped": skipped,
-                                "failed": failed,
-                                "exported": exported,
-                                "duration": duration,
-                                "warnings": {},
-                            }
-                        )
                     except Exception as exc:
                         failed += 1
                         emit({"_event": "phase_error", "phase_num": phase_num, "error": str(exc)})
-                        log(f"  Error on {rtype}: {exc}")
+                        log(f"  Error on {rtype} from {src['url']}: {exc}")
 
-                    total_created += created
-                    total_updated += updated
-                    total_skipped += skipped
-                    total_failed += failed
+                duration = f"{time.monotonic() - phase_start:.1f}s"
+                emit(
+                    {
+                        "_event": "phase_complete",
+                        "phase_num": phase_num,
+                        "description": info.description,
+                        "created": created,
+                        "updated": 0,
+                        "skipped": skipped,
+                        "failed": failed,
+                        "exported": exported,
+                        "duration": duration,
+                        "warnings": {},
+                    }
+                )
+
+                total_created += created
+                total_skipped += skipped
+                total_failed += failed
+
+                # --- Credential pause: after ALL sources' creds finish ---
+                if rtype in CRED_PAUSE_AFTER:
+                    remaining = CRED_PAUSE_AFTER - set(
+                        resource_order[: resource_order.index(rtype) + 1]
+                    )
+                    if not remaining and created_creds:
+                        all_org_ids: list[int] = []
+                        all_src_clients = []
+                        for s in _sources:
+                            all_org_ids.extend(s["org_ids"])
+                            all_src_clients.append(s["src_client"])
+
+                        cred_review: list[dict[str, Any]] = []
+                        for sc in all_src_clients:
+                            cred_review.extend(
+                                await _build_credential_review(
+                                    sc,
+                                    created_creds,
+                                    all_org_ids,
+                                )
+                            )
+                        # Deduplicate by credential name
+                        seen: set[str] = set()
+                        deduped: list[dict[str, Any]] = []
+                        for cr in cred_review:
+                            if cr["name"] not in seen:
+                                seen.add(cr["name"])
+                                deduped.append(cr)
+                        cred_review = deduped
+
+                        if cred_review:
+                            emit(
+                                {
+                                    "_event": "credential_pause",
+                                    "credentials": cred_review,
+                                }
+                            )
+                            log(
+                                "Paused — waiting for user to update credential "
+                                "secrets on the target and resume."
+                            )
+                            job.result = job.result or {}
+                            job.result["credential_review"] = cred_review
+                            job.status = "waiting_for_input"
+                            svc._persist_job(job)
+                            await job._resume_event.wait()
+                            job._resume_event.clear()
+                            job.status = "running"
+                            log("Resumed — continuing migration.")
+
+            # --- CaC org-update pass: PATCH orgs to assign EE, galaxy creds, etc. ---
+            log("CaC pass: re-patching organizations with final references...")
+            for src in _sources:
+                src_client = src["src_client"]
+                state = src["state"]
+                org_ids = src["org_ids"]
+                for org_id in org_ids:
+                    try:
+                        org_data = await src_client.get(f"organizations/{org_id}/")
+                        target_org_id = state.get_mapped_id("organizations", org_id)
+                        if target_org_id is None:
+                            continue
+                        patch: dict[str, Any] = {}
+                        if org_data.get("default_environment"):
+                            mapped_ee = state.get_mapped_id(
+                                "execution_environments",
+                                org_data["default_environment"],
+                            )
+                            if mapped_ee:
+                                patch["default_environment"] = mapped_ee
+                        if patch:
+                            await target_client.update_resource(
+                                "organizations",
+                                target_org_id,
+                                patch,
+                            )
+                            total_updated += 1
+                            emit(
+                                {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
+                                    "name": org_data.get("name", str(org_id)),
+                                    "resource_type": "organizations",
+                                    "result": "updated",
+                                    "detail": "CaC org-update pass",
+                                }
+                            )
+
+                        try:
+                            galaxy_resp = await src_client.get(
+                                f"organizations/{org_id}/galaxy_credentials/",
+                            )
+                            galaxy_creds = galaxy_resp.get("results", [])
+                            for gc in galaxy_creds:
+                                gc_source_id = gc.get("id")
+                                if gc_source_id is None:
+                                    continue
+                                mapped_gc = state.get_mapped_id(
+                                    "credentials",
+                                    gc_source_id,
+                                )
+                                if mapped_gc:
+                                    await target_client.post(
+                                        f"organizations/{target_org_id}/galaxy_credentials/",
+                                        {"id": mapped_gc},
+                                    )
+                        except Exception as gc_exc:
+                            log(f"  Warning: galaxy cred association for org {org_id}: {gc_exc}")
+                    except Exception as org_exc:
+                        log(f"  Warning: CaC org-update for {org_id}: {org_exc}")
 
             final_status = "completed" if total_failed == 0 else "completed_with_errors"
             _update_phase_status(session_factory, phase_id, final_status)

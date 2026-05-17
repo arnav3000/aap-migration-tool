@@ -71,6 +71,8 @@ export const api = {
   listJobs: () => request<unknown[]>('GET', '/api/jobs'),
   getJob: (id: string) => request<unknown>('GET', `/api/jobs/${id}`),
   cancelJob: (jobId: string) => request<{ status: string }>('POST', `/api/jobs/${jobId}/cancel`),
+  resumeJob: (jobId: string) => request<{ status: string }>('POST', `/api/jobs/${jobId}/resume`),
+  getJobCredentialsCsvUrl: (jobId: string) => `/api/jobs/${jobId}/credentials.csv`,
 
   runAnalysis: (connectionId: string) =>
     request<{ job_id: string }>('POST', '/api/analysis/run', { connection_id: connectionId }),
@@ -99,7 +101,7 @@ export const api = {
     request<{ job_id: string }>('POST', `/api/plans/${planId}/phases/${phaseId}/execute`),
 
   listMigratableResourceTypes: () =>
-    request<{ name: string; description: string; migration_order: number }[]>('GET', '/api/resource-types'),
+    request<{ name: string; description: string; migration_order: number; dependencies: string[] }[]>('GET', '/api/resource-types'),
 };
 
 export function createJobLogSocket(jobId: string, onMessage: (line: string) => void, onClose?: (status: string) => void): WebSocket {

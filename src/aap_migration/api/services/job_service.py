@@ -31,6 +31,7 @@ class Job:
         "_task",
         "_subscribers",
         "_html_report",
+        "_resume_event",
     )
 
     def __init__(self, job_id: str, name: str, job_type: str):
@@ -48,6 +49,7 @@ class Job:
         self._task: asyncio.Task | None = None
         self._subscribers: list[asyncio.Queue] = []
         self._html_report: str | None = None
+        self._resume_event: asyncio.Event = asyncio.Event()
 
     def to_summary(self) -> dict[str, Any]:
         """Lightweight dict for job listing (no output/result)."""
@@ -294,6 +296,18 @@ class JobService:
             job._task.cancel()
             return True
         return False
+
+    def resume_job(self, job_id: str) -> bool:
+        """Resume a job that is waiting for user input (e.g. credential pause)."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        if job.status != "waiting_for_input":
+            return False
+        job.status = "running"
+        job._resume_event.set()
+        self._persist_job(job)
+        return True
 
     def get_logs_since(self, job_id: str, offset: int = 0) -> list[str]:
         job = self._jobs.get(job_id)

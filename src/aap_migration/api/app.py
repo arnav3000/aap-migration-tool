@@ -134,19 +134,32 @@ def create_app(db_url: str | None = None) -> FastAPI:
 
 
 def _recover_stale_jobs(session_factory: sessionmaker) -> None:
-    """Mark any DB jobs stuck in 'running' as failed on startup."""
+    """Mark DB jobs stuck in 'running' or 'waiting_for_input' on startup."""
     session = session_factory()
     try:
         from sqlalchemy import update
 
-        stmt = (
+        running_stmt = (
             update(JobRecord)
             .where(JobRecord.status == "running")
             .values(status="failed", error="Engine restarted — job did not complete")
         )
-        result = session.execute(stmt)
-        if result.rowcount:
-            session.commit()
+        session.execute(running_stmt)
+
+        waiting_stmt = (
+            update(JobRecord)
+            .where(JobRecord.status == "waiting_for_input")
+            .values(
+                status="failed",
+                error=(
+                    "Engine restarted while waiting for credential input. "
+                    "Re-execute the phase — already-created resources will be skipped."
+                ),
+            )
+        )
+        session.execute(waiting_stmt)
+
+        session.commit()
     except Exception:
         session.rollback()
     finally:

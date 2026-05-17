@@ -15,12 +15,23 @@ export interface Job {
   name?: string;
   type: string;
   connection_id?: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'waiting_for_input';
   started_at: string;
   finished_at?: string;
   error?: string;
   output?: string[];
   job_metadata?: JobMetadata;
+  result?: {
+    credential_review?: CredentialReviewItem[];
+    [key: string]: unknown;
+  };
+}
+
+export interface CredentialReviewItem {
+  name: string;
+  credential_type: string;
+  organization: string;
+  used_by: Array<{ resource_type: string; resource_name: string }>;
 }
 
 export interface MigrationResource {
@@ -69,6 +80,7 @@ export interface ResourceTypeInfo {
   name: string;
   description: string;
   migration_order: number;
+  dependencies: string[];
 }
 
 export interface PlanSource {

@@ -173,7 +173,8 @@ class AAPTargetClient(BaseAPIClient):
         Returns:
             Updated resource data
         """
-        endpoint = f"{resource_type}/{resource_id}/"
+        base = get_endpoint(resource_type).rstrip("/")
+        endpoint = f"{base}/{resource_id}/"
         result = await self.patch(endpoint, json_data=data)
         logger.info(
             "resource_updated",
@@ -197,7 +198,8 @@ class AAPTargetClient(BaseAPIClient):
         Returns:
             Empty dict or deletion confirmation
         """
-        endpoint = f"{resource_type}/{resource_id}/"
+        base = get_endpoint(resource_type).rstrip("/")
+        endpoint = f"{base}/{resource_id}/"
         result = await self.delete(endpoint)
         logger.info(
             "resource_deleted",
