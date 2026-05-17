@@ -97,6 +97,9 @@ export const api = {
   populatePlan: (id: string) => request<unknown>('POST', `/api/plans/${id}/populate`),
   executePlanPhase: (planId: string, phaseId: string) =>
     request<{ job_id: string }>('POST', `/api/plans/${planId}/phases/${phaseId}/execute`),
+
+  listMigratableResourceTypes: () =>
+    request<{ name: string; description: string; migration_order: number }[]>('GET', '/api/resource-types'),
 };
 
 export function createJobLogSocket(jobId: string, onMessage: (line: string) => void, onClose?: (status: string) => void): WebSocket {

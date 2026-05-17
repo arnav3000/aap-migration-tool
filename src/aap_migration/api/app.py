@@ -18,6 +18,7 @@ from aap_migration.api.models import (  # noqa: F401 — registers tables
     MigrationPlan,
     MigrationPlanPhase,
     MigrationPlanPhaseOrg,
+    MigrationPlanPhaseResourceType,
     MigrationPlanSource,
 )
 from aap_migration.api.services.job_service import JobService
@@ -49,6 +50,23 @@ def _migrate_add_seq_id(engine: object) -> None:
         )
 
 
+def _migrate_phase_resource_types(engine: object) -> None:
+    """Add update_mode column and phase_resource_types table if missing."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if insp.has_table("api_migration_plan_phases"):
+        columns = [c["name"] for c in insp.get_columns("api_migration_plan_phases")]
+        if "update_mode" not in columns:
+            with engine.begin() as conn:  # type: ignore[attr-defined]
+                conn.execute(
+                    text(
+                        "ALTER TABLE api_migration_plan_phases "
+                        "ADD COLUMN update_mode BOOLEAN NOT NULL DEFAULT FALSE"
+                    )
+                )
+
+
 def create_app(db_url: str | None = None) -> FastAPI:
     effective_url: str = db_url or get_db_url()
 
@@ -56,6 +74,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
         effective_url = f"sqlite:///{effective_url}"
 
     engine = create_database_engine(effective_url)
+    _migrate_phase_resource_types(engine)
     Base.metadata.create_all(engine)
     _migrate_add_seq_id(engine)
 

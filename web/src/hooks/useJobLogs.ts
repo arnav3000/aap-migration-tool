@@ -38,6 +38,7 @@ export interface PhaseCompleteEvent extends MigrationEvent {
   phase_num: number;
   description: string;
   created: number;
+  updated: number;
   skipped: number;
   failed: number;
   exported: number;
@@ -57,13 +58,14 @@ export interface ResourceResultEvent extends MigrationEvent {
   phase_num: number;
   name: string;
   resource_type: string;
-  result: 'created' | 'skipped' | 'exists' | 'failed';
+  result: 'created' | 'updated' | 'skipped' | 'exists' | 'failed';
   detail: string;
 }
 
 export interface MigrationCompleteEvent extends MigrationEvent {
   _event: 'migration_complete';
   total_created: number;
+  total_updated: number;
   total_skipped: number;
   total_failed: number;
 }

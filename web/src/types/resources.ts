@@ -58,9 +58,17 @@ export interface PlanPhase {
   id: string;
   phase_number: number;
   name: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'completed_with_errors';
+  update_mode: boolean;
+  resource_types: string[];
   job_id?: string | null;
   orgs: PlanPhaseOrg[];
+}
+
+export interface ResourceTypeInfo {
+  name: string;
+  description: string;
+  migration_order: number;
 }
 
 export interface PlanSource {

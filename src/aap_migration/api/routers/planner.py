@@ -15,6 +15,7 @@ from aap_migration.api.models import (
     MigrationPlan,
     MigrationPlanPhase,
     MigrationPlanPhaseOrg,
+    MigrationPlanPhaseResourceType,
     MigrationPlanSource,
 )
 from aap_migration.api.schemas import (
@@ -27,6 +28,26 @@ from aap_migration.api.services.connection_service import ConnectionService
 from aap_migration.api.services.job_service import Job
 
 router = APIRouter()
+
+
+@router.get("/resource-types")
+def list_resource_types() -> list[dict[str, Any]]:
+    """Return ordered list of migratable resource types with metadata."""
+    from aap_migration.resources import RESOURCE_REGISTRY, get_migration_order
+
+    result = []
+    for rtype in get_migration_order():
+        info = RESOURCE_REGISTRY[rtype]
+        if not info.has_exporter or not info.has_importer:
+            continue
+        result.append(
+            {
+                "name": rtype,
+                "description": info.description,
+                "migration_order": info.migration_order,
+            }
+        )
+    return result
 
 
 def _build_plan_response(db: Session, plan: MigrationPlan) -> dict[str, Any]:
@@ -42,12 +63,15 @@ def _build_plan_response(db: Session, plan: MigrationPlan) -> dict[str, Any]:
     phase_responses: list[dict[str, Any]] = []
     for phase in phases:
         orgs = db.query(MigrationPlanPhaseOrg).filter_by(phase_id=phase.id).all()
+        rt_rows = db.query(MigrationPlanPhaseResourceType).filter_by(phase_id=phase.id).all()
         phase_responses.append(
             {
                 "id": phase.id,
                 "phase_number": phase.phase_number,
                 "name": phase.name,
                 "status": phase.status,
+                "update_mode": phase.update_mode,
+                "resource_types": [r.resource_type for r in rt_rows],
                 "job_id": phase.job_id,
                 "orgs": [
                     {
@@ -162,10 +186,12 @@ def delete_plan(plan_id: str, db: Session = Depends(get_db)) -> None:
     plan = db.get(MigrationPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="Plan not found")
-    db.query(MigrationPlanPhaseOrg).filter(
-        MigrationPlanPhaseOrg.phase_id.in_(
-            db.query(MigrationPlanPhase.id).filter_by(plan_id=plan_id)
-        )
+    phase_ids = db.query(MigrationPlanPhase.id).filter_by(plan_id=plan_id)
+    db.query(MigrationPlanPhaseOrg).filter(MigrationPlanPhaseOrg.phase_id.in_(phase_ids)).delete(
+        synchronize_session=False
+    )
+    db.query(MigrationPlanPhaseResourceType).filter(
+        MigrationPlanPhaseResourceType.phase_id.in_(phase_ids)
     ).delete(synchronize_session=False)
     db.query(MigrationPlanPhase).filter_by(plan_id=plan_id).delete()
     db.query(MigrationPlanSource).filter_by(plan_id=plan_id).delete()
@@ -193,10 +219,12 @@ def update_phases(
             db.add(ps)
         db.flush()
 
-    db.query(MigrationPlanPhaseOrg).filter(
-        MigrationPlanPhaseOrg.phase_id.in_(
-            db.query(MigrationPlanPhase.id).filter_by(plan_id=plan_id)
-        )
+    phase_ids = db.query(MigrationPlanPhase.id).filter_by(plan_id=plan_id)
+    db.query(MigrationPlanPhaseOrg).filter(MigrationPlanPhaseOrg.phase_id.in_(phase_ids)).delete(
+        synchronize_session=False
+    )
+    db.query(MigrationPlanPhaseResourceType).filter(
+        MigrationPlanPhaseResourceType.phase_id.in_(phase_ids)
     ).delete(synchronize_session=False)
     db.query(MigrationPlanPhase).filter_by(plan_id=plan_id).delete()
     db.flush()
@@ -207,10 +235,21 @@ def update_phases(
             plan_id=plan_id,
             phase_number=phase_data.phase_number,
             name=phase_data.name,
+            update_mode=phase_data.update_mode,
             status="pending",
         )
         db.add(phase)
         db.flush()
+
+        if phase_data.resource_types:
+            for rt in phase_data.resource_types:
+                db.add(
+                    MigrationPlanPhaseResourceType(
+                        id=str(uuid.uuid4()),
+                        phase_id=phase.id,
+                        resource_type=rt,
+                    )
+                )
 
         for org in phase_data.orgs:
             po = MigrationPlanPhaseOrg(
@@ -226,9 +265,67 @@ def update_phases(
     return _build_plan_response(db, plan)
 
 
+_DEFAULT_PHASES: list[dict[str, Any]] = [
+    {
+        "name": "Foundation",
+        "resource_types": ["settings", "instances", "instance_groups"],
+        "update_mode": False,
+    },
+    {
+        "name": "Organizations & Identity",
+        "resource_types": [
+            "organizations",
+            "labels",
+            "users",
+            "teams",
+            "credential_types",
+        ],
+        "update_mode": False,
+    },
+    {
+        "name": "Credentials & Environments",
+        "resource_types": [
+            "credentials",
+            "credential_input_sources",
+            "execution_environments",
+            "notification_templates",
+        ],
+        "update_mode": False,
+    },
+    {
+        "name": "Organizations (update assignments)",
+        "resource_types": ["organizations"],
+        "update_mode": True,
+    },
+    {
+        "name": "Projects & Inventories",
+        "resource_types": [
+            "projects",
+            "inventories",
+            "inventory_sources",
+            "applications",
+            "hosts",
+            "host_inventory_memberships",
+            "inventory_groups",
+        ],
+        "update_mode": False,
+    },
+    {
+        "name": "Job Configuration",
+        "resource_types": [
+            "job_templates",
+            "workflow_job_templates",
+            "system_job_templates",
+            "schedules",
+        ],
+        "update_mode": False,
+    },
+]
+
+
 @router.post("/plans/{plan_id}/populate")
 def populate_plan(plan_id: str, db: Session = Depends(get_db)) -> dict[str, Any]:
-    """Auto-populate phases from analysis results for all sources in the plan."""
+    """Auto-populate phases using CaC-style dependency ordering."""
     plan = db.get(MigrationPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="Plan not found")
@@ -239,16 +336,8 @@ def populate_plan(plan_id: str, db: Session = Depends(get_db)) -> dict[str, Any]
 
     svc = get_job_service()
 
-    db.query(MigrationPlanPhaseOrg).filter(
-        MigrationPlanPhaseOrg.phase_id.in_(
-            db.query(MigrationPlanPhase.id).filter_by(plan_id=plan_id)
-        )
-    ).delete(synchronize_session=False)
-    db.query(MigrationPlanPhase).filter_by(plan_id=plan_id).delete()
-    db.flush()
-
-    all_phases: dict[int, list[tuple[str, int, str]]] = {}
-
+    # Collect all orgs from all sources' analysis results
+    all_orgs: list[tuple[str, int, str]] = []
     for source in sources:
         if not source.analysis_job_id:
             continue
@@ -256,42 +345,54 @@ def populate_plan(plan_id: str, db: Session = Depends(get_db)) -> dict[str, Any]
         if job is None or job.result is None:
             continue
 
-        migration_phases = job.result.get("migration_phases", [])
-        for phase_data in migration_phases:
-            phase_num = phase_data.get("phase", 1)
-            raw_orgs = phase_data.get("orgs", [])
-            if isinstance(raw_orgs, dict) and "orgs" in raw_orgs:
-                raw_orgs = raw_orgs["orgs"]
-            org_names = raw_orgs if isinstance(raw_orgs, list) else []
+        orgs_dict = job.result.get("organizations", {})
+        for org_name, org_info in orgs_dict.items():
+            org_id = org_info.get("org_id", 0)
+            all_orgs.append((source.id, org_id, org_name))
 
-            orgs_dict = job.result.get("organizations", {})
-            for org_name in org_names:
-                org_info = orgs_dict.get(org_name, {})
-                org_id = org_info.get("org_id", 0)
-                if phase_num not in all_phases:
-                    all_phases[phase_num] = []
-                all_phases[phase_num].append((source.id, org_id, org_name))
+    # Clear existing phases
+    phase_ids = db.query(MigrationPlanPhase.id).filter_by(plan_id=plan_id)
+    db.query(MigrationPlanPhaseOrg).filter(MigrationPlanPhaseOrg.phase_id.in_(phase_ids)).delete(
+        synchronize_session=False
+    )
+    db.query(MigrationPlanPhaseResourceType).filter(
+        MigrationPlanPhaseResourceType.phase_id.in_(phase_ids)
+    ).delete(synchronize_session=False)
+    db.query(MigrationPlanPhase).filter_by(plan_id=plan_id).delete()
+    db.flush()
 
-    for phase_num in sorted(all_phases.keys()):
+    # Create the 6 default phases
+    for phase_num, phase_def in enumerate(_DEFAULT_PHASES, start=1):
         phase = MigrationPlanPhase(
             id=str(uuid.uuid4()),
             plan_id=plan_id,
             phase_number=phase_num,
-            name=f"Phase {phase_num}",
+            name=phase_def["name"],
+            update_mode=phase_def["update_mode"],
             status="pending",
         )
         db.add(phase)
         db.flush()
 
-        for source_id, org_id, org_name in all_phases[phase_num]:
-            po = MigrationPlanPhaseOrg(
-                id=str(uuid.uuid4()),
-                phase_id=phase.id,
-                source_id=source_id,
-                org_id=org_id,
-                org_name=org_name,
+        for rt in phase_def["resource_types"]:
+            db.add(
+                MigrationPlanPhaseResourceType(
+                    id=str(uuid.uuid4()),
+                    phase_id=phase.id,
+                    resource_type=rt,
+                )
             )
-            db.add(po)
+
+        for source_id, org_id, org_name in all_orgs:
+            db.add(
+                MigrationPlanPhaseOrg(
+                    id=str(uuid.uuid4()),
+                    phase_id=phase.id,
+                    source_id=source_id,
+                    org_id=org_id,
+                    org_name=org_name,
+                )
+            )
 
     db.flush()
     return _build_plan_response(db, plan)
@@ -353,6 +454,10 @@ async def execute_phase(
     dest_auth_scheme = ConnectionService._auth_scheme(dest)
 
     phase_name = phase.name or f"Phase {phase.phase_number}"
+    phase_update_mode = phase.update_mode
+
+    rt_rows = db.query(MigrationPlanPhaseResourceType).filter_by(phase_id=phase_id).all()
+    phase_allowed_types: set[str] | None = {r.resource_type for r in rt_rows} if rt_rows else None
 
     db_url = get_db_url()
 
@@ -380,11 +485,14 @@ async def execute_phase(
         total_created = 0
         total_skipped = 0
         total_failed = 0
+        total_updated = 0
 
         resource_order = [
             rt
             for rt in get_migration_order()
-            if RESOURCE_REGISTRY[rt].has_exporter and RESOURCE_REGISTRY[rt].has_importer
+            if RESOURCE_REGISTRY[rt].has_exporter
+            and RESOURCE_REGISTRY[rt].has_importer
+            and (phase_allowed_types is None or rt in phase_allowed_types)
         ]
         num_resource_types = len(resource_order) * len(source_configs)
 
@@ -439,6 +547,7 @@ async def execute_phase(
                     created = 0
                     skipped = 0
                     failed = 0
+                    updated = 0
 
                     try:
                         exporter = create_exporter(
@@ -542,6 +651,40 @@ async def execute_phase(
                                             "detail": "",
                                         }
                                     )
+                                elif phase_update_mode and rtype != "host_inventory_memberships":
+                                    target_id = state.get_mapped_id(rtype, int(source_id))
+                                    if target_id is not None:
+                                        try:
+                                            await target_client.update_resource(
+                                                rtype,
+                                                target_id,
+                                                resource,
+                                            )
+                                            updated += 1
+                                            emit(
+                                                {
+                                                    "_event": "resource_result",
+                                                    "phase_num": phase_num,
+                                                    "name": res_name,
+                                                    "resource_type": rtype,
+                                                    "result": "updated",
+                                                    "detail": "",
+                                                }
+                                            )
+                                        except Exception as upd_exc:
+                                            failed += 1
+                                            emit(
+                                                {
+                                                    "_event": "resource_result",
+                                                    "phase_num": phase_num,
+                                                    "name": res_name,
+                                                    "resource_type": rtype,
+                                                    "result": "failed",
+                                                    "detail": f"update: {upd_exc!s}"[:200],
+                                                }
+                                            )
+                                    else:
+                                        skipped += 1
                                 else:
                                     skipped += 1
                             except Exception as exc:
@@ -584,6 +727,7 @@ async def execute_phase(
                                 "phase_num": phase_num,
                                 "description": info.description,
                                 "created": created,
+                                "updated": updated,
                                 "skipped": skipped,
                                 "failed": failed,
                                 "exported": exported,
@@ -597,6 +741,7 @@ async def execute_phase(
                         log(f"  Error on {rtype}: {exc}")
 
                     total_created += created
+                    total_updated += updated
                     total_skipped += skipped
                     total_failed += failed
 
@@ -610,6 +755,7 @@ async def execute_phase(
             {
                 "_event": "migration_complete",
                 "total_created": total_created,
+                "total_updated": total_updated,
                 "total_skipped": total_skipped,
                 "total_failed": total_failed,
             }
@@ -617,6 +763,7 @@ async def execute_phase(
 
         return {
             "total_created": total_created,
+            "total_updated": total_updated,
             "total_skipped": total_skipped,
             "total_failed": total_failed,
         }

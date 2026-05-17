@@ -29,7 +29,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { PhaseEditor } from '../components/PhaseEditor';
 import type { Connection } from '../types/connection';
-import type { MigrationPlan, PlanPhase, PlanSource } from '../types/resources';
+import type { MigrationPlan, PlanPhase, PlanSource, ResourceTypeInfo } from '../types/resources';
 
 interface AnalysisJob {
   id: string;
@@ -53,6 +53,7 @@ export function PlanDetail() {
   const [success, setSuccess] = useState('');
   const [activeTab, setActiveTab] = useState(0);
   const [dirty, setDirty] = useState(false);
+  const [resourceTypesMeta, setResourceTypesMeta] = useState<ResourceTypeInfo[]>([]);
 
   // Source addition form
   const [addSourceConn, setAddSourceConn] = useState('');
@@ -84,7 +85,14 @@ export function PlanDetail() {
     } catch { /* ignore */ }
   }, []);
 
-  useEffect(() => { loadPlan(); loadConnections(); loadAnalysisJobs(); }, [loadPlan, loadConnections, loadAnalysisJobs]);
+  const loadResourceTypes = useCallback(async () => {
+    try {
+      const rt = await api.listMigratableResourceTypes();
+      setResourceTypesMeta(rt as ResourceTypeInfo[]);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadPlan(); loadConnections(); loadAnalysisJobs(); loadResourceTypes(); }, [loadPlan, loadConnections, loadAnalysisJobs, loadResourceTypes]);
 
   const sourceNames: Record<string, string> = {};
   if (plan) {
@@ -111,6 +119,8 @@ export function PlanDetail() {
           id: p.id.startsWith('new-') ? undefined : p.id,
           phase_number: p.phase_number,
           name: p.name,
+          update_mode: p.update_mode,
+          resource_types: p.resource_types.length > 0 ? p.resource_types : null,
           orgs: p.orgs.map(o => ({
             source_id: o.source_id,
             org_id: o.org_id,
@@ -151,6 +161,8 @@ export function PlanDetail() {
           id: p.id.startsWith('new-') ? undefined : p.id,
           phase_number: p.phase_number,
           name: p.name,
+          update_mode: p.update_mode,
+          resource_types: p.resource_types.length > 0 ? p.resource_types : null,
           orgs: p.orgs.map(o => ({
             source_id: o.source_id,
             org_id: o.org_id,
@@ -396,6 +408,7 @@ export function PlanDetail() {
                   phases={plan.phases}
                   sources={plan.sources}
                   sourceNames={sourceNames}
+                  resourceTypesMeta={resourceTypesMeta}
                   onChange={handlePhaseChange}
                 />
               </>
@@ -421,6 +434,14 @@ export function PlanDetail() {
                             <strong>{phase.name || `Phase ${phase.phase_number}`}</strong>
                             {' — '}
                             {phase.orgs.length} org(s)
+                            {phase.resource_types.length > 0 && (
+                              <Label color="cyan" isCompact style={{ marginLeft: 8 }}>
+                                {phase.resource_types.length} resource type(s)
+                              </Label>
+                            )}
+                            {phase.update_mode && (
+                              <Label color="purple" isCompact style={{ marginLeft: 4 }}>update</Label>
+                            )}
                             {phase.job_id && (
                               <Button variant="link" size="sm" onClick={() => navigate(`/jobs/${phase.job_id}`)} style={{ marginLeft: 8 }}>
                                 View Job
@@ -429,7 +450,7 @@ export function PlanDetail() {
                           </SplitItem>
                           <SplitItem>
                             <Label
-                              color={phase.status === 'completed' ? 'green' : phase.status === 'running' ? 'orange' : phase.status === 'failed' ? 'red' : 'grey'}
+                              color={phase.status === 'completed' ? 'green' : phase.status === 'completed_with_errors' ? 'orange' : phase.status === 'running' ? 'orange' : phase.status === 'failed' ? 'red' : 'grey'}
                               isCompact
                             >
                               {phase.status}
