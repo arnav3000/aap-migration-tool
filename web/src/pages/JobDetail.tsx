@@ -120,8 +120,12 @@ export function JobDetail() {
     if (!id || resuming) return;
     setResuming(true);
     try {
-      await api.resumeJob(id);
-      loadJob();
+      const result = await api.resumeJob(id);
+      if (result.new_job_id) {
+        navigate(`/jobs/${result.new_job_id}`);
+      } else {
+        loadJob();
+      }
     } catch {
       // ignore
     } finally {

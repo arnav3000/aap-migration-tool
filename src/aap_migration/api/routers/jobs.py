@@ -40,8 +40,13 @@ def cancel_job(job_id: str) -> dict[str, str]:
 
 
 @router.post("/jobs/{job_id}/resume")
-def resume_job(job_id: str) -> dict[str, str]:
-    """Resume a job that is paused waiting for user input (e.g. credential update)."""
+async def resume_job(job_id: str) -> dict[str, Any]:
+    """Resume a job that is paused waiting for user input (e.g. credential update).
+
+    If the job is still in memory, signals the asyncio event to continue.
+    If the engine restarted (job only in DB), re-executes the phase so the
+    importer skips already-created resources and continues with the rest.
+    """
     svc = get_job_service()
     job = svc.get_job(job_id)
     if job is None:
@@ -51,8 +56,42 @@ def resume_job(job_id: str) -> dict[str, str]:
             status_code=400,
             detail=f"Job is not waiting for input (status: {job.status})",
         )
-    resumed = svc.resume_job(job_id)
-    return {"status": "running" if resumed else job.status}
+
+    if svc.resume_job(job_id):
+        return {"status": "running"}
+
+    plan_id = (job.result or {}).get("_paused_plan_id")
+    phase_id = (job.result or {}).get("_paused_phase_id")
+    if not plan_id or not phase_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot resume: missing plan/phase reference. Re-execute the phase manually.",
+        )
+
+    from sqlalchemy.orm import Session
+
+    from aap_migration.api.dependencies import get_app_state
+    from aap_migration.api.models import JobRecord
+
+    state = get_app_state()
+    session: Session = state.db_session_factory()
+    try:
+        record = session.get(JobRecord, job_id)
+        if record:
+            record.status = "resumed"
+            record.error = None
+            session.commit()
+    finally:
+        session.close()
+
+    from aap_migration.api.routers.planner import execute_phase
+
+    db: Session = state.db_session_factory()
+    try:
+        result = await execute_phase(plan_id, phase_id, db)
+        return {"status": "running", "new_job_id": result.job_id}
+    finally:
+        db.close()
 
 
 @router.get("/jobs/{job_id}/credentials")

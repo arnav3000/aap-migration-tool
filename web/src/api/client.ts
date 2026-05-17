@@ -71,7 +71,7 @@ export const api = {
   listJobs: () => request<unknown[]>('GET', '/api/jobs'),
   getJob: (id: string) => request<unknown>('GET', `/api/jobs/${id}`),
   cancelJob: (jobId: string) => request<{ status: string }>('POST', `/api/jobs/${jobId}/cancel`),
-  resumeJob: (jobId: string) => request<{ status: string }>('POST', `/api/jobs/${jobId}/resume`),
+  resumeJob: (jobId: string) => request<{ status: string; new_job_id?: string }>('POST', `/api/jobs/${jobId}/resume`),
   getJobCredentialsCsvUrl: (jobId: string) => `/api/jobs/${jobId}/credentials.csv`,
 
   runAnalysis: (connectionId: string) =>

@@ -146,18 +146,8 @@ def _recover_stale_jobs(session_factory: sessionmaker) -> None:
         )
         session.execute(running_stmt)
 
-        waiting_stmt = (
-            update(JobRecord)
-            .where(JobRecord.status == "waiting_for_input")
-            .values(
-                status="failed",
-                error=(
-                    "Engine restarted while waiting for credential input. "
-                    "Re-execute the phase — already-created resources will be skipped."
-                ),
-            )
-        )
-        session.execute(waiting_stmt)
+        # waiting_for_input jobs survive restarts — they are intentionally
+        # paused and the resume endpoint will re-execute the phase.
 
         session.commit()
     except Exception:

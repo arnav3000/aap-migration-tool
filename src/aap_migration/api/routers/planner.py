@@ -892,6 +892,8 @@ async def execute_phase(
                             )
                             job.result = job.result or {}
                             job.result["credential_review"] = cred_review
+                            job.result["_paused_plan_id"] = plan_id
+                            job.result["_paused_phase_id"] = phase_id
                             job.status = "waiting_for_input"
                             svc._persist_job(job)
                             await job._resume_event.wait()
