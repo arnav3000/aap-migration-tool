@@ -1,8 +1,8 @@
 .PHONY: help install install-dev clean format lint typecheck test test-unit test-integration \
        test-performance test-cov test-watch check pre-commit docs docs-serve run-example \
        init-env setup version venv install-editable all \
-       build build-api build-ui prepare-pgdata up up-dev down shell shell-engine logs \
-       c-test c-lint c-format c-typecheck c-check \
+       build build-api build-ui build-test prepare-pgdata up up-dev down shell shell-engine logs \
+       c-test c-test-backend c-test-frontend c-test-smoke c-test-all c-ci-full c-lint c-format c-typecheck c-check \
        web-install web-dev web-build serve
 
 .DEFAULT_GOAL := help
@@ -82,13 +82,13 @@ test: ## Run all tests
 	$(PYTEST) $(TESTS_DIR)
 
 test-unit: ## Run only unit tests
-	$(PYTEST) $(TESTS_DIR)/unit -v
+	$(PYTEST) $(TESTS_DIR) -v -m "not integration and not performance and not requires_aap and not requires_vault"
 
 test-integration: ## Run only integration tests
-	$(PYTEST) $(TESTS_DIR)/integration -v -m integration
+	$(PYTEST) $(TESTS_DIR) -v -m "integration or requires_aap or requires_vault"
 
 test-performance: ## Run only performance tests
-	$(PYTEST) $(TESTS_DIR)/performance -v -m performance
+	$(PYTEST) $(TESTS_DIR) -v -m performance
 
 test-cov: ## Run tests with coverage report
 	$(PYTEST) $(TESTS_DIR) --cov=$(SRC_DIR) --cov-report=html --cov-report=term
@@ -136,12 +136,17 @@ COMPOSE          := podman compose -f container/docker-compose.yml
 BRIDGE_SVC       := bridge
 BRIDGE_IMAGE     := localhost/aap-bridge:latest
 BRIDGE_API_IMAGE := localhost/aap-bridge-api:latest
+TEST_IMAGE       := localhost/aap-bridge-test:latest
 UI_IMAGE         := localhost/aap-bridge-ui:latest
 PROJECT_NAME     := $(notdir $(CURDIR))
 PGDATA_VOLUME    := $(PROJECT_NAME)_postgres-data
 
 define run-bridge
 	$(COMPOSE) exec $(BRIDGE_SVC)
+endef
+
+define run-test
+	podman run --rm $(TEST_IMAGE)
 endef
 
 build: ## Build all container images (cli, api, ui)
@@ -154,6 +159,9 @@ build-api: ## Build API container image only
 
 build-ui: ## Build UI container image only
 	podman build -t $(UI_IMAGE) -f container/Containerfile.ui .
+
+build-test: ## Build dedicated test container image
+	podman build -t $(TEST_IMAGE) -f container/Containerfile.test .
 
 prepare-pgdata: ## Prepare PostgreSQL volume ownership for rootless Podman
 	@podman volume inspect $(PGDATA_VOLUME) >/dev/null 2>&1 || podman volume create $(PGDATA_VOLUME) >/dev/null
@@ -177,20 +185,33 @@ shell-engine: ## Shell into engine container
 logs: ## Tail all container logs
 	$(COMPOSE) logs -f
 
-c-test: ## Run unit tests inside bridge container
-	$(run-bridge) python3.12 -m pytest tests/unit/ -v
+c-test: c-test-all ## Run all tests inside dedicated test container
 
-c-lint: ## Run ruff linter inside bridge container
-	$(run-bridge) python3.12 -m ruff check src/ tests/unit/
+c-test-backend: build-test ## Run the full backend/API/CLI pytest suite inside the test container
+	$(run-test) python3.12 -m pytest tests -v -m "not integration and not performance and not requires_aap and not requires_vault"
 
-c-format: ## Run black + isort inside bridge container
-	$(run-bridge) python3.12 -m black src/ tests/unit/
-	$(run-bridge) python3.12 -m isort src/ tests/unit/
+c-test-frontend: build-test ## Run frontend tests and production build inside test container
+	$(run-test) /bin/bash -lc "cd web && npm run test:ci && npm run build"
 
-c-typecheck: ## Run mypy inside bridge container
-	$(run-bridge) python3.12 -m mypy src/
+c-test-smoke: build-test ## Run container/runtime smoke tests inside test container
+	$(run-test) python3.12 -m pytest tests/test_container_runtime.py -v
 
-c-check: c-lint c-typecheck c-test ## Run all checks inside bridge container
+c-test-all: c-test-backend c-test-frontend c-test-smoke ## Run complete containerized regression suite
+
+c-ci-full: build-test ## Run the full containerized suite and fail if combined repo coverage drops below 80%
+	$(run-test) /bin/bash -lc "set -euo pipefail && python3.12 -m pytest tests -q -m \"not integration and not performance and not requires_aap and not requires_vault\" --cov-report=xml:coverage.xml --cov-report=term-missing:skip-covered && cd web && npm run test:ci && npm run build && cd /workspace && python3.12 scripts/check_repo_coverage.py --backend coverage.xml --frontend web/coverage/coverage-summary.json --threshold 80 && python3.12 -m pytest tests/test_container_runtime.py -q"
+
+c-lint: build-test ## Run ruff linter inside test container
+	$(run-test) python3.12 -m ruff check src/ tests/
+
+c-format: build-test ## Run black + isort inside test container
+	$(run-test) python3.12 -m black src/ tests/
+	$(run-test) python3.12 -m isort src/ tests/
+
+c-typecheck: build-test ## Run mypy inside test container
+	$(run-test) python3.12 -m mypy src/
+
+c-check: c-lint c-typecheck c-test-all ## Run containerized checks and full tests
 
 # ===========================================================================
 #  Web UI

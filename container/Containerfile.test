@@ -1,0 +1,23 @@
+FROM registry.access.redhat.com/ubi9/nodejs-20:latest
+
+USER 0
+
+# hadolint ignore=DL3041
+RUN dnf install -y python3.12 python3.12-pip python3.12-devel gcc nginx && \
+    dnf clean all
+
+WORKDIR /workspace
+
+COPY pyproject.toml README.md ./
+COPY src/ src/
+COPY scripts/ scripts/
+COPY tests/ tests/
+COPY pytest.ini requirements-dev.txt ./
+COPY web/index.html web/package.json web/package-lock.json web/tsconfig.json web/vite.config.ts web/vitest.config.ts web/
+COPY web/src/ web/src/
+COPY container/ container/
+
+RUN python3.12 -m pip install --no-cache-dir -e ".[dev]"
+RUN cd web && npm ci
+
+CMD ["/bin/bash"]

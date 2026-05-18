@@ -253,6 +253,11 @@ SUCCESS-REPORT-PHASE2-PHASE3-FIXES.md
 # Migration process ID files
 *.pid
 
+# Frontend dependencies and build outputs
+web/node_modules/
+web/coverage/
+web/dist/
+
 # Generated migration reports
 PROJECT-FAILURES-REPORT.md
 CLAUDE.md
@@ -283,6 +288,12 @@ sync_inventory_sources.py
 test_*.py
 test_*.sh
 test/
+!tests/
+!tests/**/*.py
+!web/src/test/
+!web/src/test/**
+tests/__pycache__/
+tests/**/*.pyc
 
 # Credential toolkit and related files
 credential-toolkit.tar.gz
