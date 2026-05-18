@@ -30,7 +30,7 @@ dependencies = [
     "httpx==0.28.1",
     "h11>=0.16.0",
     "requests>=2.33.0",
-    "click==8.3.3",
+    "click==8.4.0",
     "rich>=13.0.0",
     "structlog==24.1.0",
     "tenacity==8.2.3",
