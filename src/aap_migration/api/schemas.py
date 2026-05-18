@@ -154,6 +154,8 @@ class PhaseUpdate(BaseModel):
     id: str | None = None
     phase_number: int
     name: str = ""
+    update_mode: bool = False
+    resource_types: list[str] | None = None
     orgs: list[PhaseOrgUpdate] = []
 
 
@@ -176,6 +178,8 @@ class PlanPhaseResponse(BaseModel):
     phase_number: int
     name: str
     status: str
+    update_mode: bool = False
+    resource_types: list[str] = []
     job_id: str | None = None
     orgs: list[PlanPhaseOrgResponse] = []
 

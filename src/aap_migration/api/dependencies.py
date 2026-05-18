@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Generator
 
 from sqlalchemy.orm import Session, sessionmaker
 
 from aap_migration.api.services.job_service import JobService
+
+_DEFAULT_PG_URL = "postgresql://aap_user:changeme@localhost:5432/aap_migration"
+_SQLITE_FALLBACK = "sqlite:///aap_bridge.db"
+
+
+def get_db_url() -> str:
+    """Return the database URL from env, defaulting to PostgreSQL."""
+    return os.environ.get("MIGRATION_STATE_DB_PATH", _DEFAULT_PG_URL)
 
 
 class AppState:

@@ -173,7 +173,8 @@ class AAPTargetClient(BaseAPIClient):
         Returns:
             Updated resource data
         """
-        endpoint = f"{resource_type}/{resource_id}/"
+        base = get_endpoint(resource_type).rstrip("/")
+        endpoint = f"{base}/{resource_id}/"
         result = await self.patch(endpoint, json_data=data)
         logger.info(
             "resource_updated",
@@ -197,7 +198,8 @@ class AAPTargetClient(BaseAPIClient):
         Returns:
             Empty dict or deletion confirmation
         """
-        endpoint = f"{resource_type}/{resource_id}/"
+        base = get_endpoint(resource_type).rstrip("/")
+        endpoint = f"{base}/{resource_id}/"
         result = await self.delete(endpoint)
         logger.info(
             "resource_deleted",
@@ -563,31 +565,39 @@ class AAPTargetClient(BaseAPIClient):
         # Use get_endpoint to map resource_type to correct API endpoint
         # (e.g., "inventory_groups" -> "groups/")
         endpoint: str | None = get_endpoint(resource_type)
-        params = {"page_size": page_size}
+        params: dict[str, Any] = {"page_size": page_size}
 
         if filters:
             params.update(filters)
 
-        all_results = []
+        all_results: list[dict[str, Any]] = []
+        max_pages = 500
 
-        # Handle pagination automatically
-        while endpoint:
+        page = 0
+        while endpoint and page < max_pages:
+            page += 1
             response = await self.get(endpoint, params=params)
             results = response.get("results", [])
             all_results.extend(results)
 
-            # Get next page URL (already includes params)
             next_url = response.get("next")
             if next_url:
-                # Extract path from full URL for next request
-                from urllib.parse import urlparse
+                from urllib.parse import parse_qs, urlparse
 
                 parsed = urlparse(next_url)
-                # Handle both AAP 2.6 (/api/controller/v2/) and AAP 2.4 (/api/v2/) paths
-                endpoint = parsed.path.replace("/api/controller/v2/", "").replace("/api/v2/", "")
-                params = {}  # Next URL already has query params
+                raw_path = parsed.path.replace("/api/controller/v2/", "").replace("/api/v2/", "")
+                endpoint = raw_path
+                params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
             else:
                 endpoint = None
+
+        if page >= max_pages:
+            logger.warning(
+                "list_resources_page_limit",
+                resource_type=resource_type,
+                pages=page,
+                results=len(all_results),
+            )
 
         logger.debug(
             "list_resources_completed",

@@ -21,17 +21,26 @@ import TimesIcon from '@patternfly/react-icons/dist/esm/icons/times-icon';
 import ExclamationTriangleIcon from '@patternfly/react-icons/dist/esm/icons/exclamation-triangle-icon';
 import type { PlanPhase, PlanPhaseOrg, PlanSource } from '../types/resources';
 
-interface AnalysisOrgData {
+export interface AnalysisOrgDep {
+  resource_type: string;
+  resource_name: string;
+  required_by: string[];
+}
+
+export interface AnalysisOrgData {
   org_id: number;
   required_migrations_before: string[];
   can_migrate_standalone: boolean;
+  dependencies: Record<string, AnalysisOrgDep[]>;
 }
+
+export type AnalysisDataMap = Record<string, { organizations: Record<string, AnalysisOrgData> }>;
 
 interface Props {
   phases: PlanPhase[];
   sources: PlanSource[];
   sourceNames: Record<string, string>;
-  analysisData?: Record<string, { organizations: Record<string, AnalysisOrgData> }>;
+  analysisData?: AnalysisDataMap;
   onChange: (phases: PlanPhase[]) => void;
 }
 
@@ -63,6 +72,30 @@ export function PhaseEditor({ phases, sources, sourceNames, analysisData, onChan
     return null;
   };
 
+  const getSharedResourceWarnings = (org: PlanPhaseOrg, phaseNumber: number): string[] => {
+    if (!analysisData) return [];
+    const warnings: string[] = [];
+    for (const source of sources) {
+      if (source.id !== org.source_id) continue;
+      const data = source.analysis_job_id ? analysisData[source.analysis_job_id] : null;
+      if (!data?.organizations) continue;
+      const orgInfo = data.organizations[org.org_name];
+      if (!orgInfo?.dependencies) continue;
+
+      for (const [depOrgName, depResources] of Object.entries(orgInfo.dependencies)) {
+        const depPhase = phases.find(p => p.orgs.some(o => o.org_name === depOrgName));
+        if (depPhase && depPhase.phase_number > phaseNumber) {
+          const resourceNames = depResources.slice(0, 2).map(d => `${d.resource_type}:${d.resource_name}`);
+          const more = depResources.length > 2 ? ` +${depResources.length - 2} more` : '';
+          warnings.push(
+            `Uses ${resourceNames.join(', ')}${more} from "${depOrgName}" (Phase ${depPhase.phase_number})`
+          );
+        }
+      }
+    }
+    return warnings;
+  };
+
   const moveOrg = (fromPhaseId: string, orgId: string, direction: 'up' | 'down') => {
     const fromIdx = phases.findIndex(p => p.id === fromPhaseId);
     const toIdx = direction === 'up' ? fromIdx - 1 : fromIdx + 1;
@@ -92,6 +125,8 @@ export function PhaseEditor({ phases, sources, sourceNames, analysisData, onChan
       phase_number: maxNum + 1,
       name: `Phase ${maxNum + 1}`,
       status: 'pending',
+      update_mode: false,
+      resource_types: [],
       orgs: [],
     };
     onChange([...phases, newPhase]);
@@ -106,15 +141,10 @@ export function PhaseEditor({ phases, sources, sourceNames, analysisData, onChan
     onChange(updated);
   };
 
-  const renamePhase = (phaseId: string, name: string) => {
-    const updated = phases.map(p => p.id === phaseId ? { ...p, name } : p);
-    onChange(updated);
-    setEditingName(null);
-  };
-
   const statusColor = (status: string) => {
     switch (status) {
       case 'completed': return 'green';
+      case 'completed_with_errors': return 'orange';
       case 'running': return 'orange';
       case 'failed': return 'red';
       default: return 'grey';
@@ -174,6 +204,7 @@ export function PhaseEditor({ phases, sources, sourceNames, analysisData, onChan
               <Flex direction={{ default: 'column' }} spaceItems={{ default: 'spaceItemsXs' }}>
                 {phase.orgs.map(org => {
                   const warning = getOrgDependencyWarning(org, phase.phase_number);
+                  const sharedWarnings = getSharedResourceWarnings(org, phase.phase_number);
                   const srcName = sourceNames[org.source_id] || 'Unknown';
                   return (
                     <FlexItem key={org.id}>
@@ -212,6 +243,11 @@ export function PhaseEditor({ phases, sources, sourceNames, analysisData, onChan
                               {warning}
                             </Label>
                           )}
+                          {sharedWarnings.map((sw, i) => (
+                            <Label key={i} color="orange" isCompact icon={<ExclamationTriangleIcon />} style={{ marginLeft: 4 }}>
+                              {sw}
+                            </Label>
+                          ))}
                         </SplitItem>
                         <SplitItem>
                           <Button variant="plain" size="sm" onClick={() => removeOrg(phase.id, org.id)} aria-label="Remove">

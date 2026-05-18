@@ -11,13 +11,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import sessionmaker
 
-from aap_migration.api.dependencies import AppState, set_app_state
+from aap_migration.api.dependencies import AppState, get_db_url, set_app_state
 from aap_migration.api.models import (  # noqa: F401 — registers tables
     Connection,
     JobRecord,
     MigrationPlan,
     MigrationPlanPhase,
     MigrationPlanPhaseOrg,
+    MigrationPlanPhaseResourceType,
     MigrationPlanSource,
 )
 from aap_migration.api.services.job_service import JobService
@@ -49,17 +50,31 @@ def _migrate_add_seq_id(engine: object) -> None:
         )
 
 
+def _migrate_phase_resource_types(engine: object) -> None:
+    """Add update_mode column and phase_resource_types table if missing."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if insp.has_table("api_migration_plan_phases"):
+        columns = [c["name"] for c in insp.get_columns("api_migration_plan_phases")]
+        if "update_mode" not in columns:
+            with engine.begin() as conn:  # type: ignore[attr-defined]
+                conn.execute(
+                    text(
+                        "ALTER TABLE api_migration_plan_phases "
+                        "ADD COLUMN update_mode BOOLEAN NOT NULL DEFAULT FALSE"
+                    )
+                )
+
+
 def create_app(db_url: str | None = None) -> FastAPI:
-    effective_url: str = (
-        db_url
-        or os.environ.get("MIGRATION_STATE_DB_PATH", "sqlite:///aap_bridge.db")
-        or "sqlite:///aap_bridge.db"
-    )
+    effective_url: str = db_url or get_db_url()
 
     if not effective_url.startswith(("sqlite", "postgresql", "mysql")):
         effective_url = f"sqlite:///{effective_url}"
 
     engine = create_database_engine(effective_url)
+    _migrate_phase_resource_types(engine)
     Base.metadata.create_all(engine)
     _migrate_add_seq_id(engine)
 
@@ -73,6 +88,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
         set_app_state(state)
 
         _seed_connections_from_env(session_factory)
+        _recover_stale_jobs(session_factory)
 
         yield
 
@@ -115,6 +131,29 @@ def create_app(db_url: str | None = None) -> FastAPI:
     app.include_router(websocket.router)
 
     return app
+
+
+def _recover_stale_jobs(session_factory: sessionmaker) -> None:
+    """Mark DB jobs stuck in 'running' or 'waiting_for_input' on startup."""
+    session = session_factory()
+    try:
+        from sqlalchemy import update
+
+        running_stmt = (
+            update(JobRecord)
+            .where(JobRecord.status == "running")
+            .values(status="failed", error="Engine restarted — job did not complete")
+        )
+        session.execute(running_stmt)
+
+        # waiting_for_input jobs survive restarts — they are intentionally
+        # paused and the resume endpoint will re-execute the phase.
+
+        session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
 
 
 def _seed_connections_from_env(session_factory: sessionmaker) -> None:

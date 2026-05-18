@@ -107,7 +107,8 @@ class MigrationPlanPhase(Base):
     )
     phase_number: Mapped[int] = mapped_column(Integer, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    update_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     job_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("api_jobs.id", ondelete="SET NULL"), nullable=True
     )
@@ -127,3 +128,15 @@ class MigrationPlanPhaseOrg(Base):
     )
     org_id: Mapped[int] = mapped_column(Integer, nullable=False)
     org_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class MigrationPlanPhaseResourceType(Base):
+    """A resource type included in a phase. Empty = all types."""
+
+    __tablename__ = "api_migration_plan_phase_resource_types"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    phase_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("api_migration_plan_phases.id", ondelete="CASCADE"), nullable=False
+    )
+    resource_type: Mapped[str] = mapped_column(String(50), nullable=False)

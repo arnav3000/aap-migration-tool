@@ -28,6 +28,7 @@ import TimesIcon from '@patternfly/react-icons/dist/esm/icons/times-icon';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { PhaseEditor } from '../components/PhaseEditor';
+import type { AnalysisDataMap } from '../components/PhaseEditor';
 import type { Connection } from '../types/connection';
 import type { MigrationPlan, PlanPhase, PlanSource } from '../types/resources';
 
@@ -53,6 +54,7 @@ export function PlanDetail() {
   const [success, setSuccess] = useState('');
   const [activeTab, setActiveTab] = useState(0);
   const [dirty, setDirty] = useState(false);
+  const [analysisData, setAnalysisData] = useState<AnalysisDataMap>({});
 
   // Source addition form
   const [addSourceConn, setAddSourceConn] = useState('');
@@ -84,7 +86,25 @@ export function PlanDetail() {
     } catch { /* ignore */ }
   }, []);
 
+  const loadAnalysisData = useCallback(async () => {
+    if (!plan) return;
+    const data: AnalysisDataMap = {};
+    for (const src of plan.sources) {
+      if (!src.analysis_job_id) continue;
+      if (data[src.analysis_job_id]) continue;
+      try {
+        const result = await api.getAnalysisResult(src.analysis_job_id) as Record<string, unknown>;
+        const inner = (result.result ?? result) as Record<string, unknown>;
+        if (inner.organizations) {
+          data[src.analysis_job_id] = inner as AnalysisDataMap[string];
+        }
+      } catch { /* ignore */ }
+    }
+    setAnalysisData(data);
+  }, [plan]);
+
   useEffect(() => { loadPlan(); loadConnections(); loadAnalysisJobs(); }, [loadPlan, loadConnections, loadAnalysisJobs]);
+  useEffect(() => { loadAnalysisData(); }, [loadAnalysisData]);
 
   const sourceNames: Record<string, string> = {};
   if (plan) {
@@ -396,6 +416,7 @@ export function PlanDetail() {
                   phases={plan.phases}
                   sources={plan.sources}
                   sourceNames={sourceNames}
+                  analysisData={analysisData}
                   onChange={handlePhaseChange}
                 />
               </>
@@ -429,7 +450,7 @@ export function PlanDetail() {
                           </SplitItem>
                           <SplitItem>
                             <Label
-                              color={phase.status === 'completed' ? 'green' : phase.status === 'running' ? 'orange' : phase.status === 'failed' ? 'red' : 'grey'}
+                              color={phase.status === 'completed' ? 'green' : phase.status === 'completed_with_errors' ? 'orange' : phase.status === 'running' ? 'orange' : phase.status === 'failed' ? 'red' : 'grey'}
                               isCompact
                             >
                               {phase.status}

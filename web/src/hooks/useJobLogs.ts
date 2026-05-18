@@ -38,6 +38,7 @@ export interface PhaseCompleteEvent extends MigrationEvent {
   phase_num: number;
   description: string;
   created: number;
+  updated: number;
   skipped: number;
   failed: number;
   exported: number;
@@ -57,15 +58,26 @@ export interface ResourceResultEvent extends MigrationEvent {
   phase_num: number;
   name: string;
   resource_type: string;
-  result: 'created' | 'skipped' | 'exists' | 'failed';
+  result: 'created' | 'updated' | 'skipped' | 'exists' | 'failed';
   detail: string;
 }
 
 export interface MigrationCompleteEvent extends MigrationEvent {
   _event: 'migration_complete';
   total_created: number;
+  total_updated: number;
   total_skipped: number;
   total_failed: number;
+}
+
+export interface CredentialPauseEvent extends MigrationEvent {
+  _event: 'credential_pause';
+  credentials: Array<{
+    name: string;
+    credential_type: string;
+    organization: string;
+    used_by: Array<{ resource_type: string; resource_name: string }>;
+  }>;
 }
 
 function isEventMessage(line: string): boolean {
@@ -123,11 +135,24 @@ export function useJobLogs(jobId: string) {
       try {
         const job = (await api.getJob(jobId)) as Job;
         if (job.output && job.output.length > 0) {
-          setTextLines(job.output);
+          const text: string[] = [];
+          const evts: MigrationEvent[] = [];
+          for (const line of job.output) {
+            if (isEventMessage(line)) {
+              const evt = parseEventMessage(line);
+              if (evt) evts.push(evt);
+            } else {
+              text.push(line);
+            }
+          }
+          setTextLines(text);
+          if (evts.length > 0) setEvents(evts);
         }
-        const meta = job.job_metadata;
-        if (meta && Array.isArray(meta.events)) {
-          setEvents(meta.events as MigrationEvent[]);
+        if (events.length === 0) {
+          const meta = job.job_metadata;
+          if (meta && Array.isArray(meta.events)) {
+            setEvents(meta.events as MigrationEvent[]);
+          }
         }
         setStatus(job.status || 'empty');
       } catch {

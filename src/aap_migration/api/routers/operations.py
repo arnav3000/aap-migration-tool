@@ -27,19 +27,44 @@ async def run_cleanup(conn_id: str, db: Session = Depends(get_db)) -> JobStartRe
     async def _do_cleanup(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
         import asyncio
 
+        from sqlalchemy import text
+
         log(f"Starting cleanup for connection {conn.name} ({conn.url})")
         client = ConnectionService.build_target_client(conn)
         total_deleted = 0
         total_errors = 0
+        cleared_types: list[str] = []
+
+        DELETE_CONCURRENCY = 10
+
+        async def _delete_one(rtype: str, rid: int, sem: asyncio.Semaphore) -> bool:
+            async with sem:
+                await client.delete_resource(rtype, rid)
+                return True
 
         async with client:
-            from aap_migration.resources import get_exportable_types
+            from aap_migration.resources import RESOURCE_REGISTRY, get_cleanup_order
 
-            resource_types = get_exportable_types()
-            for rtype in reversed(resource_types):
+            SKIP_CLEANUP = {
+                "settings",
+                "system_job_templates",
+                "instances",
+                "instance_groups",
+                "host_inventory_memberships",
+            }
+
+            resource_types = get_cleanup_order()
+            for rtype in resource_types:
+                info = RESOURCE_REGISTRY.get(rtype)
+                if not info or not info.has_importer:
+                    continue
+                if rtype in SKIP_CLEANUP:
+                    log(f"Cleaning up {rtype}... skipped (not deletable)")
+                    continue
+
                 log(f"Cleaning up {rtype}...")
                 try:
-                    resources = await asyncio.wait_for(client.list_resources(rtype), timeout=60.0)
+                    resources = await client.list_resources(rtype)
                     if not resources:
                         log(f"  No {rtype} found, skipping")
                         continue
@@ -48,36 +73,64 @@ async def run_cleanup(conn_id: str, db: Session = Depends(get_db)) -> JobStartRe
                     log(f"  Found {len(ids)} {rtype} to delete")
                     deleted = 0
                     errors = 0
+                    sem = asyncio.Semaphore(DELETE_CONCURRENCY)
 
-                    batch_size = 10
-                    for i in range(0, len(ids), batch_size):
-                        batch = ids[i : i + batch_size]
+                    batch: list[tuple[int, asyncio.Task[bool]]] = []
+                    for rid in ids:
+                        task = asyncio.create_task(_delete_one(rtype, rid, sem))
+                        batch.append((rid, task))
 
-                        async def _delete(rt: str, rid: int) -> bool:
-                            try:
-                                await asyncio.wait_for(
-                                    client.delete_resource(rt, rid),
-                                    timeout=30.0,
-                                )
-                                return True
-                            except Exception:
-                                return False
+                    for rid, task in batch:
+                        try:
+                            await asyncio.wait_for(task, timeout=60.0)
+                            deleted += 1
+                        except TimeoutError:
+                            errors += 1
+                            task.cancel()
+                            log(f"  Timeout deleting {rtype}/{rid}")
+                        except Exception as exc:
+                            errors += 1
+                            detail = str(exc)[:120]
+                            log(f"  Failed to delete {rtype}/{rid}: {detail}")
 
-                        results = await asyncio.gather(*[_delete(rtype, rid) for rid in batch])
-                        deleted += sum(1 for r in results if r)
-                        errors += sum(1 for r in results if not r)
-                        if i + batch_size < len(ids):
+                        if deleted > 0 and deleted % 50 == 0:
                             log(f"  {rtype}: {deleted}/{len(ids)} deleted...")
 
                     log(f"  Deleted {deleted} {rtype}" + (f" ({errors} errors)" if errors else ""))
                     total_deleted += deleted
                     total_errors += errors
-                except TimeoutError:
-                    log(f"  Timeout listing {rtype}, skipping")
-                    total_errors += 1
+                    if deleted > 0:
+                        cleared_types.append(rtype)
                 except Exception as exc:
                     log(f"  Error cleaning {rtype}: {exc}")
                     total_errors += 1
+
+        if cleared_types:
+            log("Clearing migration state for deleted resource types...")
+            try:
+                from aap_migration.api.dependencies import get_app_state
+
+                app_state = get_app_state()
+                session = app_state.db_session_factory()
+                try:
+                    for rtype in cleared_types:
+                        session.execute(
+                            text("DELETE FROM id_mappings WHERE resource_type = :rt"),
+                            {"rt": rtype},
+                        )
+                        session.execute(
+                            text("DELETE FROM migration_progress WHERE resource_type = :rt"),
+                            {"rt": rtype},
+                        )
+                    session.commit()
+                    log(f"  Cleared state for: {', '.join(cleared_types)}")
+                except Exception as exc:
+                    session.rollback()
+                    log(f"  Warning: failed to clear migration state: {exc}")
+                finally:
+                    session.close()
+            except Exception as exc:
+                log(f"  Warning: could not access migration state DB: {exc}")
 
         log(f"Cleanup complete: {total_deleted} deleted, {total_errors} errors")
         return {"deleted": total_deleted, "errors": total_errors}

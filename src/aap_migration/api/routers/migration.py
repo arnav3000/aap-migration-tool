@@ -221,10 +221,16 @@ async def migration_run(
 
                     for item in items or []:
                         item_id = item.get("id", 0)
-                        item_name = item.get("name", item.get("username", str(item_id)))
 
-                        if name_prefix and rtype != "users":
-                            item_name = f"{name_prefix}{item_name}"
+                        if name_prefix and rtype not in (
+                            "users",
+                            "settings",
+                            "host_inventory_memberships",
+                        ):
+                            if "name" in item:
+                                item["name"] = f"{name_prefix}{item['name']}"
+
+                        item_name = item.get("name", item.get("username", str(item_id)))
 
                         if item_id in excluded_ids or str(item_id) in excluded_ids:
                             skipped += 1

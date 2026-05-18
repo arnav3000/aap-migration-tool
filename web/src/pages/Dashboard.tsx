@@ -18,6 +18,7 @@ import {
   DescriptionListTerm,
   DescriptionListDescription,
   Alert,
+  Divider,
 } from '@patternfly/react-core';
 import { Dropdown, DropdownItem, KebabToggle } from '@patternfly/react-core/deprecated';
 import { api } from '../api/client';
@@ -31,6 +32,7 @@ export function Dashboard() {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [clearMsg, setClearMsg] = useState('');
 
   const loadConnections = useCallback(async () => {
     try {
@@ -204,6 +206,35 @@ export function Dashboard() {
             {destinations.map(conn => renderCard(conn))}
           </Gallery>
         </>
+      )}
+
+      <Divider style={{ marginTop: 32, marginBottom: 24 }} />
+
+      <Title headingLevel="h2" size="xl" style={{ marginBottom: 8 }}>Migration State</Title>
+      <TextContent style={{ marginBottom: 16 }}>
+        <Text>Clear all stored ID mappings and progress records. This forces the next migration run to re-create all resources instead of skipping previously migrated ones.</Text>
+      </TextContent>
+      <Button
+        variant="warning"
+        onClick={async () => {
+          setClearMsg('');
+          try {
+            const result = await api.clearMigrationState();
+            setClearMsg(`Cleared ${result.cleared_progress} progress records and ${result.deleted_mappings} ID mappings`);
+          } catch (err) {
+            setClearMsg(`Error: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }}
+      >
+        Clear Migration State
+      </Button>
+      {clearMsg && (
+        <Alert
+          variant={clearMsg.startsWith('Error') ? 'danger' : 'success'}
+          isInline
+          title={clearMsg}
+          style={{ marginTop: 12 }}
+        />
       )}
 
       <ConnectionForm

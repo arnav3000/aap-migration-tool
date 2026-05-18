@@ -36,7 +36,7 @@ import './MigrationProgressView.css';
 interface ResourceItem {
   name: string;
   resourceType: string;
-  result: 'created' | 'skipped' | 'exists' | 'failed';
+  result: 'created' | 'updated' | 'skipped' | 'exists' | 'failed';
   detail: string;
 }
 
@@ -46,6 +46,7 @@ interface PhaseState {
   status: 'pending' | 'running' | 'complete' | 'failed';
   exported: number;
   created: number;
+  updated: number;
   skipped: number;
   failed: number;
   rate: string;
@@ -59,6 +60,7 @@ interface MigrationState {
   totalPhases: number;
   phases: PhaseState[];
   totalCreated: number;
+  totalUpdated: number;
   totalSkipped: number;
   totalFailed: number;
   status: 'running' | 'complete' | 'failed';
@@ -69,6 +71,7 @@ function buildMigrationState(events: MigrationEvent[]): MigrationState {
     totalPhases: 0,
     phases: [],
     totalCreated: 0,
+    totalUpdated: 0,
     totalSkipped: 0,
     totalFailed: 0,
     status: 'running',
@@ -84,12 +87,16 @@ function buildMigrationState(events: MigrationEvent[]): MigrationState {
 
       case 'phase_start': {
         const e = evt as PhaseStartEvent;
+        if (e.total_phases && e.total_phases > state.totalPhases) {
+          state.totalPhases = e.total_phases;
+        }
         phaseMap.set(e.phase_num, {
           num: e.phase_num,
           description: e.description,
           status: 'running',
           exported: 0,
           created: 0,
+          updated: 0,
           skipped: 0,
           failed: 0,
           rate: '--/s',
@@ -124,6 +131,9 @@ function buildMigrationState(events: MigrationEvent[]): MigrationState {
             result: e.result,
             detail: e.detail,
           });
+          if (phase.resources.length > 200) {
+            phase.resources = phase.resources.slice(-200);
+          }
         }
         break;
       }
@@ -134,6 +144,7 @@ function buildMigrationState(events: MigrationEvent[]): MigrationState {
         if (phase) {
           phase.status = e.failed > 0 ? 'failed' : 'complete';
           phase.created = e.created;
+          phase.updated = e.updated || 0;
           phase.skipped = e.skipped;
           phase.failed = e.failed;
           phase.exported = e.exported;
@@ -154,6 +165,7 @@ function buildMigrationState(events: MigrationEvent[]): MigrationState {
 
       case 'migration_complete': {
         state.totalCreated = evt.total_created as number;
+        state.totalUpdated = (evt.total_updated as number) || 0;
         state.totalSkipped = evt.total_skipped as number;
         state.totalFailed = evt.total_failed as number;
         state.status = state.totalFailed > 0 ? 'failed' : 'complete';
@@ -165,13 +177,15 @@ function buildMigrationState(events: MigrationEvent[]): MigrationState {
   state.phases = Array.from(phaseMap.values()).sort((a, b) => a.num - b.num);
 
   if (state.status === 'running') {
-    const computed = { created: 0, skipped: 0, failed: 0 };
+    const computed = { created: 0, updated: 0, skipped: 0, failed: 0 };
     for (const p of state.phases) {
       computed.created += p.created;
+      computed.updated += p.updated;
       computed.skipped += p.skipped;
       computed.failed += p.failed;
     }
     state.totalCreated = computed.created;
+    state.totalUpdated = computed.updated;
     state.totalSkipped = computed.skipped;
     state.totalFailed = computed.failed;
   }
@@ -229,6 +243,11 @@ function MigrationStatusBar({ migration }: { migration: MigrationState }) {
         <Label color="green" isCompact>
           {migration.totalCreated} created
         </Label>
+        {migration.totalUpdated > 0 && (
+          <Label color="blue" isCompact>
+            {migration.totalUpdated} updated
+          </Label>
+        )}
         {migration.totalSkipped > 0 && (
           <Label color="orange" isCompact>
             {migration.totalSkipped} skipped
@@ -249,10 +268,11 @@ function MigrationStatusBar({ migration }: { migration: MigrationState }) {
 /* ------------------------------------------------------------------ */
 
 function MigrationDistributionBar({ migration }: { migration: MigrationState }) {
-  const total = migration.totalCreated + migration.totalSkipped + migration.totalFailed;
+  const total = migration.totalCreated + migration.totalUpdated + migration.totalSkipped + migration.totalFailed;
   if (total === 0) return null;
 
   const pctCreated = (migration.totalCreated / total) * 100;
+  const pctUpdated = (migration.totalUpdated / total) * 100;
   const pctSkipped = (migration.totalSkipped / total) * 100;
   const pctFailed = (migration.totalFailed / total) * 100;
 
@@ -263,6 +283,14 @@ function MigrationDistributionBar({ migration }: { migration: MigrationState }) 
           <div
             className="mpv-dist-bar__segment mpv-dist-bar__segment--created"
             style={{ width: `${pctCreated}%` }}
+          />
+        </Tooltip>
+      )}
+      {pctUpdated > 0 && (
+        <Tooltip content={`${migration.totalUpdated} updated`}>
+          <div
+            className="mpv-dist-bar__segment"
+            style={{ width: `${pctUpdated}%`, backgroundColor: 'var(--pf-v5-global--info-color--100, #06c)' }}
           />
         </Tooltip>
       )}
@@ -343,6 +371,7 @@ function MigrationOutputToolbar({
 function ResourceRow({ item }: { item: ResourceItem }) {
   const labelMap: Record<ResourceItem['result'], string> = {
     created: 'Created',
+    updated: 'Updated',
     skipped: 'Skipped',
     exists: 'Exists',
     failed: 'Failed',
@@ -366,9 +395,11 @@ function ResourceRow({ item }: { item: ResourceItem }) {
           color={
             item.result === 'created'
               ? 'green'
-              : item.result === 'failed'
-                ? 'red'
-                : 'orange'
+              : item.result === 'updated'
+                ? 'blue'
+                : item.result === 'failed'
+                  ? 'red'
+                  : 'orange'
           }
           isCompact
         >
@@ -402,7 +433,7 @@ function MigrationPhaseGroup({
   onErrorClick,
 }: PhaseGroupProps) {
   const hasContent = phase.resources.length > 0 || !!phase.error || phase.status === 'running';
-  const phaseTotal = phase.created + phase.skipped + phase.failed;
+  const phaseTotal = phase.created + phase.updated + phase.skipped + phase.failed;
   const phasePct =
     phase.exported > 0
       ? (phaseTotal / phase.exported) * 100
@@ -438,6 +469,7 @@ function MigrationPhaseGroup({
           {phase.status !== 'pending' && phaseTotal > 0 && (
             <>
               <Label color="green" isCompact>{phase.created}</Label>
+              {phase.updated > 0 && <Label color="blue" isCompact>{phase.updated}</Label>}
               {phase.skipped > 0 && <Label color="orange" isCompact>{phase.skipped}</Label>}
               {phase.failed > 0 && <Label color="red" isCompact>{phase.failed}</Label>}
             </>
@@ -535,6 +567,8 @@ export function MigrationProgressView({ events, jobStatus }: Props) {
   const [modalData, setModalData] = useState<DetailModalData | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  const autoScrollRef = useRef(true);
+
   useEffect(() => {
     const next: Record<number, boolean> = { ...expanded };
     for (const p of migration.phases) {
@@ -544,6 +578,23 @@ export function MigrationProgressView({ events, jobStatus }: Props) {
     }
     setExpanded(next);
   }, [migration.phases.length]);
+
+  useEffect(() => {
+    if (autoScrollRef.current && scrollRef.current && migration.status === 'running') {
+      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    }
+  }, [migration.phases.length, events.length, migration.status]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      autoScrollRef.current = atBottom;
+    };
+    el.addEventListener('scroll', handleScroll);
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, []);
 
   const toggleExpand = useCallback((num: number) => {
     setExpanded((prev) => ({ ...prev, [num]: !prev[num] }));
@@ -624,6 +675,7 @@ export function MigrationProgressView({ events, jobStatus }: Props) {
           <div className="mpv-summary">
             Migration {migration.status === 'complete' ? 'completed' : 'finished with errors'}:{' '}
             <strong>{migration.totalCreated}</strong> created,{' '}
+            {migration.totalUpdated > 0 && (<><strong>{migration.totalUpdated}</strong> updated,{' '}</>)}
             <strong>{migration.totalSkipped}</strong> skipped,{' '}
             <strong>{migration.totalFailed}</strong> failed
           </div>
