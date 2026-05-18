@@ -24,6 +24,8 @@ __pycache__/
 
 # Testing
 tests/
+!tests/
+!tests/**
 htmlcov/
 .coverage
 .pytest_cache/
@@ -58,6 +60,9 @@ build/
 
 # Scripts (development only)
 scripts/
+!scripts/
+scripts/*
+!scripts/check_repo_coverage.py
 
 # AI config
 .claude/

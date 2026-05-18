@@ -68,6 +68,10 @@ def _migrate_phase_resource_types(engine: object) -> None:
 
 
 def create_app(db_url: str | None = None) -> FastAPI:
+    from aap_migration.api.crypto import ensure_encryption_key_configured
+
+    ensure_encryption_key_configured()
+
     effective_url: str = db_url or get_db_url()
 
     if not effective_url.startswith(("sqlite", "postgresql", "mysql")):
@@ -158,6 +162,8 @@ def _recover_stale_jobs(session_factory: sessionmaker) -> None:
 
 def _seed_connections_from_env(session_factory: sessionmaker) -> None:
     """Auto-create connections from SOURCE__*/TARGET__* env vars if DB is empty."""
+    from aap_migration.api.crypto import encrypt_token
+
     session = session_factory()
     try:
         if session.query(Connection).count() > 0:
@@ -170,7 +176,7 @@ def _seed_connections_from_env(session_factory: sessionmaker) -> None:
                 conn = Connection(
                     name=f"{role.capitalize()} AAP",
                     url=url,
-                    token=token,
+                    token=encrypt_token(token),
                     role=role,
                     verify_ssl=os.environ.get(f"{prefix}VERIFY_SSL", "true").lower() == "true",
                     timeout=int(os.environ.get(f"{prefix}TIMEOUT", "30")),

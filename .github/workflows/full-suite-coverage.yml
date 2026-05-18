@@ -1,0 +1,35 @@
+name: Full Suite Coverage Gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-suite-coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-suite-coverage:
+    name: Run Full Suite And Enforce 80% Repo Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Verify Podman
+        run: |
+          podman --version
+          podman info
+
+      - name: Run full containerized suite and coverage gate
+        run: make c-ci-full

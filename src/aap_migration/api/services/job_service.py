@@ -7,7 +7,7 @@ import json
 import traceback
 import uuid
 from collections.abc import Callable, Coroutine
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -43,7 +43,7 @@ class Job:
         self.log_lines: list[str] = []
         self.result: dict[str, Any] | None = None
         self.error: str | None = None
-        self.created_at = datetime.utcnow()
+        self.created_at = datetime.now(UTC)
         self.started_at: datetime | None = None
         self.completed_at: datetime | None = None
         self._task: asyncio.Task | None = None
@@ -161,7 +161,7 @@ class JobService:
         job_id = str(uuid.uuid4())
         job = Job(job_id, name, job_type)
         job.status = "running"
-        job.started_at = datetime.utcnow()
+        job.started_at = datetime.now(UTC)
         self._jobs[job_id] = job
         self._persist_job_initial(job)
 
@@ -179,7 +179,7 @@ class JobService:
                 self.add_log(job_id, f"ERROR: {exc}")
                 self.add_log(job_id, traceback.format_exc())
             finally:
-                job.completed_at = datetime.utcnow()
+                job.completed_at = datetime.now(UTC)
                 self._persist_job(job)
                 for q in job._subscribers:
                     await q.put(None)

@@ -17,8 +17,8 @@ services:
       POSTGRESQL_DATABASE: aap_migration
     volumes:
     - postgres-data:/var/lib/pgsql/data
-    ports:
-    - 5432:5432
+    expose:
+    - "5432"
     restart: unless-stopped
     healthcheck:
       test: [CMD-SHELL, pg_isready -U aap_user -d aap_migration]
@@ -39,15 +39,15 @@ services:
       db:
         condition: service_healthy
     environment:
-      MIGRATION_STATE_DB_PATH: postgresql://aap_user:${POSTGRES_PASSWORD:-changeme}@db:5432/aap_migration
-      AAP_TOKEN_ENCRYPTION_KEY: ${AAP_TOKEN_ENCRYPTION_KEY:-}
+      MIGRATION_STATE_DB_PATH: ${MIGRATION_STATE_DB_PATH:?set MIGRATION_STATE_DB_PATH in container/.env}
+      AAP_TOKEN_ENCRYPTION_KEY: ${AAP_TOKEN_ENCRYPTION_KEY:?set AAP_TOKEN_ENCRYPTION_KEY in container/.env}
     volumes:
     - ./volumes/logs:/app/logs:Z
     - ./volumes/exports:/app/exports:Z
     - ./volumes/xformed:/app/xformed:Z
     - ./volumes/database:/app/database:Z
-    ports:
-    - 8000:8000
+    expose:
+    - "8000"
     restart: unless-stopped
     healthcheck:
       test: [CMD, python3.12, -c, import urllib.request; urllib.request.urlopen('http://localhost:8000/api/jobs')]
@@ -68,11 +68,17 @@ services:
     depends_on:
       engine:
         condition: service_healthy
+    environment:
+      BASIC_AUTH_ENABLED: ${BASIC_AUTH_ENABLED:-false}
+      BASIC_AUTH_REALM: ${BASIC_AUTH_REALM:-AAP Bridge}
+      BASIC_AUTH_USER_FILE: ${BASIC_AUTH_USER_FILE:-/etc/nginx/auth/.htpasswd}
+    volumes:
+    - ./volumes/auth:/etc/nginx/auth:Z,ro
     ports:
     - 8080:8080
     restart: unless-stopped
     healthcheck:
-      test: [CMD, curl, -f, http://localhost:8080/]
+      test: [CMD, curl, -f, http://localhost:8080/healthz]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -95,7 +101,7 @@ services:
     env_file:
     - .env
     environment:
-      MIGRATION_STATE_DB_PATH: postgresql://aap_user:${POSTGRES_PASSWORD:-changeme}@db:5432/aap_migration
+      MIGRATION_STATE_DB_PATH: ${MIGRATION_STATE_DB_PATH:?set MIGRATION_STATE_DB_PATH in container/.env}
     volumes:
     - ./volumes/database:/app/aap-bridge/database:Z
     - ./volumes/logs:/app/aap-bridge/logs:Z
@@ -117,12 +123,12 @@ volumes:
 # Usage:
 # ======
 # 1. Copy .env.container to .env and customize your credentials
-# 2. Create volumes: mkdir -p volumes/{database,logs,exports,xformed,config}
+# 2. Create volumes: mkdir -p volumes/{database,logs,exports,xformed,config,auth}
 #
 # Full stack (UI + API + DB + CLI):
 #   podman-compose up -d
 #   # UI at http://localhost:8080
-#   # API at http://localhost:8000
+#   # API is available only through the UI reverse proxy
 #
 # CLI only (exec into bridge container):
 #   podman-compose up -d db bridge
