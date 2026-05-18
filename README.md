@@ -1110,24 +1110,50 @@ docs/
 ### Running Tests
 
 ```bash
+# Preferred: run the full regression suite in containers
+make c-test-all
+
+# Run only the backend/API/CLI pytest suite in the test container
+make c-test-backend
+
+# Run frontend unit tests plus a production build in the test container
+make c-test-frontend
+
+# Run container/runtime smoke checks (compose, nginx, startup script)
+make c-test-smoke
+
+# Build or refresh the dedicated test image explicitly
+make build-test
+```
+
+The default workflow is container-first and only requires a container runtime on
+the host. The dedicated `container/Containerfile.test` image installs Python,
+Node, nginx, and the project test dependencies so the main suite does not rely
+on a host-local Python or Node installation.
+
+Integration checks that require live AAP or Vault systems should be kept behind
+pytest markers such as `integration`, `requires_aap`, and `requires_vault` so
+the default regression suite remains self-contained.
+
+If you still want to run tests directly on the host after setting up a local
+development environment, these commands remain available:
+
+```bash
 
 # Run all tests
 pytest
 
-# Run unit tests only (fast)
-pytest tests/unit/
+# Run unit-style tests only
+pytest tests/ -m "not integration and not performance and not requires_aap and not requires_vault"
 
 # Run with coverage
 pytest --cov=src/aap_migration --cov-report=html
 
 # Run integration tests (requires AAP instances)
-pytest tests/integration/ -m integration
+pytest tests/ -m "integration or requires_aap or requires_vault"
 
 # Run performance benchmarks
-pytest tests/performance/
-
-# Disable progress display for CI
-pytest tests/unit/ --disable-progress
+pytest tests/ -m performance
 
 ```
 

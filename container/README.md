@@ -1,6 +1,6 @@
 # AAP Bridge - Container Deployment Guide
 
-Production-ready containerized deployment for AAP Bridge migration tool.
+Containerized deployment for running AAP Bridge as a temporary migration appliance.
 
 ## Quick Start
 
@@ -58,99 +58,129 @@ git clone https://github.com/arnav3000/aap-bridge-fork.git
 cd aap-bridge-fork/container
 
 # 2. Create volumes directory
-mkdir -p volumes/{database,logs,exports,xformed,config}
+mkdir -p volumes/{database,logs,exports,xformed,config,auth}
 
 # 3. Configure environment
 cp .env.container .env
-vi .env  # Update with your credentials
+vi .env  # Update credentials and set AAP_TOKEN_ENCRYPTION_KEY
 
-# 4. Start with SQLite (default)
-podman-compose up -d aap-bridge
+# 4. Start the full stack (PostgreSQL is the default database)
+podman-compose up -d
 
-# OR: Start with PostgreSQL
-podman-compose --profile postgres up -d
+# Optional: switch to SQLite by replacing MIGRATION_STATE_DB_PATH in .env,
+# then bring the stack up again.
 
 # 5. Run migration
 podman exec -it aap-bridge bash
 aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y
 ```
 
+### Default network exposure
+
+- UI is published on `http://localhost:8080`
+- API is reachable only through the UI reverse proxy at `/api/`
+- WebSocket job logs are reachable only through the UI reverse proxy at `/ws/`
+- PostgreSQL is internal to the compose network and is not published on a host port
+
+## Containerized Test Workflow
+
+The repository now includes a dedicated test image at `container/Containerfile.test`.
+It installs the Python test stack, the frontend test stack, and nginx so the
+default regression workflow can run entirely inside containers.
+
+```bash
+# Build the dedicated test image
+make build-test
+
+# Backend/API/CLI pytest suite
+make c-test-backend
+
+# Frontend tests plus production build
+make c-test-frontend
+
+# Runtime smoke checks for compose/nginx/startup script coverage
+make c-test-smoke
+
+# Full regression suite
+make c-test-all
+```
+
+The default suite is self-contained. Live environment checks should stay behind
+pytest markers such as `integration`, `requires_aap`, and `requires_vault` so
+they remain opt-in.
+
 ## Architecture
 
-### SQLite Deployment (Default)
-
-```
-┌─────────────────────────────┐
-│   aap-bridge container      │
-│                             │
-│  ┌─────────────────────┐    │
-│  │ Python + SQLAlchemy │    │
-│  │        ↓            │    │
-│  │ database/           │←───┼─── Volume Mount
-│  │  migration_state.db │    │
-│  └─────────────────────┘    │
-└─────────────────────────────┘
-         ↓
-    Host: ~/aap-migration/database/
-          migration_state.db
-```
-
-**Characteristics:**
-- ✅ Zero configuration
-- ✅ No additional containers
-- ✅ Suitable for most migrations
-- ✅ File persists on host via volume
-
-### PostgreSQL Deployment (Optional)
+### PostgreSQL Deployment (Default)
 
 ```
 ┌──────────────────┐         ┌──────────────────┐
-│ aap-bridge       │         │ postgres         │
-│ container        │◄────────┤ container        │
-│                  │ Network │                  │
-│ Python + psycopg2│         │ PostgreSQL 15    │
-└──────────────────┘         │                  │
-                             │ Data Volume      │
-                             │   ↓              │
-                             └────────┼─────────┘
+│ ui (nginx)       │ ─────▶  │ engine (FastAPI) │
+│ published :8080  │         │ internal only    │
+└──────────────────┘         └────────┬─────────┘
                                       │
-                                 postgres-data
-                                    volume
+                                      ▼
+                             ┌──────────────────┐
+                             │ db (PostgreSQL)  │
+                             │ internal only    │
+                             └──────────────────┘
 ```
 
 **Characteristics:**
-- ✅ Better performance for large migrations (100k+ resources)
-- ✅ Concurrent access support
-- ✅ Advanced querying capabilities
-- ⚠️  Requires separate PostgreSQL container
+
+- ✅ Default compose path
+- ✅ Better performance for large migrations
+- ✅ API and DB stay private behind the UI
+- ✅ Data persists in the PostgreSQL volume
+
+### SQLite Deployment (Alternate)
+
+```
+┌──────────────────┐         ┌──────────────────┐
+│ ui (nginx)       │ ─────▶  │ engine (FastAPI) │
+│ published :8080  │         │ internal only    │
+└──────────────────┘         └────────┬─────────┘
+                                      │
+                                      ▼
+                             ┌──────────────────┐
+                             │ database/        │
+                             │ migration_state  │
+                             │ .db volume       │
+                             └──────────────────┘
+```
+
+**Characteristics:**
+
+- ✅ Supported fallback
+- ✅ Simpler if you explicitly want a file-backed database
+- ⚠️  Not the default compose path
+- ⚠️  PostgreSQL container may still be present unless you customize your compose invocation
 
 ## Database Options
 
-### Using SQLite (Recommended for most users)
+### Using PostgreSQL (Default)
 
 **Configuration in `.env`:**
+
+```bash
+POSTGRES_PASSWORD=changeme
+MIGRATION_STATE_DB_PATH=postgresql://aap_user:changeme@db:5432/aap_migration
+```
+
+**Important:** If you change `POSTGRES_PASSWORD`, update `MIGRATION_STATE_DB_PATH` to match.
+
+### Using SQLite (Fallback)
+
+Replace the database DSN in `.env`:
+
 ```bash
 MIGRATION_STATE_DB_PATH=sqlite:///./database/migration_state.db
 ```
 
-**No additional setup required!** The database file is automatically created.
+Then restart the stack:
 
-### Using PostgreSQL (For advanced users)
-
-**1. Start PostgreSQL container:**
 ```bash
-podman-compose --profile postgres up -d postgres
-```
-
-**2. Update `.env`:**
-```bash
-MIGRATION_STATE_DB_PATH=postgresql://aap_user:changeme@postgres:5432/aap_migration
-```
-
-**3. Verify connection:**
-```bash
-podman exec -it aap-bridge bash
-python3 -c "from sqlalchemy import create_engine; engine = create_engine('postgresql://aap_user:changeme@postgres:5432/aap_migration'); print(engine.connect())"
+podman-compose up -d
 ```
 
 ## Container Networking
@@ -180,6 +210,30 @@ SOURCE__URL=https://localhost:8443/api/v2
 TARGET__URL=https://localhost:10443/api/controller/v2
 ```
 
+## Optional Basic Auth
+
+If the UI will be reachable by anyone beyond a single trusted admin host, enable nginx basic auth so the SPA, `/api/`, and `/ws/` are protected together.
+
+1. Create an htpasswd file:
+
+```bash
+mkdir -p volumes/auth
+htpasswd -c volumes/auth/.htpasswd admin
+```
+
+1. Enable auth in `.env`:
+
+```bash
+BASIC_AUTH_ENABLED=true
+BASIC_AUTH_REALM="AAP Bridge"
+```
+
+1. Restart the UI container:
+
+```bash
+podman-compose up -d ui
+```
+
 ## Persistent Data
 
 All migration data persists on the host via volume mounts:
@@ -203,7 +257,7 @@ All migration data persists on the host via volume mounts:
 
 ## Building Custom Images
 
-### Build from specific branch:
+### Build from specific branch
 
 ```bash
 podman build \
@@ -213,7 +267,7 @@ podman build \
   .
 ```
 
-### Build with custom Python version:
+### Build with custom Python version
 
 ```bash
 podman build \
@@ -236,6 +290,7 @@ podman build \
 **Problem:** Database disappears when container restarts
 
 **Solution:** Verify volume mount with `:Z` flag for SELinux:
+
 ```bash
 -v $(pwd)/database:/app/aap-bridge/database:Z
 ```
@@ -245,18 +300,20 @@ podman build \
 **Problem:** Container can't write to mounted volumes
 
 **Solution:** Fix permissions:
+
 ```bash
-chmod 777 database logs exports xformed
+chmod 777 database logs exports xformed auth
 ```
 
 Or run container as root (not recommended for production):
+
 ```bash
 podman run --user root ...
 ```
 
 ## Advanced Usage
 
-### Running specific migration phases:
+### Running specific migration phases
 
 ```bash
 podman exec -it aap-bridge bash
@@ -274,7 +331,7 @@ aap-bridge import -y
 aap-bridge  # Launch TUI
 ```
 
-### Viewing logs in real-time:
+### Viewing logs in real-time
 
 ```bash
 # From host
@@ -284,7 +341,7 @@ tail -f ~/aap-migration/logs/migration.log
 podman exec aap-bridge tail -f /app/aap-bridge/logs/migration.log
 ```
 
-### Cleanup and start fresh:
+### Cleanup and start fresh
 
 ```bash
 # Stop and remove container
@@ -306,7 +363,10 @@ podman run ...
 1. **Never commit `.env` with real credentials**
 2. **Use read-only mounts** for config: `-v $(pwd)/config:/app/aap-bridge/config:ro`
 3. **Run as non-root user** (default: appuser UID 1001)
-4. **Use secrets management** for production:
+4. **Set a unique `AAP_TOKEN_ENCRYPTION_KEY`** before starting the web stack
+5. **Enable basic auth** when the UI is reachable by other users or shared networks
+6. **Use secrets management** for production:
+
    ```bash
    podman secret create aap-source-token source-token.txt
    podman run --secret aap-source-token ...
@@ -314,5 +374,5 @@ podman run ...
 
 ## Support
 
-- Issues: https://github.com/arnav3000/aap-bridge-fork/issues
-- Documentation: https://github.com/arnav3000/aap-bridge-fork/blob/main/README.md
+- Issues: <https://github.com/arnav3000/aap-bridge-fork/issues>
+- Documentation: <https://github.com/arnav3000/aap-bridge-fork/blob/main/README.md>

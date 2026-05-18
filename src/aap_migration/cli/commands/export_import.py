@@ -361,7 +361,7 @@ def export(
 
     async def run_export() -> None:
         import logging
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         # Suppress console logging for cleaner output (Live progress display will handle it)
         root_logger = logging.getLogger()
@@ -691,7 +691,7 @@ def export(
 
             # Write metadata file
             metadata = {
-                "export_timestamp": datetime.utcnow().isoformat(),
+                "export_timestamp": datetime.now(UTC).isoformat(),
                 "source_url": ctx.config.source.url,
                 "total_resources": total_resources,
                 "records_per_file": records_per_file,
