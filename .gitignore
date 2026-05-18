@@ -288,6 +288,10 @@ sync_inventory_sources.py
 test_*.py
 test_*.sh
 test/
+!tests/
+!tests/**/*.py
+tests/__pycache__/
+tests/**/*.pyc
 
 # Credential toolkit and related files
 credential-toolkit.tar.gz
