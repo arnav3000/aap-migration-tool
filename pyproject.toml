@@ -45,7 +45,7 @@ dependencies = [
     "alembic==1.13.0",
     "packaging>=24.0",
     "python-dateutil==2.9.0.post0",
-    "psutil==6.1.1",
+    "psutil==7.2.2",
     "psycopg2-binary>=2.9.11",
     "cryptography>=46.0.3",
     "fastapi>=0.115.0",
