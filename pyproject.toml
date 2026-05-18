@@ -42,7 +42,7 @@ dependencies = [
     "hvac==2.1.0",
     "aiofiles==25.1.0",
     "sqlalchemy==2.0.49",
-    "alembic==1.13.0",
+    "alembic==1.18.4",
     "packaging>=24.0",
     "python-dateutil==2.9.0.post0",
     "psutil==6.1.1",
