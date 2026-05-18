@@ -290,6 +290,8 @@ test_*.sh
 test/
 !tests/
 !tests/**/*.py
+!web/src/test/
+!web/src/test/**
 tests/__pycache__/
 tests/**/*.pyc
 
