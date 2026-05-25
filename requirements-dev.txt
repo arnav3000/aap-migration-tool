@@ -39,4 +39,4 @@ memory-profiler==0.61.0
 
 # Debugging
 ipdb==0.13.13
-ipython==8.19.0
+ipython==9.13.0
