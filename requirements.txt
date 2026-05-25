@@ -28,7 +28,7 @@ python-dotenv>=1.2.2
 tqdm>=4.66.3
 
 # HashiCorp Vault Client
-hvac==2.1.0
+hvac==2.4.0
 
 # Database
 sqlalchemy==2.0.49
