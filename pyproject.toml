@@ -35,7 +35,7 @@ dependencies = [
     "structlog==25.5.0",
     "tenacity==8.2.3",
     "pydantic==2.13.4",
-    "pydantic-settings==2.1.0",
+    "pydantic-settings==2.14.1",
     "PyYAML==6.0.3",
     "tqdm>=4.66.3",
     "python-dotenv>=1.2.2",
