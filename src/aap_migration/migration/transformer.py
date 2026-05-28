@@ -2211,6 +2211,18 @@ class ScheduleTransformer(DataTransformer):
         # We can add a temporary field to data.
         data["_ujt_resource_type"] = ujt_type
 
+        # FIX: Remove inventory field for inventory source schedules
+        # AAP 2.6 rejects the inventory field for inventory source schedules
+        # The inventory relationship is implicit through the inventory source itself
+        if ujt_type == "inventory_sources":
+            if data.pop("inventory", None) is not None:
+                logger.debug(
+                    "removed_inventory_field_for_inv_source_schedule",
+                    source_id=source_id,
+                    source_name=data.get("name"),
+                    message="Removed inventory field - not allowed for inventory source schedules in AAP 2.6",
+                )
+
 
 class SystemJobTemplateTransformer(DataTransformer):
     """Transformer for system job template resources.
