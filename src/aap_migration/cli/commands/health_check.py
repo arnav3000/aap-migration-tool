@@ -44,7 +44,7 @@ logger = structlog.get_logger(__name__)
     "--checks",
     "-c",
     multiple=True,
-    help="Specific checks to run (default: all). Available: pending_deletion, duplicates, orphaned_references",
+    help="Specific checks to run (default: all). Available: pending_deletion, duplicates, orphaned_references, job_template_validation, project_validation, inventory_source_validation, schedule_validation",
 )
 @click.option(
     "--strict",

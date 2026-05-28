@@ -8,8 +8,12 @@ import structlog
 from aap_migration.client.aap_client import AAPClient
 from aap_migration.health.checks import (
     DuplicateCheck,
+    InventorySourceValidationCheck,
+    JobTemplateValidationCheck,
     OrphanedReferenceCheck,
     PendingDeletionCheck,
+    ProjectValidationCheck,
+    ScheduleValidationCheck,
 )
 from aap_migration.health.models import HealthCheckReport, HealthCheckResult
 
@@ -32,6 +36,10 @@ class HealthChecker:
             "pending_deletion": PendingDeletionCheck,
             "duplicates": DuplicateCheck,
             "orphaned_references": OrphanedReferenceCheck,
+            "job_template_validation": JobTemplateValidationCheck,
+            "project_validation": ProjectValidationCheck,
+            "inventory_source_validation": InventorySourceValidationCheck,
+            "schedule_validation": ScheduleValidationCheck,
         }
 
     async def run_all_checks(self) -> HealthCheckReport:
