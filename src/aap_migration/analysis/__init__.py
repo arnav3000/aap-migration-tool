@@ -6,7 +6,14 @@ from aap_migration.analysis.dependency_analyzer import (
     OrgDependencyReport,
     ResourceDependency,
 )
-from aap_migration.analysis.dependency_graph import topological_sort
+from aap_migration.analysis.dependency_graph import (
+    MigrationPlan,
+    compute_migration_plan,
+    find_cycles,
+    find_strongly_connected_components,
+    group_into_phases,
+    topological_sort,
+)
 from aap_migration.analysis.reports import (
     format_detailed_report,
     format_summary_report,
@@ -15,9 +22,14 @@ from aap_migration.analysis.reports import (
 __all__ = [
     "CrossOrgDependencyAnalyzer",
     "GlobalDependencyReport",
+    "MigrationPlan",
     "OrgDependencyReport",
     "ResourceDependency",
-    "topological_sort",
-    "format_summary_report",
+    "compute_migration_plan",
+    "find_cycles",
+    "find_strongly_connected_components",
     "format_detailed_report",
+    "format_summary_report",
+    "group_into_phases",
+    "topological_sort",
 ]
