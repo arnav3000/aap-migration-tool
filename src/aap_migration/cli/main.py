@@ -17,6 +17,7 @@ from aap_migration.cli.commands import cleanup as cleanup_commands
 from aap_migration.cli.commands import config as config_commands
 from aap_migration.cli.commands import credentials as credentials_commands
 from aap_migration.cli.commands import export_import
+from aap_migration.cli.commands import health_check as health_check_commands
 from aap_migration.cli.commands import migrate as migrate_commands
 from aap_migration.cli.commands import migration_report as migration_report_commands
 from aap_migration.cli.commands import patch_projects as patch_projects_commands
@@ -127,6 +128,7 @@ cli.add_command(state_commands.state)
 # Register standalone commands
 cli.add_command(analyze_dependencies_commands.analyze_dependencies_cmd)
 cli.add_command(cleanup_commands.cleanup)
+cli.add_command(health_check_commands.health_check_cmd)
 cli.add_command(prep_commands.prep)
 cli.add_command(export_import.export)
 cli.add_command(transform_commands.transform)
