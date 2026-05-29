@@ -110,11 +110,12 @@ fi
 # Update TARGET_AAP_TOKEN in .env
 echo -e "${YELLOW}→${NC} Updating TARGET_AAP_TOKEN in $ENV_FILE"
 
-# Use sed to replace TARGET_AAP_TOKEN value
+# Replace TARGET_AAP_TOKEN value using grep/echo to avoid sed injection
 if grep -q "^TARGET_AAP_TOKEN=" "$ENV_FILE"; then
-    # TARGET_AAP_TOKEN exists - replace it
-    sed -i.tmp "s|^TARGET_AAP_TOKEN=.*|TARGET_AAP_TOKEN=${TOKEN}|" "$ENV_FILE"
-    rm -f "${ENV_FILE}.tmp"
+    # TARGET_AAP_TOKEN exists - remove old line and append new value
+    grep -v "^TARGET_AAP_TOKEN=" "$ENV_FILE" > "${ENV_FILE}.tmp"
+    echo "TARGET_AAP_TOKEN=${TOKEN}" >> "${ENV_FILE}.tmp"
+    mv "${ENV_FILE}.tmp" "$ENV_FILE"
     echo -e "${GREEN}✓${NC} Updated existing TARGET_AAP_TOKEN"
 else
     # TARGET_AAP_TOKEN doesn't exist - append it
