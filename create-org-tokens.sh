@@ -107,7 +107,7 @@ CREATED=0
 SKIPPED=0
 FAILED=0
 
-echo "$ORGS_JSON" | jq -c '.[]' | while read -r org; do
+while read -r org; do
     ORG_ID=$(echo "$org" | jq -r '.id')
     ORG_NAME=$(echo "$org" | jq -r '.name')
 
@@ -190,7 +190,7 @@ EOF
 
     ((CREATED++)) || true
     echo ""
-done
+done < <(echo "$ORGS_JSON" | jq -c '.[]')
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${GREEN}✓ Process Complete!${NC}"
