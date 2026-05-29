@@ -14,8 +14,8 @@ logger = structlog.get_logger()
 class PendingDeletionCheck(BaseHealthCheck):
     """Check for resources pending deletion (optimized for large environments)."""
 
-    # ALL resource types that support pending_deletion field
-    # Comprehensive list from AAP API
+    # Resource types that support pending_deletion field
+    # Note: instance_groups, applications, and labels do NOT support pending_deletion
     RESOURCE_TYPES = [
         # Core resources
         "organizations",
@@ -39,10 +39,6 @@ class PendingDeletionCheck(BaseHealthCheck):
         "notification_templates",
         # Execution
         "execution_environments",
-        "instance_groups",
-        # Misc
-        "applications",
-        "labels",
     ]
 
     # Sample size for affected resources (don't fetch all)

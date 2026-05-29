@@ -106,8 +106,8 @@ class BaseHealthCheck(ABC):
             # Handle pagination
             next_url = response.get("next")
             if next_url:
-                # Extract relative path from next URL
-                from urllib.parse import urlparse
+                # Extract relative path and query params from next URL
+                from urllib.parse import urlparse, parse_qs
 
                 parsed = urlparse(next_url)
                 # Handle both AAP 2.4 (/api/v2/) and AAP 2.6 (/api/controller/v2/)
@@ -116,7 +116,8 @@ class BaseHealthCheck(ABC):
                     .replace("/api/v2/", "")
                     .lstrip("/")
                 )
-                params = {}  # Params are in the next URL
+                # Extract query params from next URL
+                params = {k: v[0] if len(v) == 1 else v for k, v in parse_qs(parsed.query).items()}
             else:
                 endpoint = None
 
