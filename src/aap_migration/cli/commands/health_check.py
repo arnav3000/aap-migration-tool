@@ -18,13 +18,13 @@ logger = structlog.get_logger(__name__)
     "--source-url",
     required=True,
     help="Source AAP URL (e.g., https://aap24.example.com)",
-    envvar="AAP_SOURCE_URL",
+    envvar="SOURCE__URL",
 )
 @click.option(
     "--source-token",
     required=True,
     help="Source AAP API token",
-    envvar="AAP_SOURCE_TOKEN",
+    envvar="SOURCE__TOKEN",
 )
 @click.option(
     "--output",
