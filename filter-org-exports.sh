@@ -138,7 +138,6 @@ ORG_FILTERED_TYPES=(
     "workflow_job_templates"
     "credentials"
     "teams"
-    "schedules"
     "notification_templates"
     "labels"
 )
@@ -244,6 +243,58 @@ for resource_dir in "$EXPORTS_DIR"/*; do
     file_count=$(find "$resource_dir" -name "*.json" | wc -l)
     ((COPIED_COUNT+=file_count)) || true
 done
+
+# ---- Special handling for schedules (two-pass filter) ----
+# Schedules don't have an .organization field; they reference a
+# unified_job_template which itself belongs to an organization.
+# Collect all org-specific template IDs from the already-filtered
+# job_templates, workflow_job_templates, projects, and inventories,
+# then keep only schedules whose unified_job_template is in that set.
+
+SCHEDULES_SRC="${EXPORTS_DIR}/schedules"
+if [[ -d "$SCHEDULES_SRC" ]]; then
+    echo -e "${YELLOW}→${NC} Processing schedules (two-pass FK filter)..."
+
+    # Collect unified_job_template IDs from filtered exports
+    UJT_IDS="[]"
+    for ref_type in job_templates workflow_job_templates projects inventories; do
+        ref_dir="${FILTERED_DIR}/${ref_type}"
+        if [[ -d "$ref_dir" ]]; then
+            for ref_file in "$ref_dir"/*.json; do
+                if [[ -f "$ref_file" ]]; then
+                    NEW_IDS=$(jq '[.results[].id]' "$ref_file" 2>/dev/null || echo "[]")
+                    UJT_IDS=$(echo "$UJT_IDS" "$NEW_IDS" | jq -s 'add | unique')
+                fi
+            done
+        fi
+    done
+
+    UJT_COUNT=$(echo "$UJT_IDS" | jq 'length')
+    echo -e "  ${BLUE}i${NC} Found ${UJT_COUNT} org-specific template IDs for schedule matching"
+
+    mkdir -p "${FILTERED_DIR}/schedules"
+    for file in "$SCHEDULES_SRC"/*.json; do
+        if [[ -f "$file" ]]; then
+            filename=$(basename "$file")
+
+            jq --argjson ujt_ids "$UJT_IDS" '{
+                count: ([.results[] | select(.unified_job_template as $ujt | $ujt_ids | index($ujt))] | length),
+                next: null,
+                previous: null,
+                results: [.results[] | select(.unified_job_template as $ujt | $ujt_ids | index($ujt))]
+            }' "$file" > "${FILTERED_DIR}/schedules/${filename}"
+
+            count=$(jq '.count' "${FILTERED_DIR}/schedules/${filename}")
+            if [[ "$count" -gt 0 ]]; then
+                echo -e "  ${GREEN}✓${NC} Filtered: ${filename} (${count} schedules)"
+                ((FILTERED_COUNT++)) || true
+            else
+                echo -e "  ${BLUE}i${NC} Skipped: ${filename} (0 schedules for this org)"
+                ((SKIPPED_COUNT++)) || true
+            fi
+        fi
+    done
+fi
 
 echo ""
 echo -e "${BLUE}========================================${NC}"
