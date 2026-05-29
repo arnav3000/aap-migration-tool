@@ -1,22 +1,33 @@
 """Base class for health checks."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aap_migration.client.aap_client import AAPClient
 from aap_migration.health.models import HealthCheckResult
+
+if TYPE_CHECKING:
+    from aap_migration.health.checker import HealthChecker
 
 
 class BaseHealthCheck(ABC):
     """Base class for all health checks."""
 
-    def __init__(self, client: AAPClient):
+    def __init__(
+        self, client: AAPClient, checker: HealthChecker | None = None
+    ):
         """Initialize health check.
 
         Args:
             client: AAP client for API calls
+            checker: Optional HealthChecker instance for shared resource cache.
+                     When provided, _fetch_resources() uses the checker's cache
+                     to avoid redundant API calls across checks.
         """
         self.client = client
+        self.checker = checker
 
     @property
     @abstractmethod
@@ -45,6 +56,36 @@ class BaseHealthCheck(ABC):
         params: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch resources from AAP API with pagination.
+
+        When a checker instance is available and no custom params are provided,
+        resources are fetched through the checker's shared cache to avoid
+        redundant API calls across checks (e.g., job_templates fetched once
+        instead of 5 times).
+
+        Args:
+            resource_type: Resource type endpoint (e.g., "job_templates")
+            params: Optional query parameters. If provided, cache is bypassed
+                    since custom params may return different result sets.
+
+        Returns:
+            List of resources
+        """
+        # Use checker's shared cache when available and no custom params
+        if self.checker and not params:
+            return await self.checker.get_cached_resources(resource_type)
+
+        # Direct fetch (standalone usage or custom params)
+        return await self._fetch_resources_direct(resource_type, params)
+
+    async def _fetch_resources_direct(
+        self,
+        resource_type: str,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch resources directly from AAP API with pagination.
+
+        This method always makes API calls without caching. Used internally
+        by the checker's cache and as fallback for standalone usage.
 
         Args:
             resource_type: Resource type endpoint (e.g., "job_templates")

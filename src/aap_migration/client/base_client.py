@@ -251,6 +251,11 @@ class BaseAPIClient:
                 response=error_data,
             )
 
+    # Maximum retries for transient errors (429 rate limit, 5xx server errors)
+    MAX_RETRIES = 5
+    # Initial backoff delay in seconds (doubles on each retry)
+    INITIAL_RETRY_DELAY = 1.0
+
     async def request(
         self,
         method: str,
@@ -259,7 +264,12 @@ class BaseAPIClient:
         json_data: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Make an HTTP request with rate limiting and error handling.
+        """Make an HTTP request with rate limiting, retry, and error handling.
+
+        Automatically retries on:
+        - HTTP 429 (Too Many Requests): Uses Retry-After header if present,
+          otherwise exponential backoff starting at 1 second.
+        - HTTP 5xx (Server Errors): Exponential backoff for transient failures.
 
         Args:
             method: HTTP method (GET, POST, PUT, DELETE, etc.)
@@ -273,96 +283,172 @@ class BaseAPIClient:
 
         Raises:
             NetworkError: For network-related errors
-            Various APIError subclasses: For API errors
+            RateLimitError: After exhausting retries on 429 responses
+            ServerError: After exhausting retries on 5xx responses
+            Various APIError subclasses: For non-retryable API errors
         """
         url = self._build_url(endpoint)
+        retry_delay = self.INITIAL_RETRY_DELAY
+        last_exception: Exception | None = None
 
-        # Apply rate limiting
-        await self._rate_limit_wait()
+        for attempt in range(self.MAX_RETRIES + 1):
+            # Apply rate limiting
+            await self._rate_limit_wait()
 
-        # Log request payload if enabled
-        if should_log_payloads(logger, self.log_payloads) and json_data is not None:
-            sanitized_request = sanitize_payload(json_data)
-            payload_str = truncate_payload(sanitized_request, self.max_payload_size)
-            logger.debug(
-                "api_request_payload",
-                method=method,
-                url=url,
-                payload=payload_str,
-                payload_size=len(str(json_data)),
-            )
+            # Log request payload if enabled (only on first attempt)
+            if (
+                attempt == 0
+                and should_log_payloads(logger, self.log_payloads)
+                and json_data is not None
+            ):
+                sanitized_request = sanitize_payload(json_data)
+                payload_str = truncate_payload(sanitized_request, self.max_payload_size)
+                logger.debug(
+                    "api_request_payload",
+                    method=method,
+                    url=url,
+                    payload=payload_str,
+                    payload_size=len(str(json_data)),
+                )
 
-        # Track request timing
-        start_time = time.time()
+            # Track request timing
+            start_time = time.time()
 
-        try:
-            response = await self.client.request(
-                method=method, url=url, params=params, json=json_data, **kwargs
-            )
+            try:
+                response = await self.client.request(
+                    method=method, url=url, params=params, json=json_data, **kwargs
+                )
 
-            duration_ms = (time.time() - start_time) * 1000
+                duration_ms = (time.time() - start_time) * 1000
 
-            # Log request
-            log_api_request(
-                logger,
-                method=method,
-                url=url,
-                status_code=response.status_code,
-                duration_ms=duration_ms,
-            )
+                # Log request
+                log_api_request(
+                    logger,
+                    method=method,
+                    url=url,
+                    status_code=response.status_code,
+                    duration_ms=duration_ms,
+                )
 
-            # Log response payload if enabled
-            if should_log_payloads(logger, self.log_payloads) and response.text:
-                try:
-                    response_data = response.json()
-                    sanitized_response = sanitize_payload(response_data)
-                    payload_str = truncate_payload(sanitized_response, self.max_payload_size)
-                    logger.debug(
-                        "api_response_payload",
+                # Log response payload if enabled
+                if should_log_payloads(logger, self.log_payloads) and response.text:
+                    try:
+                        response_data = response.json()
+                        sanitized_response = sanitize_payload(response_data)
+                        payload_str = truncate_payload(sanitized_response, self.max_payload_size)
+                        logger.debug(
+                            "api_response_payload",
+                            method=method,
+                            url=url,
+                            status_code=response.status_code,
+                            payload=payload_str,
+                            payload_size=len(response.text),
+                        )
+                    except Exception:
+                        # If JSON parsing fails, log as text (truncated)
+                        logger.debug(
+                            "api_response_payload",
+                            method=method,
+                            url=url,
+                            status_code=response.status_code,
+                            payload=response.text[: self.max_payload_size],
+                            payload_size=len(response.text),
+                        )
+
+                # Handle retryable errors (429 and 5xx)
+                if response.status_code == 429 and attempt < self.MAX_RETRIES:
+                    retry_after = response.headers.get("Retry-After")
+                    wait_time = int(retry_after) if retry_after else retry_delay
+                    logger.warning(
+                        "rate_limited_retrying",
+                        method=method,
+                        endpoint=endpoint,
+                        attempt=attempt + 1,
+                        max_retries=self.MAX_RETRIES,
+                        retry_after=wait_time,
+                    )
+                    await asyncio.sleep(wait_time)
+                    retry_delay = min(retry_delay * 2, 60)  # Cap at 60s
+                    continue
+
+                if 500 <= response.status_code < 600 and attempt < self.MAX_RETRIES:
+                    logger.warning(
+                        "server_error_retrying",
+                        method=method,
+                        endpoint=endpoint,
+                        status_code=response.status_code,
+                        attempt=attempt + 1,
+                        max_retries=self.MAX_RETRIES,
+                        retry_after=retry_delay,
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)  # Cap at 60s
+                    continue
+
+                # Handle non-retryable errors (or final retry attempt)
+                if response.status_code >= 400:
+                    self._handle_error_response(response)
+
+                # Return JSON response
+                return response.json() if response.text else {}
+
+            except httpx.NetworkError as e:
+                if attempt < self.MAX_RETRIES:
+                    logger.warning(
+                        "network_error_retrying",
                         method=method,
                         url=url,
-                        status_code=response.status_code,
-                        payload=payload_str,
-                        payload_size=len(response.text),
+                        error=str(e),
+                        attempt=attempt + 1,
+                        max_retries=self.MAX_RETRIES,
+                        retry_after=retry_delay,
                     )
-                except Exception:
-                    # If JSON parsing fails, log as text (truncated)
-                    logger.debug(
-                        "api_response_payload",
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)
+                    last_exception = e
+                    continue
+                logger.error("network_error", method=method, url=url, error=str(e))
+                raise NetworkError(f"Network error: {str(e)}") from e
+            except httpx.TimeoutException as e:
+                if attempt < self.MAX_RETRIES:
+                    logger.warning(
+                        "timeout_error_retrying",
                         method=method,
                         url=url,
-                        status_code=response.status_code,
-                        payload=response.text[: self.max_payload_size],
-                        payload_size=len(response.text),
+                        error=str(e),
+                        attempt=attempt + 1,
+                        max_retries=self.MAX_RETRIES,
+                        retry_after=retry_delay,
                     )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)
+                    last_exception = e
+                    continue
+                logger.error("timeout_error", method=method, url=url, error=str(e))
+                raise NetworkError(f"Request timeout: {str(e)}") from e
+            except (
+                AuthenticationError,
+                AuthorizationError,
+                NotFoundError,
+                ConflictError,
+                RateLimitError,
+                ServerError,
+                APIError,
+            ):
+                # Re-raise our custom exceptions (non-retryable at this point)
+                raise
+            except Exception as e:
+                logger.error(
+                    "unexpected_error", method=method, url=url, error=str(e), exc_info=True
+                )
+                raise
 
-            # Handle errors
-            if response.status_code >= 400:
-                self._handle_error_response(response)
-
-            # Return JSON response
-            return response.json() if response.text else {}
-
-        except httpx.NetworkError as e:
-            logger.error("network_error", method=method, url=url, error=str(e))
-            raise NetworkError(f"Network error: {str(e)}") from e
-        except httpx.TimeoutException as e:
-            logger.error("timeout_error", method=method, url=url, error=str(e))
-            raise NetworkError(f"Request timeout: {str(e)}") from e
-        except (
-            AuthenticationError,
-            AuthorizationError,
-            NotFoundError,
-            ConflictError,
-            RateLimitError,
-            ServerError,
-            APIError,
-        ):
-            # Re-raise our custom exceptions
-            raise
-        except Exception as e:
-            logger.error("unexpected_error", method=method, url=url, error=str(e), exc_info=True)
-            raise
+        # Should not reach here, but safety net
+        if last_exception:
+            raise NetworkError(
+                f"Request failed after {self.MAX_RETRIES} retries: {str(last_exception)}"
+            ) from last_exception
+        raise APIError(f"Request failed after {self.MAX_RETRIES} retries")
 
     async def get(
         self, endpoint: str, params: dict[str, Any] | None = None, **kwargs: Any
