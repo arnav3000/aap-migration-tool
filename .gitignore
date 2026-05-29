@@ -303,3 +303,19 @@ container/diagnose_migration.sh
 org.txt
 org.txt.backup*
 .env.org-backup
+
+# Documentation and analysis files (keep local only)
+README-*.md
+*_ANALYSIS*.md
+*_PLAN*.md
+*_REPORT*.md
+*_SUMMARY*.md
+*_LOG*.md
+*_NOTES*.md
+*_GUIDE*.md
+*_CHECKLIST*.md
+*_RESULTS*.md
+*_PROPOSAL*.md
+*_STEPS*.md
+BRUTAL_*.md
+COMPREHENSIVE_*.md
