@@ -185,7 +185,8 @@ echo ""
 # Get absolute path to ENV_FILE
 ENV_FILE_ABS=$(realpath "$ENV_FILE")
 
-# Get absolute path to exports directory
+# Get absolute path to exports directory (create if it doesn't exist)
+mkdir -p "$EXPORTS_TO_MOUNT"
 EXPORTS_TO_MOUNT_ABS=$(realpath "$EXPORTS_TO_MOUNT")
 
 echo -e "${GREEN}✓${NC} Mounting exports: ${EXPORTS_TO_MOUNT}"
