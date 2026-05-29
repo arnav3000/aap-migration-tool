@@ -1,6 +1,7 @@
 """Health check CLI command."""
 
 import asyncio
+import os
 from pathlib import Path
 
 import click
@@ -54,7 +55,7 @@ logger = structlog.get_logger(__name__)
 @click.option(
     "--no-verify-ssl",
     is_flag=True,
-    help="Disable SSL certificate verification",
+    help="Disable SSL certificate verification (can also set SOURCE__VERIFY_SSL=false in .env)",
 )
 @click.pass_obj
 def health_check_cmd(
@@ -91,12 +92,22 @@ def health_check_cmd(
         # Strict mode (exit code 1 if critical issues found)
         aap-bridge health-check --strict
     """
+    # Determine SSL verification setting
+    # Priority: CLI flag > environment variable > default (True)
+    if no_verify_ssl:
+        verify_ssl = False
+    else:
+        # Check SOURCE__VERIFY_SSL from .env
+        env_verify_ssl = os.getenv("SOURCE__VERIFY_SSL", "true").lower()
+        verify_ssl = env_verify_ssl != "false"
+
     logger.info(
         "health_check_command_started",
         source_url=source_url,
         output=str(output),
         format=output_format,
         checks=checks if checks else "all",
+        verify_ssl=verify_ssl,
     )
 
     # Run health check
@@ -109,7 +120,7 @@ def health_check_cmd(
                 output_format=output_format,
                 check_names=list(checks) if checks else None,
                 strict=strict,
-                verify_ssl=not no_verify_ssl,
+                verify_ssl=verify_ssl,
             )
         )
     except Exception as e:
