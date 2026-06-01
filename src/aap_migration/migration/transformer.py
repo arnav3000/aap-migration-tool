@@ -1369,6 +1369,17 @@ class JobTemplateTransformer(DataTransformer):
         """
         source_id = data.get("_source_id") or data.get("id")
 
+        # Auto-enable ask_inventory_on_launch for templates without default inventory
+        # AAP 2.6 requires either a default inventory OR ask_inventory_on_launch=true
+        if not data.get("inventory") and not data.get("ask_inventory_on_launch"):
+            data["ask_inventory_on_launch"] = True
+            logger.info(
+                "enabled_ask_inventory_on_launch",
+                source_id=source_id,
+                source_name=data.get("name"),
+                message="Enabled ask_inventory_on_launch because template has no default inventory (AAP 2.6 requirement)",
+            )
+
         # Handle execution environment migration
         if "custom_virtualenv" in data and "execution_environment" not in data:
             # Mark that this needs an execution environment
@@ -1530,6 +1541,32 @@ class ProjectTransformer(DataTransformer):
             Transformed project data
         """
         source_id = data.get("_source_id") or data.get("id")
+
+        # Clear SCM options for manual projects
+        # AAP 2.6 rejects manual projects with scm_track_submodules=true
+        # and other SCM update flags that don't apply to manual projects
+        scm_type = data.get("scm_type")
+        if not scm_type or scm_type == "":
+            scm_flags = [
+                "scm_track_submodules",
+                "scm_clean",
+                "scm_delete_on_update",
+                "scm_update_on_launch",
+            ]
+
+            cleared_any = False
+            for flag in scm_flags:
+                if data.get(flag):
+                    data[flag] = False
+                    cleared_any = True
+
+            if cleared_any:
+                logger.info(
+                    "cleared_scm_flags_for_manual_project",
+                    source_id=source_id,
+                    source_name=data.get("name"),
+                    message="Cleared SCM update flags for manual project to prevent AAP 2.6 validation error",
+                )
 
         # Ensure scm_update_on_launch is boolean
         if "scm_update_on_launch" in data and not isinstance(data["scm_update_on_launch"], bool):
@@ -2451,6 +2488,240 @@ class ScheduleTransformer(DataTransformer):
                 )
 
 
+class WorkflowNodeTransformer(DataTransformer):
+    """Transformer for workflow node resources.
+
+    Workflow nodes can override fields like inventory, extra_data, limit, etc.
+    These overrides must be stripped if the parent template does not allow
+    prompting for those fields (ask_*_on_launch), otherwise AAP 2.6 rejects
+    the node with validation errors like:
+    - 'inventory: Field is not configured to prompt on launch.'
+    - 'extra_data: Variables are not allowed on launch.'
+
+    This mirrors the ScheduleTransformer prompt-on-launch logic.
+    """
+
+    DEPENDENCIES = {
+        "unified_job_template": "unified_job_templates",
+        "inventory": "inventories",
+        "execution_environment": "execution_environments",
+    }
+    # unified_job_template is required (nodes must reference a template)
+    REQUIRED_DEPENDENCIES = set()
+
+    # Cache for template launch configuration (loaded from exported data)
+    # Maps (resource_type, source_id) -> dict of ask_*_on_launch fields
+    _template_launch_config_cache: dict[tuple[str, int], dict[str, bool]] | None = None
+
+    # Field name to ask_*_on_launch attribute mapping
+    _FIELD_TO_LAUNCH_FLAG = {
+        "inventory": "ask_inventory_on_launch",
+        "extra_data": "ask_variables_on_launch",
+        "limit": "ask_limit_on_launch",
+        "diff_mode": "ask_diff_mode_on_launch",
+        "job_tags": "ask_tags_on_launch",
+        "skip_tags": "ask_skip_tags_on_launch",
+        "verbosity": "ask_verbosity_on_launch",
+        "job_type": "ask_job_type_on_launch",
+        "scm_branch": "ask_scm_branch_on_launch",
+        "forks": "ask_forks_on_launch",
+        "timeout": "ask_timeout_on_launch",
+        "job_slice_count": "ask_job_slice_count_on_launch",
+    }
+
+    def _load_template_launch_config(self) -> dict[tuple[str, int], dict[str, bool]]:
+        """Load ask_*_on_launch fields from exported template data.
+
+        Reads job_templates and workflow_job_templates from the input_dir
+        (raw exports) and builds a lookup cache mapping (resource_type, source_id)
+        to a dict of ask_*_on_launch fields.
+
+        Returns:
+            Cache dict mapping (resource_type, source_id) to launch config dict.
+        """
+        if self._template_launch_config_cache is not None:
+            return self._template_launch_config_cache
+
+        cache: dict[tuple[str, int], dict[str, bool]] = {}
+        self._template_launch_config_cache = cache
+
+        if not self.input_dir:
+            logger.debug(
+                "workflow_node_launch_config_no_input_dir",
+                message="No input_dir available - cannot load template launch config",
+            )
+            return cache
+
+        # Load from both job_templates and workflow_job_templates
+        for resource_type in ("job_templates", "workflow_job_templates"):
+            template_dir = self.input_dir / resource_type
+            if not template_dir.exists():
+                continue
+
+            for json_file in sorted(template_dir.glob(f"{resource_type}_*.json")):
+                try:
+                    with open(json_file) as f:
+                        templates = json.load(f)
+
+                    if not isinstance(templates, list):
+                        templates = [templates]
+
+                    for template in templates:
+                        source_id = template.get("_source_id") or template.get("id")
+                        if not source_id:
+                            continue
+
+                        # Extract all ask_*_on_launch fields
+                        launch_config = {}
+                        for key, value in template.items():
+                            if key.startswith("ask_") and key.endswith("_on_launch"):
+                                launch_config[key] = bool(value)
+
+                        if launch_config:
+                            cache[(resource_type, int(source_id))] = launch_config
+
+                except Exception as e:
+                    logger.warning(
+                        "workflow_node_launch_config_load_error",
+                        file=str(json_file),
+                        error=str(e),
+                        message="Failed to load template launch config from export file",
+                    )
+
+        logger.debug(
+            "workflow_node_launch_config_loaded",
+            job_templates=sum(1 for k in cache if k[0] == "job_templates"),
+            workflow_templates=sum(1 for k in cache if k[0] == "workflow_job_templates"),
+            total=len(cache),
+        )
+
+        return cache
+
+    def _get_template_launch_config(
+        self, ujt_type: str, ujt_id: int
+    ) -> dict[str, bool] | None:
+        """Get the launch configuration for a specific template.
+
+        Args:
+            ujt_type: Resource type (e.g., 'job_templates', 'workflow_job_templates')
+            ujt_id: Source template ID
+
+        Returns:
+            Dict of ask_*_on_launch fields, or None if template not found.
+        """
+        cache = self._load_template_launch_config()
+        return cache.get((ujt_type, int(ujt_id)))
+
+    def _strip_non_promptable_overrides(
+        self,
+        node_data: dict[str, Any],
+        ujt_type: str,
+        ujt_id: int,
+    ) -> dict[str, Any]:
+        """Remove workflow node overrides that the template doesn't allow.
+
+        AAP 2.6 strictly validates that workflow node overrides match the template's
+        'Prompt on Launch' configuration. This method strips fields that would
+        cause import failures.
+
+        Args:
+            node_data: Workflow node dict with potential overrides
+            ujt_type: Resource type of the template
+            ujt_id: Source template ID
+
+        Returns:
+            Modified node_data with non-promptable fields removed.
+        """
+        # Only check job_templates and workflow_job_templates
+        if ujt_type not in ("job_templates", "workflow_job_templates"):
+            return node_data
+
+        config = self._get_template_launch_config(ujt_type, ujt_id)
+        if config is None:
+            logger.debug(
+                "workflow_node_prompt_check_skipped",
+                source_id=node_data.get("_source_id") or node_data.get("id"),
+                ujt_type=ujt_type,
+                ujt_id=ujt_id,
+                message="Template launch config not found - skipping prompt-on-launch check",
+            )
+            return node_data
+
+        source_id = node_data.get("_source_id") or node_data.get("id")
+
+        # Check each overridable field
+        for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
+            if field not in node_data:
+                continue
+
+            value = node_data[field]
+
+            # Skip if value is None or empty - nothing to strip
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, dict) and not value:
+                continue
+
+            # Check if template allows this field to be overridden at launch
+            if not config.get(launch_flag, False):
+                removed_value = node_data.pop(field)
+                logger.warning(
+                    f"workflow_node_{field}_override_stripped"
+                    if field != "extra_data"
+                    else "workflow_node_extra_vars_stripped",
+                    source_id=source_id,
+                    ujt_type=ujt_type,
+                    ujt_id=ujt_id,
+                    field=field,
+                    launch_flag=launch_flag,
+                    removed_value_preview=str(removed_value)[:200],
+                    message=(
+                        f"Stripped '{field}' override from workflow node - "
+                        f"template does not have '{launch_flag}' enabled"
+                    ),
+                )
+
+        return node_data
+
+    def _apply_specific_transformations(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> dict[str, Any]:
+        """Apply workflow node-specific transformations.
+
+        Strips non-promptable overrides from workflow node data to prevent
+        AAP 2.6 import failures due to strict launch config validation.
+        """
+        # Determine the template type and ID
+        # Workflow nodes reference a unified_job_template which could be
+        # a job_template or workflow_job_template
+        ujt_id = data.get("unified_job_template")
+
+        if ujt_id:
+            # Try to determine template type from _ujt_resource_type metadata
+            ujt_type = data.get("_ujt_resource_type")
+
+            if not ujt_type:
+                # Fallback: Try summary_fields to determine type
+                if "summary_fields" in data and "unified_job_template" in data["summary_fields"]:
+                    ujt_summary = data["summary_fields"]["unified_job_template"]
+                    if isinstance(ujt_summary, dict):
+                        api_type = ujt_summary.get("type")
+                        type_map = {
+                            "job_template": "job_templates",
+                            "workflow_job_template": "workflow_job_templates",
+                        }
+                        ujt_type = type_map.get(api_type)
+
+            if ujt_type:
+                data = self._strip_non_promptable_overrides(data, ujt_type, ujt_id)
+
+        return data
+
+
 class SystemJobTemplateTransformer(DataTransformer):
     """Transformer for system job template resources.
 
@@ -2763,6 +3034,7 @@ TRANSFORMER_CLASSES: dict[str, type[DataTransformer]] = {
     "projects": ProjectTransformer,
     "job_templates": JobTemplateTransformer,
     "workflow_job_templates": WorkflowTransformer,
+    "workflow_nodes": WorkflowNodeTransformer,
     "schedules": ScheduleTransformer,
     "system_job_templates": SystemJobTemplateTransformer,
     "notification_templates": NotificationTemplateTransformer,

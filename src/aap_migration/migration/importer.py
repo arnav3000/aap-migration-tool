@@ -2250,6 +2250,8 @@ class WorkflowNodeImporter(ResourceImporter):
     DEPENDENCIES = {
         "workflow_job_template": "workflow_job_templates",
         "unified_job_template": "unified_job_templates",
+        "inventory": "inventories",
+        "execution_environment": "execution_environments",
     }
 
     async def import_resource(
