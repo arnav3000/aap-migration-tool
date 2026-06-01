@@ -2143,7 +2143,10 @@ class ScheduleImporter(ResourceImporter):
     - inventory_sources
     """
 
-    DEPENDENCIES = {}  # Handled manually in _resolve_dependencies
+    DEPENDENCIES = {
+        "inventory": "inventories",
+        "execution_environment": "execution_environments",
+    }  # unified_job_template handled manually in _resolve_dependencies
 
     async def _resolve_dependencies(
         self, resource_type: str, data: dict[str, Any]
