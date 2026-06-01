@@ -2075,6 +2075,233 @@ class ScheduleTransformer(DataTransformer):
     }
     REQUIRED_DEPENDENCIES = {"unified_job_template"}
 
+    # Cache for template launch configuration (loaded from exported data)
+    # Maps (resource_type, source_id) -> dict of ask_*_on_launch fields
+    _template_launch_config_cache: dict[tuple[str, int], dict[str, bool]] | None = None
+
+    # Field name to ask_*_on_launch attribute mapping
+    _FIELD_TO_LAUNCH_FLAG = {
+        "inventory": "ask_inventory_on_launch",
+        "extra_data": "ask_variables_on_launch",
+        "limit": "ask_limit_on_launch",
+        "diff_mode": "ask_diff_mode_on_launch",
+        "job_tags": "ask_tags_on_launch",
+        "skip_tags": "ask_skip_tags_on_launch",
+        "verbosity": "ask_verbosity_on_launch",
+        "job_type": "ask_job_type_on_launch",
+        "scm_branch": "ask_scm_branch_on_launch",
+        "forks": "ask_forks_on_launch",
+        "timeout": "ask_timeout_on_launch",
+        "job_slice_count": "ask_job_slice_count_on_launch",
+    }
+
+    def _load_template_launch_config(self) -> dict[tuple[str, int], dict[str, bool]]:
+        """Load ask_*_on_launch fields from exported template data.
+
+        Reads job_templates and workflow_job_templates from the input_dir
+        (raw exports) and builds a lookup cache mapping (resource_type, source_id)
+        to a dict of ask_*_on_launch fields.
+
+        Returns:
+            Cache dict mapping (resource_type, source_id) to launch config dict.
+        """
+        if self._template_launch_config_cache is not None:
+            return self._template_launch_config_cache
+
+        cache: dict[tuple[str, int], dict[str, bool]] = {}
+        self._template_launch_config_cache = cache
+
+        if not self.input_dir:
+            logger.debug(
+                "schedule_launch_config_no_input_dir",
+                message="No input_dir available - cannot load template launch config",
+            )
+            return cache
+
+        # Load from both job_templates and workflow_job_templates
+        for resource_type in ("job_templates", "workflow_job_templates"):
+            template_dir = self.input_dir / resource_type
+            if not template_dir.exists():
+                continue
+
+            for json_file in sorted(template_dir.glob(f"{resource_type}_*.json")):
+                try:
+                    with open(json_file) as f:
+                        templates = json.load(f)
+
+                    if not isinstance(templates, list):
+                        templates = [templates]
+
+                    for template in templates:
+                        source_id = template.get("_source_id") or template.get("id")
+                        if not source_id:
+                            continue
+
+                        # Extract all ask_*_on_launch fields
+                        launch_config = {}
+                        for key, value in template.items():
+                            if key.startswith("ask_") and key.endswith("_on_launch"):
+                                launch_config[key] = bool(value)
+
+                        if launch_config:
+                            cache[(resource_type, int(source_id))] = launch_config
+
+                except Exception as e:
+                    logger.warning(
+                        "schedule_launch_config_load_error",
+                        file=str(json_file),
+                        error=str(e),
+                        message="Failed to load template launch config from export file",
+                    )
+
+        logger.debug(
+            "schedule_launch_config_loaded",
+            job_templates=sum(1 for k in cache if k[0] == "job_templates"),
+            workflow_templates=sum(1 for k in cache if k[0] == "workflow_job_templates"),
+            total=len(cache),
+        )
+
+        return cache
+
+    def _get_template_launch_config(
+        self, ujt_type: str, ujt_id: int
+    ) -> dict[str, bool] | None:
+        """Get the launch configuration for a specific template.
+
+        Args:
+            ujt_type: Resource type (e.g., 'job_templates', 'workflow_job_templates')
+            ujt_id: Source template ID
+
+        Returns:
+            Dict of ask_*_on_launch fields, or None if template not found.
+        """
+        cache = self._load_template_launch_config()
+        return cache.get((ujt_type, int(ujt_id)))
+
+    def _check_prompt_on_launch(
+        self, ujt_type: str, ujt_id: int, field: str
+    ) -> bool:
+        """Check if a template allows prompting for a specific field at launch.
+
+        Args:
+            ujt_type: Resource type (e.g., 'job_templates', 'workflow_job_templates')
+            ujt_id: Source template ID
+            field: Schedule field name (e.g., 'inventory', 'extra_data')
+
+        Returns:
+            True if the field can be prompted on launch, False otherwise.
+            Returns True (permissive) if template config cannot be determined.
+        """
+        launch_flag = self._FIELD_TO_LAUNCH_FLAG.get(field)
+        if not launch_flag:
+            # Unknown field mapping - allow it through (don't strip unknown fields)
+            return True
+
+        config = self._get_template_launch_config(ujt_type, ujt_id)
+        if config is None:
+            # Template not found in exports - be permissive, don't strip
+            return True
+
+        return config.get(launch_flag, False)
+
+    def _strip_non_promptable_overrides(
+        self,
+        schedule_data: dict[str, Any],
+        ujt_type: str,
+        ujt_id: int,
+    ) -> dict[str, Any]:
+        """Remove schedule overrides that the template doesn't allow.
+
+        AAP 2.6 strictly validates that schedule overrides match the template's
+        'Prompt on Launch' configuration. This method strips fields that would
+        cause import failures like:
+        - 'inventory: Field is not configured to prompt on launch.'
+        - 'extra_data: Variables are not allowed on launch.'
+
+        Args:
+            schedule_data: Schedule dict with potential overrides
+            ujt_type: Resource type of the template
+            ujt_id: Source template ID
+
+        Returns:
+            Modified schedule_data with non-promptable fields removed.
+        """
+        # Only check job_templates and workflow_job_templates
+        # Projects and inventory_sources don't have schedule launch overrides
+        if ujt_type not in ("job_templates", "workflow_job_templates"):
+            return schedule_data
+
+        config = self._get_template_launch_config(ujt_type, ujt_id)
+        if config is None:
+            logger.debug(
+                "schedule_prompt_check_skipped",
+                source_id=schedule_data.get("_source_id") or schedule_data.get("id"),
+                source_name=schedule_data.get("name"),
+                ujt_type=ujt_type,
+                ujt_id=ujt_id,
+                message="Template launch config not found - skipping prompt-on-launch check",
+            )
+            return schedule_data
+
+        source_id = schedule_data.get("_source_id") or schedule_data.get("id")
+        source_name = schedule_data.get("name")
+
+        # Check each overridable field
+        for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
+            if field not in schedule_data:
+                continue
+
+            value = schedule_data[field]
+
+            # Skip if value is None or empty - nothing to strip
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, dict) and not value:
+                continue
+
+            # Check if template allows this field to be overridden at launch
+            if not config.get(launch_flag, False):
+                removed_value = schedule_data.pop(field)
+                logger.warning(
+                    f"schedule_{field}_override_stripped"
+                    if field != "extra_data"
+                    else "schedule_extra_vars_stripped",
+                    source_id=source_id,
+                    source_name=source_name,
+                    ujt_type=ujt_type,
+                    ujt_id=ujt_id,
+                    field=field,
+                    launch_flag=launch_flag,
+                    removed_value_preview=str(removed_value)[:200],
+                    message=(
+                        f"Stripped '{field}' override from schedule - "
+                        f"template does not have '{launch_flag}' enabled"
+                    ),
+                )
+
+        return schedule_data
+
+    def _apply_specific_transformations(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> dict[str, Any]:
+        """Apply schedule-specific transformations.
+
+        Strips non-promptable overrides from schedule data to prevent
+        AAP 2.6 import failures due to strict launch config validation.
+        """
+        # Get template type and ID (set by _validate_dependencies)
+        ujt_type = data.get("_ujt_resource_type")
+        ujt_id = data.get("unified_job_template")
+
+        if ujt_type and ujt_id:
+            data = self._strip_non_promptable_overrides(data, ujt_type, ujt_id)
+
+        return data
+
     def _validate_dependencies(
         self,
         data: dict[str, Any],
