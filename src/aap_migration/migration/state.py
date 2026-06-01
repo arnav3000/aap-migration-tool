@@ -591,6 +591,20 @@ class MigrationState:
                         )
                         session.add(progress)
                     else:
+                        # Protect completed resources from being overwritten by retries
+                        # If a resource was successfully migrated (completed with target_id),
+                        # don't allow mark_in_progress to corrupt it
+                        if progress.status == "completed" and progress.target_id:
+                            logger.info(
+                                "Skipping mark_in_progress for completed resource",
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=source_name,
+                                target_id=progress.target_id,
+                                message="Resource already successfully migrated, skipping retry",
+                            )
+                            return
+
                         # Update existing record
                         progress.status = "in_progress"
                         progress.phase = phase
@@ -763,6 +777,20 @@ class MigrationState:
                             f"Cannot mark as failed: Resource not found "
                             f"(type={resource_type}, source_id={source_id})"
                         )
+
+                    # Protect completed resources from being overwritten by retries
+                    # If a resource was successfully migrated (completed with target_id),
+                    # don't allow mark_failed to corrupt its status
+                    if progress.status == "completed" and progress.target_id:
+                        logger.info(
+                            "Skipping mark_failed for completed resource",
+                            resource_type=resource_type,
+                            source_id=source_id,
+                            target_id=progress.target_id,
+                            error_message=error_message,
+                            message="Resource already successfully migrated, ignoring failure",
+                        )
+                        return
 
                     # Update progress
                     progress.status = "failed"
