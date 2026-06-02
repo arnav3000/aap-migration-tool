@@ -17,6 +17,7 @@ from aap_migration.cli.decorators import handle_errors, pass_context, requires_c
 from aap_migration.cli.utils import echo_error, echo_info, echo_success
 from aap_migration.migration.database import get_session
 from aap_migration.migration.models import MigrationProgress
+from aap_migration.reporting.org_mapper import OrganizationMapper
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -35,6 +36,19 @@ logger = get_logger(__name__)
     type=str,
     help="Generate report for specific resource type only",
 )
+@click.option(
+    "--by-organization",
+    is_flag=True,
+    default=False,
+    help="Generate organization-scoped failure report (groups failures by owning organization)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["markdown", "csv"], case_sensitive=False),
+    default="markdown",
+    help="Output format for organization report (default: markdown)",
+)
 @pass_context
 @requires_config
 @handle_errors
@@ -42,6 +56,8 @@ def generate_migration_report(
     ctx: MigrationContext,
     output: str | None,
     resource_type: str | None,
+    by_organization: bool,
+    output_format: str,
 ) -> None:
     """Generate comprehensive migration report with failures and discrepancies.
 
@@ -51,6 +67,11 @@ def generate_migration_report(
     - Resources successfully imported to target
     - Resources that failed
     - Discrepancies between exported and imported counts
+
+    With --by-organization flag:
+    - Groups failed/skipped resources by owning organization
+    - Shows organization-level statistics
+    - Maps resources to organizations using exported metadata
 
     Examples:
 
@@ -62,7 +83,25 @@ def generate_migration_report(
 
         # Save to custom location
         aap-bridge migration-report --output /tmp/migration-report.md
+
+        # Generate organization-scoped failure report
+        aap-bridge migration-report --by-organization
+
+        # Organization report in CSV format
+        aap-bridge migration-report --by-organization --format csv
+
+        # Organization report for specific resource type
+        aap-bridge migration-report --by-organization --resource-type credentials
     """
+    # Branch to organization-scoped report if requested
+    if by_organization:
+        return _generate_organization_report(
+            ctx=ctx,
+            output=output,
+            resource_type=resource_type,
+            output_format=output_format,
+        )
+
     echo_info("Generating migration report...")
 
     # Set default output path
@@ -873,6 +912,264 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _generate_organization_report(
+    ctx: MigrationContext,
+    output: str | None,
+    resource_type: str | None,
+    output_format: str,
+) -> None:
+    """Generate organization-scoped failure report.
+
+    Args:
+        ctx: Migration context
+        output: Output file path
+        resource_type: Optional resource type filter
+        output_format: Output format (markdown or csv)
+    """
+    echo_info("Generating organization-scoped failure report...")
+
+    # Set default output path based on format
+    if not output:
+        extension = "md" if output_format == "markdown" else "csv"
+        output = f"{ctx.config.paths.report_dir}/org-failures.{extension}"
+
+    # Ensure report directory exists
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        migration_state = ctx.migration_state
+        export_dir = Path(ctx.config.paths.export_dir)
+        transform_dir = Path(ctx.config.paths.transform_dir)
+
+        # Initialize organization mapper
+        echo_info("Loading organization mappings...")
+        org_mapper = OrganizationMapper(export_dir, transform_dir)
+
+        # Query failed and skipped resources from database
+        echo_info("Querying failed and skipped resources...")
+        failures = []
+
+        with get_session(migration_state.database_url) as session:
+            query = session.query(MigrationProgress).filter(
+                MigrationProgress.status.in_(["failed", "skipped"])
+            )
+
+            # Filter by resource type if specified
+            if resource_type:
+                query = query.filter(MigrationProgress.resource_type == resource_type)
+
+            for record in query.all():
+                failures.append({
+                    "resource_type": record.resource_type,
+                    "source_id": record.source_id,
+                    "source_name": record.source_name,
+                    "status": record.status,
+                    "error_message": record.error_message,
+                    "phase": record.phase,
+                })
+
+        if not failures:
+            echo_success("No failures or skipped resources found!")
+            return
+
+        echo_info(f"Found {len(failures)} failed/skipped resources")
+
+        # Build organization summary
+        echo_info("Mapping resources to organizations...")
+        org_summary = org_mapper.build_org_summary(failures)
+
+        # Generate report
+        if output_format == "markdown":
+            report_content = _format_org_report_markdown(org_summary, migration_state)
+        else:
+            report_content = _format_org_report_csv(org_summary)
+
+        # Write report
+        output_path.write_text(report_content)
+        echo_success(f"Organization report generated: {output}")
+
+        # Print summary
+        _print_org_summary(org_summary)
+
+    except Exception as e:
+        echo_error(f"Failed to generate organization report: {e}")
+        logger.error("Organization report generation failed", error=str(e), exc_info=True)
+        raise click.ClickException(str(e)) from e
+
+
+def _format_org_report_markdown(org_summary: dict, migration_state) -> str:
+    """Format organization summary as markdown."""
+    lines = [
+        "# AAP Migration - Organization Failure Report",
+        "",
+        f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
+        f"**Migration ID:** {migration_state.migration_id}",
+        "",
+        "---",
+        "",
+        "## Summary by Organization",
+        "",
+    ]
+
+    # Summary table
+    lines.append("| Organization | Failed | Skipped | Total | Resource Types Affected |")
+    lines.append("|--------------|--------|---------|-------|------------------------|")
+
+    # Sort by total (descending)
+    sorted_orgs = sorted(
+        org_summary.items(),
+        key=lambda x: x[1]["total"],
+        reverse=True,
+    )
+
+    total_failed = 0
+    total_skipped = 0
+    total_all = 0
+
+    for org_name, summary in sorted_orgs:
+        failed = summary["failed"]
+        skipped = summary["skipped"]
+        total = summary["total"]
+        resource_types = ", ".join(sorted(summary["resource_types"]))
+
+        failed_str = f"**{failed}**" if failed > 0 else str(failed)
+        skipped_str = f"**{skipped}**" if skipped > 0 else str(skipped)
+
+        lines.append(f"| {org_name} | {failed_str} | {skipped_str} | {total} | {resource_types} |")
+
+        total_failed += failed
+        total_skipped += skipped
+        total_all += total
+
+    # Totals row
+    lines.append(f"| **TOTAL** | **{total_failed}** | **{total_skipped}** | **{total_all}** | - |")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # Detailed sections per organization
+    for org_name, summary in sorted_orgs:
+        lines.append(f"## {org_name}")
+        lines.append("")
+        lines.append(f"**Statistics:**")
+        lines.append(f"- Failed: {summary['failed']}")
+        lines.append(f"- Skipped: {summary['skipped']}")
+        lines.append(f"- Total: {summary['total']}")
+        lines.append(f"- Resource Types: {', '.join(sorted(summary['resource_types']))}")
+        lines.append("")
+
+        # Group by resource type
+        by_type = {}
+        for resource in summary["resources"]:
+            rtype = resource["resource_type"]
+            if rtype not in by_type:
+                by_type[rtype] = []
+            by_type[rtype].append(resource)
+
+        for rtype in sorted(by_type.keys()):
+            resources = by_type[rtype]
+            lines.append(f"### {rtype} ({len(resources)})")
+            lines.append("")
+            lines.append("| Source ID | Name | Status | Error/Reason |")
+            lines.append("|-----------|------|--------|--------------|")
+
+            for resource in resources:
+                source_id = resource["source_id"]
+                source_name = resource.get("source_name", "N/A")
+                status = resource["status"]
+                error = resource.get("error_message", "No error message")
+                # Escape pipe characters
+                error = error.replace("|", "\\|")
+                # Truncate long errors
+                if len(error) > 100:
+                    error = error[:97] + "..."
+
+                lines.append(f"| {source_id} | {source_name} | {status} | {error} |")
+
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _format_org_report_csv(org_summary: dict) -> str:
+    """Format organization summary as CSV."""
+    import csv
+    from io import StringIO
+
+    output = StringIO()
+    writer = csv.writer(output)
+
+    # Header
+    writer.writerow([
+        "Organization",
+        "Resource Type",
+        "Source ID",
+        "Source Name",
+        "Status",
+        "Error/Reason",
+    ])
+
+    # Sort organizations by total (descending)
+    sorted_orgs = sorted(
+        org_summary.items(),
+        key=lambda x: x[1]["total"],
+        reverse=True,
+    )
+
+    # Write data
+    for org_name, summary in sorted_orgs:
+        for resource in summary["resources"]:
+            writer.writerow([
+                org_name,
+                resource["resource_type"],
+                resource["source_id"],
+                resource.get("source_name", "N/A"),
+                resource["status"],
+                resource.get("error_message", "No error message"),
+            ])
+
+    return output.getvalue()
+
+
+def _print_org_summary(org_summary: dict) -> None:
+    """Print organization summary to console."""
+    click.echo()
+    click.echo("=" * 100)
+    click.echo("ORGANIZATION FAILURE SUMMARY")
+    click.echo("=" * 100)
+
+    # Sort by total (descending)
+    sorted_orgs = sorted(
+        org_summary.items(),
+        key=lambda x: x[1]["total"],
+        reverse=True,
+    )
+
+    for org_name, summary in sorted_orgs:
+        failed = summary["failed"]
+        skipped = summary["skipped"]
+        total = summary["total"]
+
+        # Color code based on status
+        if failed > 0:
+            status = click.style("HAS FAILURES", fg="red", bold=True)
+        elif skipped > 0:
+            status = click.style("HAS SKIPPED", fg="cyan", bold=True)
+        else:
+            status = click.style("OK", fg="green")
+
+        click.echo(
+            f"{org_name:40s} | Failed: {failed:4d} | Skipped: {skipped:4d} | Total: {total:4d} | {status}"
+        )
+
+    click.echo("=" * 100)
+    click.echo()
 
 
 def _print_summary(report_data: list[dict]) -> None:
