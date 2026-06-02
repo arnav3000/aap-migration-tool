@@ -45,7 +45,7 @@ logger = get_logger(__name__)
 @click.option(
     "--format",
     "output_format",
-    type=click.Choice(["markdown", "csv"], case_sensitive=False),
+    type=click.Choice(["markdown", "csv", "html"], case_sensitive=False),
     default="markdown",
     help="Output format for organization report (default: markdown)",
 )
@@ -89,6 +89,9 @@ def generate_migration_report(
 
         # Organization report in CSV format
         aap-bridge migration-report --by-organization --format csv
+
+        # Organization report in HTML format (styled, browser-viewable)
+        aap-bridge migration-report --by-organization --format html
 
         # Organization report for specific resource type
         aap-bridge migration-report --by-organization --resource-type credentials
@@ -932,7 +935,8 @@ def _generate_organization_report(
 
     # Set default output path based on format
     if not output:
-        extension = "md" if output_format == "markdown" else "csv"
+        extension_map = {"markdown": "md", "csv": "csv", "html": "html"}
+        extension = extension_map.get(output_format, "md")
         output = f"{ctx.config.paths.report_dir}/org-failures.{extension}"
 
     # Ensure report directory exists
@@ -984,8 +988,10 @@ def _generate_organization_report(
         # Generate report
         if output_format == "markdown":
             report_content = _format_org_report_markdown(org_summary, migration_state)
-        else:
+        elif output_format == "csv":
             report_content = _format_org_report_csv(org_summary)
+        else:  # html
+            report_content = _format_org_report_html(org_summary, migration_state)
 
         # Write report
         output_path.write_text(report_content)
@@ -1135,6 +1141,242 @@ def _format_org_report_csv(org_summary: dict) -> str:
             ])
 
     return output.getvalue()
+
+
+def _format_org_report_html(org_summary: dict, migration_state) -> str:
+    """Format organization summary as HTML."""
+    from html import escape
+
+    # Generate HTML from markdown content first
+    md_content = _format_org_report_markdown(org_summary, migration_state)
+
+    # Convert markdown tables and formatting to HTML
+    lines = []
+
+    # HTML header with styling
+    lines.append("""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AAP Migration - Organization Failure Report</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 12px;
+            margin-top: 0;
+        }
+        h2 {
+            color: #34495e;
+            border-bottom: 2px solid #95a5a6;
+            padding-bottom: 8px;
+            margin-top: 35px;
+        }
+        h3 {
+            color: #7f8c8d;
+            margin-top: 25px;
+        }
+        .metadata {
+            color: #7f8c8d;
+            font-size: 0.9em;
+            margin-bottom: 20px;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 20px 0;
+            font-size: 0.95em;
+        }
+        th {
+            background-color: #3498db;
+            color: white;
+            padding: 12px 10px;
+            text-align: left;
+            font-weight: 600;
+        }
+        td {
+            border: 1px solid #ddd;
+            padding: 10px;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        tr:hover {
+            background-color: #e8f4f8;
+        }
+        .failed {
+            color: #e74c3c;
+            font-weight: bold;
+        }
+        .skipped {
+            color: #f39c12;
+            font-weight: bold;
+        }
+        .total-row {
+            background-color: #ecf0f1 !important;
+            font-weight: bold;
+        }
+        .stat-list {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-left: 4px solid #3498db;
+            margin: 15px 0;
+        }
+        .stat-list li {
+            margin: 5px 0;
+        }
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 30px 0;
+        }
+        .error-cell {
+            font-size: 0.9em;
+            color: #555;
+            max-width: 400px;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+""")
+
+    # Title and metadata
+    lines.append(f"<h1>AAP Migration - Organization Failure Report</h1>")
+    lines.append(f'<div class="metadata">')
+    lines.append(f"<strong>Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>")
+    lines.append(f"<strong>Migration ID:</strong> {escape(str(migration_state.migration_id))}")
+    lines.append("</div>")
+    lines.append("<hr>")
+
+    # Summary section
+    lines.append("<h2>Summary by Organization</h2>")
+    lines.append("<table>")
+    lines.append("<thead><tr>")
+    lines.append("<th>Organization</th><th>Failed</th><th>Skipped</th><th>Total</th><th>Resource Types Affected</th>")
+    lines.append("</tr></thead>")
+    lines.append("<tbody>")
+
+    # Sort organizations by total
+    sorted_orgs = sorted(
+        org_summary.items(),
+        key=lambda x: x[1]["total"],
+        reverse=True,
+    )
+
+    total_failed = 0
+    total_skipped = 0
+    total_all = 0
+
+    for org_name, summary in sorted_orgs:
+        failed = summary["failed"]
+        skipped = summary["skipped"]
+        total = summary["total"]
+        resource_types = ", ".join(sorted(summary["resource_types"]))
+
+        failed_str = f'<span class="failed">{failed}</span>' if failed > 0 else str(failed)
+        skipped_str = f'<span class="skipped">{skipped}</span>' if skipped > 0 else str(skipped)
+
+        lines.append(f"<tr>")
+        lines.append(f"<td>{escape(org_name)}</td>")
+        lines.append(f"<td>{failed_str}</td>")
+        lines.append(f"<td>{skipped_str}</td>")
+        lines.append(f"<td>{total}</td>")
+        lines.append(f"<td>{escape(resource_types)}</td>")
+        lines.append(f"</tr>")
+
+        total_failed += failed
+        total_skipped += skipped
+        total_all += total
+
+    # Totals row
+    lines.append(f'<tr class="total-row">')
+    lines.append(f"<td><strong>TOTAL</strong></td>")
+    lines.append(f'<td class="failed">{total_failed}</td>')
+    lines.append(f'<td class="skipped">{total_skipped}</td>')
+    lines.append(f"<td><strong>{total_all}</strong></td>")
+    lines.append(f"<td>-</td>")
+    lines.append(f"</tr>")
+
+    lines.append("</tbody></table>")
+    lines.append("<hr>")
+
+    # Detailed sections per organization
+    for org_name, summary in sorted_orgs:
+        lines.append(f"<h2>{escape(org_name)}</h2>")
+
+        lines.append('<div class="stat-list">')
+        lines.append("<ul>")
+        lines.append(f"<li><strong>Failed:</strong> {summary['failed']}</li>")
+        lines.append(f"<li><strong>Skipped:</strong> {summary['skipped']}</li>")
+        lines.append(f"<li><strong>Total:</strong> {summary['total']}</li>")
+        lines.append(f"<li><strong>Resource Types:</strong> {escape(', '.join(sorted(summary['resource_types'])))}</li>")
+        lines.append("</ul>")
+        lines.append("</div>")
+
+        # Group by resource type
+        by_type = {}
+        for resource in summary["resources"]:
+            rtype = resource["resource_type"]
+            if rtype not in by_type:
+                by_type[rtype] = []
+            by_type[rtype].append(resource)
+
+        for rtype in sorted(by_type.keys()):
+            resources = by_type[rtype]
+            lines.append(f"<h3>{escape(rtype)} ({len(resources)})</h3>")
+
+            lines.append("<table>")
+            lines.append("<thead><tr>")
+            lines.append("<th>Source ID</th><th>Name</th><th>Status</th><th>Error/Reason</th>")
+            lines.append("</tr></thead>")
+            lines.append("<tbody>")
+
+            for resource in resources:
+                source_id = resource["source_id"]
+                source_name = resource.get("source_name", "N/A")
+                status = resource["status"]
+                error = resource.get("error_message", "No error message")
+
+                # Truncate long errors for display
+                display_error = error[:200] + "..." if len(error) > 200 else error
+
+                status_class = "failed" if status == "failed" else "skipped"
+
+                lines.append("<tr>")
+                lines.append(f"<td>{source_id}</td>")
+                lines.append(f"<td>{escape(source_name)}</td>")
+                lines.append(f'<td><span class="{status_class}">{status}</span></td>')
+                lines.append(f'<td class="error-cell">{escape(display_error)}</td>')
+                lines.append("</tr>")
+
+            lines.append("</tbody></table>")
+
+        lines.append("<hr>")
+
+    # Close HTML
+    lines.append("</div>")
+    lines.append("</body>")
+    lines.append("</html>")
+
+    return "\n".join(lines)
 
 
 def _print_org_summary(org_summary: dict) -> None:
