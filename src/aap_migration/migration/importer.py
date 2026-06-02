@@ -2302,18 +2302,48 @@ class WorkflowNodeImporter(ResourceImporter):
             if "unified_job_template" in resolved and resolved["unified_job_template"]:
                 ujt_source_id = resolved["unified_job_template"]
                 # Try to map the unified job template
-                # This could be a job_template, workflow_job_template, or other template type
-                # For now, assume it's a job_template (most common case)
+                # This could be a job_template, workflow_job_template, project, or inventory_source
+                # Try each type in order of likelihood
+                target_id = None
+                ujt_type = None
+
+                # Try job_templates first (most common)
                 target_id = self.state.get_mapped_id("job_templates", ujt_source_id)
                 if target_id:
-                    resolved["unified_job_template"] = target_id
+                    ujt_type = "job_templates"
                 else:
-                    # SECURITY FIX: Fail import if referenced job template is missing
-                    # Creating a node without its job template creates a broken/incomplete workflow
+                    # Try workflow_job_templates (nested workflows)
+                    target_id = self.state.get_mapped_id("workflow_job_templates", ujt_source_id)
+                    if target_id:
+                        ujt_type = "workflow_job_templates"
+                    else:
+                        # Try projects (project sync)
+                        target_id = self.state.get_mapped_id("projects", ujt_source_id)
+                        if target_id:
+                            ujt_type = "projects"
+                        else:
+                            # Try inventory_sources (inventory sync)
+                            target_id = self.state.get_mapped_id("inventory_sources", ujt_source_id)
+                            if target_id:
+                                ujt_type = "inventory_sources"
+
+                if target_id:
+                    resolved["unified_job_template"] = target_id
+                    logger.debug(
+                        "workflow_node_ujt_resolved",
+                        source_id=source_id,
+                        ujt_source_id=ujt_source_id,
+                        ujt_target_id=target_id,
+                        ujt_type=ujt_type,
+                    )
+                else:
+                    # SECURITY FIX: Fail import if referenced template is missing
+                    # Creating a node without its template creates a broken/incomplete workflow
                     error_msg = (
-                        f"Cannot import workflow node: Referenced job template "
+                        f"Cannot import workflow node: Referenced unified_job_template "
                         f"(source_id={ujt_source_id}) was not successfully imported. "
-                        f"Ensure all job templates are imported before importing workflows."
+                        f"Tried job_templates, workflow_job_templates, projects, and inventory_sources. "
+                        f"Ensure all dependencies are imported before importing workflows."
                     )
 
                     logger.error(

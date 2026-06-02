@@ -279,6 +279,38 @@ class GranularImporter:
             completed = stats_after["completed"] - stats_before["completed"]
             failed = stats_after["failed"] - stats_before["failed"]
 
+            # CRITICAL FIX: Auto-patch projects after import to sync playbooks
+            # This ensures job templates can find their playbooks when imported later
+            if resource_type == "projects" and completed > 0:
+                echo_info("\n🔄 Auto-patching projects to activate SCM sync...")
+                echo_info("   (This ensures playbooks are available for job templates)")
+
+                # Build patch command
+                patch_cmd = [
+                    sys.executable, "-m", "aap_migration.cli.main",
+                ] + config_arg + [
+                    "patch-projects"
+                ]
+
+                try:
+                    # Run patch-projects command
+                    patch_result = subprocess.run(
+                        patch_cmd,
+                        check=False,
+                        capture_output=False,
+                        text=True
+                    )
+
+                    if patch_result.returncode == 0:
+                        echo_success("✓ Project SCM sync completed")
+                    else:
+                        echo_warning(f"⚠️  Project patching exited with code {patch_result.returncode}")
+
+                except Exception as e:
+                    echo_error(f"Failed to patch projects: {e}")
+                    # Don't fail the import, just warn
+                    echo_warning("⚠️  Project patching failed - job templates may fail if playbooks are missing")
+
             return {
                 "total": stats_after["total"],
                 "completed": completed,
