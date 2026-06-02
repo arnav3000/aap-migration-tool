@@ -952,46 +952,79 @@ def _generate_organization_report(
         echo_info("Loading organization mappings...")
         org_mapper = OrganizationMapper(export_dir, transform_dir)
 
-        # Query failed and skipped resources from database
-        echo_info("Querying failed and skipped resources...")
-        failures = []
+        # For HTML format, query ALL resources to show complete picture
+        # For markdown/CSV, query only failures/skipped (current behavior)
+        if output_format == "html":
+            echo_info("Querying all resources for complete report...")
+            all_resources = []
 
-        with get_session(migration_state.database_url) as session:
-            query = session.query(MigrationProgress).filter(
-                MigrationProgress.status.in_(["failed", "skipped"])
-            )
+            with get_session(migration_state.database_url) as session:
+                query = session.query(MigrationProgress).filter(
+                    MigrationProgress.phase == "import"
+                )
 
-            # Filter by resource type if specified
-            if resource_type:
-                query = query.filter(MigrationProgress.resource_type == resource_type)
+                # Filter by resource type if specified
+                if resource_type:
+                    query = query.filter(MigrationProgress.resource_type == resource_type)
 
-            for record in query.all():
-                failures.append({
-                    "resource_type": record.resource_type,
-                    "source_id": record.source_id,
-                    "source_name": record.source_name,
-                    "status": record.status,
-                    "error_message": record.error_message,
-                    "phase": record.phase,
-                })
+                for record in query.all():
+                    all_resources.append({
+                        "resource_type": record.resource_type,
+                        "source_id": record.source_id,
+                        "source_name": record.source_name,
+                        "status": record.status,
+                        "error_message": record.error_message,
+                        "phase": record.phase,
+                    })
 
-        if not failures:
-            echo_success("No failures or skipped resources found!")
-            return
+            echo_info(f"Found {len(all_resources)} total resources")
 
-        echo_info(f"Found {len(failures)} failed/skipped resources")
+            # Build organization summary with ALL resources
+            echo_info("Mapping resources to organizations...")
+            org_summary = org_mapper.build_org_summary(all_resources)
 
-        # Build organization summary
-        echo_info("Mapping resources to organizations...")
-        org_summary = org_mapper.build_org_summary(failures)
-
-        # Generate report
-        if output_format == "markdown":
-            report_content = _format_org_report_markdown(org_summary, migration_state)
-        elif output_format == "csv":
-            report_content = _format_org_report_csv(org_summary)
-        else:  # html
+            # Generate HTML with complete data
             report_content = _format_org_report_html(org_summary, migration_state)
+
+        else:
+            # For markdown/CSV: query only failed and skipped resources
+            echo_info("Querying failed and skipped resources...")
+            failures = []
+
+            with get_session(migration_state.database_url) as session:
+                query = session.query(MigrationProgress).filter(
+                    MigrationProgress.status.in_(["failed", "skipped"])
+                )
+
+                # Filter by resource type if specified
+                if resource_type:
+                    query = query.filter(MigrationProgress.resource_type == resource_type)
+
+                for record in query.all():
+                    failures.append({
+                        "resource_type": record.resource_type,
+                        "source_id": record.source_id,
+                        "source_name": record.source_name,
+                        "status": record.status,
+                        "error_message": record.error_message,
+                        "phase": record.phase,
+                    })
+
+            if not failures:
+                echo_success("No failures or skipped resources found!")
+                return
+
+            echo_info(f"Found {len(failures)} failed/skipped resources")
+
+            # Build organization summary
+            echo_info("Mapping resources to organizations...")
+            org_summary = org_mapper.build_org_summary(failures)
+
+            # Generate report
+            if output_format == "markdown":
+                report_content = _format_org_report_markdown(org_summary, migration_state)
+            else:  # csv
+                report_content = _format_org_report_csv(org_summary)
 
         # Write report
         output_path.write_text(report_content)
@@ -1144,7 +1177,13 @@ def _format_org_report_csv(org_summary: dict) -> str:
 
 
 def _format_org_report_html(org_summary: dict, migration_state) -> str:
-    """Format organization summary as interactive HTML with dropdowns and filtering.
+    """Format organization summary as interactive HTML with tabs and filtering.
+
+    Creates a tabbed interface with:
+    - Summary tab: All orgs with success rates
+    - Failures tab: Failed + skipped resources
+    - Successful tab: Completed resources
+    - Complete tab: All resources
 
     Designed to handle 1000+ organizations and 2M+ objects efficiently by:
     - Loading data once as embedded JSON
@@ -1165,32 +1204,39 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
     }
 
     # Convert org_summary to JSON-friendly format
+    # Now includes completed resources for success tracking
     for org_name, summary in org_summary.items():
+        # Count by status
+        completed = sum(1 for r in summary["resources"] if r["status"] == "completed")
+        failed = sum(1 for r in summary["resources"] if r["status"] == "failed")
+        skipped = sum(1 for r in summary["resources"] if r["status"] == "skipped")
+
         json_data["organizations"][org_name] = {
-            "failed": summary["failed"],
-            "skipped": summary["skipped"],
+            "completed": completed,
+            "failed": failed,
+            "skipped": skipped,
             "total": summary["total"],
             "resource_types": sorted(list(summary["resource_types"])),
             "resources": summary["resources"]
         }
 
-    # Generate single-page interactive HTML app
+    # Generate tabbed interactive HTML app
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AAP Migration - Organization Failure Report</title>
+    <title>AAP Migration - Organization Report</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             padding: 20px;
             min-height: 100vh;
         }}
         .container {{
-            max-width: 1400px;
+            max-width: 1600px;
             margin: 0 auto;
             background: white;
             border-radius: 12px;
@@ -1205,8 +1251,33 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
         }}
         .header h1 {{ font-size: 2em; margin-bottom: 10px; }}
         .header .metadata {{ opacity: 0.9; font-size: 0.9em; }}
-        .controls {{
+        .tabs {{
+            display: flex;
             background: #f8f9fa;
+            border-bottom: 3px solid #e9ecef;
+            overflow-x: auto;
+        }}
+        .tab {{
+            padding: 15px 30px;
+            cursor: pointer;
+            border: none;
+            background: transparent;
+            font-size: 1em;
+            font-weight: 600;
+            color: #6c757d;
+            transition: all 0.3s;
+            border-bottom: 3px solid transparent;
+            margin-bottom: -3px;
+            white-space: nowrap;
+        }}
+        .tab:hover {{ background: #e9ecef; color: #495057; }}
+        .tab.active {{
+            color: #667eea;
+            border-bottom-color: #667eea;
+            background: white;
+        }}
+        .controls {{
+            background: #fff;
             padding: 20px 30px;
             border-bottom: 2px solid #e9ecef;
             display: flex;
@@ -1214,6 +1285,7 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
             flex-wrap: wrap;
             align-items: center;
         }}
+        .controls.hidden {{ display: none; }}
         .control-group {{
             display: flex;
             flex-direction: column;
@@ -1243,7 +1315,7 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
             padding: 20px 30px;
             background: #fff;
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 15px;
         }}
         .stat-card {{
@@ -1253,19 +1325,13 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
             border-radius: 8px;
             text-align: center;
         }}
+        .stat-card.success {{ background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }}
         .stat-card.failed {{ background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }}
         .stat-card.skipped {{ background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%); }}
         .stat-card .value {{ font-size: 2.5em; font-weight: bold; margin-bottom: 5px; }}
         .stat-card .label {{ font-size: 0.9em; opacity: 0.9; }}
-        .content {{
-            padding: 30px;
-        }}
-        .no-selection {{
-            text-align: center;
-            padding: 60px 20px;
-            color: #6c757d;
-        }}
-        .no-selection svg {{ width: 120px; height: 120px; opacity: 0.3; margin-bottom: 20px; }}
+        .content {{ padding: 30px; min-height: 400px; }}
+        .content.hidden {{ display: none; }}
         table {{
             width: 100%;
             border-collapse: collapse;
@@ -1286,6 +1352,15 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
             border-bottom: 1px solid #e9ecef;
         }}
         tr:hover {{ background: #f8f9fa; }}
+        tr.clickable {{ cursor: pointer; }}
+        .status-completed {{
+            background: #38ef7d;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }}
         .status-failed {{
             background: #f5576c;
             color: white;
@@ -1302,12 +1377,14 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
             font-size: 0.85em;
             font-weight: 600;
         }}
-        .error-cell {{
-            max-width: 400px;
-            word-wrap: break-word;
-            font-size: 0.85em;
-            color: #495057;
+        .success-rate {{
+            font-weight: 600;
+            padding: 4px 8px;
+            border-radius: 4px;
         }}
+        .success-rate.high {{ background: #d4edda; color: #155724; }}
+        .success-rate.medium {{ background: #fff3cd; color: #856404; }}
+        .success-rate.low {{ background: #f8d7da; color: #721c24; }}
         .pagination {{
             display: flex;
             justify-content: center;
@@ -1316,6 +1393,7 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
             padding: 20px;
             margin-top: 20px;
         }}
+        .pagination.hidden {{ display: none; }}
         .pagination button {{
             padding: 8px 16px;
             border: 2px solid #667eea;
@@ -1348,34 +1426,39 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
             border-bottom: 2px solid #e9ecef;
             margin-bottom: 15px;
         }}
-        .loading {{
+        .error-cell {{
+            max-width: 400px;
+            word-wrap: break-word;
+            font-size: 0.85em;
+            color: #495057;
+        }}
+        .no-data {{
             text-align: center;
-            padding: 40px;
+            padding: 60px 20px;
             color: #6c757d;
-        }}
-        .summary-table {{
-            margin-top: 0;
-        }}
-        .summary-table th {{
-            background: #495057;
         }}
     </style>
 </head>
 <body>
 <div class="container">
     <div class="header">
-        <h1>🔍 AAP Migration - Organization Failure Report</h1>
+        <h1>📊 AAP Migration - Organization Report</h1>
         <div class="metadata">
             Generated: {escape(json_data["metadata"]["generated"])} |
             Migration ID: {escape(json_data["metadata"]["migration_id"])}
         </div>
     </div>
-
-    <div class="controls">
+    <div class="tabs">
+        <button class="tab active" data-tab="summary">📊 Summary</button>
+        <button class="tab" data-tab="failures">❌ Failures</button>
+        <button class="tab" data-tab="successful">✅ Successful</button>
+        <button class="tab" data-tab="complete">📋 Complete</button>
+    </div>
+    <div class="controls hidden" id="controls">
         <div class="control-group">
             <label for="orgSelect">Select Organization</label>
             <select id="orgSelect">
-                <option value="">-- All Organizations (Summary) --</option>
+                <option value="">-- Select Organization --</option>
             </select>
         </div>
         <div class="control-group">
@@ -1385,148 +1468,133 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
             </select>
         </div>
         <div class="control-group">
-            <label for="statusFilter">Status</label>
-            <select id="statusFilter">
-                <option value="">All</option>
-                <option value="failed">Failed Only</option>
-                <option value="skipped">Skipped Only</option>
-            </select>
-        </div>
-        <div class="control-group">
             <label for="searchInput">Search</label>
             <input type="text" id="searchInput" placeholder="Search by name or ID...">
         </div>
     </div>
-
-    <div class="stats" id="statsContainer">
-        <!-- Stats populated by JavaScript -->
-    </div>
-
-    <div class="content" id="contentContainer">
-        <div class="no-selection">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-            </svg>
-            <h2>Select an organization to view details</h2>
-            <p>Or view the summary of all organizations above</p>
-        </div>
-    </div>
-
-    <div class="pagination" id="paginationContainer" style="display: none;">
+    <div class="stats" id="statsContainer"></div>
+    <div class="content" id="summaryContent"></div>
+    <div class="content hidden" id="failuresContent"></div>
+    <div class="content hidden" id="successfulContent"></div>
+    <div class="content hidden" id="completeContent"></div>
+    <div class="pagination hidden" id="paginationContainer">
         <button id="prevPage">← Previous</button>
         <span class="page-info" id="pageInfo">Page 1 of 1</span>
         <button id="nextPage">Next →</button>
     </div>
 </div>
-
 <script>
-// Embedded data
 const DATA = {json.dumps(json_data, indent=2)};
-
-// State
+let currentTab = 'summary';
 let currentOrg = null;
 let currentPage = 1;
-const itemsPerPage = 50;
+const itemsPerPage = 100;
 let filteredData = [];
 
-// Initialize
 function init() {{
     populateOrgDropdown();
-    renderSummary();
+    renderSummaryTab();
     attachEventListeners();
 }}
 
 function populateOrgDropdown() {{
     const select = document.getElementById('orgSelect');
-    const orgs = Object.keys(DATA.organizations).sort((a, b) => {{
-        return DATA.organizations[b].total - DATA.organizations[a].total;
-    }});
-
+    const orgs = Object.keys(DATA.organizations).sort((a, b) => DATA.organizations[b].total - DATA.organizations[a].total);
     orgs.forEach(org => {{
         const option = document.createElement('option');
         option.value = org;
         const stats = DATA.organizations[org];
-        option.textContent = `${{org}} (Failed: ${{stats.failed}}, Skipped: ${{stats.skipped}})`;
+        const successRate = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0;
+        option.textContent = `${{org}} (Success: ${{successRate}}%, Total: ${{stats.total}})`;
         select.appendChild(option);
     }});
 }}
 
-function renderSummary() {{
+function switchTab(tabName) {{
+    currentTab = tabName;
+    currentPage = 1;
+    document.querySelectorAll('.tab').forEach(tab => {{
+        tab.classList.toggle('active', tab.dataset.tab === tabName);
+    }});
+    document.querySelectorAll('.content').forEach(content => content.classList.add('hidden'));
+    const controls = document.getElementById('controls');
+    if (tabName === 'summary') {{
+        controls.classList.add('hidden');
+        document.getElementById('summaryContent').classList.remove('hidden');
+        renderSummaryTab();
+    }} else {{
+        controls.classList.remove('hidden');
+        document.getElementById(`${{tabName}}Content`).classList.remove('hidden');
+        if (!currentOrg && Object.keys(DATA.organizations).length > 0) {{
+            const firstOrg = Object.keys(DATA.organizations).sort((a, b) => DATA.organizations[b].total - DATA.organizations[a].total)[0];
+            document.getElementById('orgSelect').value = firstOrg;
+            currentOrg = firstOrg;
+            populateResourceTypeFilter();
+        }}
+        renderDetailTab();
+    }}
+}}
+
+function renderSummaryTab() {{
     const orgs = Object.entries(DATA.organizations);
+    const totalOrgs = orgs.length;
+    const totalCompleted = orgs.reduce((sum, [_, data]) => sum + data.completed, 0);
     const totalFailed = orgs.reduce((sum, [_, data]) => sum + data.failed, 0);
     const totalSkipped = orgs.reduce((sum, [_, data]) => sum + data.skipped, 0);
     const totalAll = orgs.reduce((sum, [_, data]) => sum + data.total, 0);
-
+    const overallSuccessRate = totalAll > 0 ? Math.round((totalCompleted / totalAll) * 100) : 0;
     document.getElementById('statsContainer').innerHTML = `
         <div class="stat-card">
-            <div class="value">${{orgs.length}}</div>
+            <div class="value">${{totalOrgs}}</div>
             <div class="label">Organizations</div>
+        </div>
+        <div class="stat-card success">
+            <div class="value">${{totalCompleted}}</div>
+            <div class="label">Successful</div>
         </div>
         <div class="stat-card failed">
             <div class="value">${{totalFailed}}</div>
-            <div class="label">Total Failed</div>
+            <div class="label">Failed</div>
         </div>
         <div class="stat-card skipped">
             <div class="value">${{totalSkipped}}</div>
-            <div class="label">Total Skipped</div>
+            <div class="label">Skipped</div>
         </div>
         <div class="stat-card">
-            <div class="value">${{totalAll}}</div>
-            <div class="label">Total Issues</div>
+            <div class="value">${{overallSuccessRate}}%</div>
+            <div class="label">Success Rate</div>
         </div>
     `;
-
-    // Render summary table
     const sortedOrgs = orgs.sort((a, b) => b[1].total - a[1].total);
-    let tableHtml = `
-        <table class="summary-table">
-            <thead>
-                <tr>
-                    <th>Organization</th>
-                    <th>Failed</th>
-                    <th>Skipped</th>
-                    <th>Total</th>
-                    <th>Resource Types</th>
-                </tr>
-            </thead>
-            <tbody>
-    `;
-
+    let tableHtml = '<table><thead><tr><th>Organization</th><th>Total</th><th>Successful</th><th>Failed</th><th>Skipped</th><th>Success Rate</th><th>Resource Types</th></tr></thead><tbody>';
     sortedOrgs.forEach(([orgName, stats]) => {{
-        tableHtml += `
-            <tr style="cursor: pointer;" onclick="selectOrg('${{orgName.replace(/'/g, "\\\\'")}}')" title="Click to view details">
-                <td><strong>${{escapeHtml(orgName)}}</strong></td>
-                <td><span class="status-failed">${{stats.failed}}</span></td>
-                <td><span class="status-skipped">${{stats.skipped}}</span></td>
-                <td>${{stats.total}}</td>
-                <td>${{stats.resource_types.join(', ')}}</td>
-            </tr>
-        `;
+        const successRate = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0;
+        let rateClass = successRate < 50 ? 'low' : (successRate < 80 ? 'medium' : 'high');
+        tableHtml += `<tr class="clickable" onclick="goToOrg('${{orgName.replace(/'/g, "\\'")}}')" title="Click to view details">
+            <td><strong>${{escapeHtml(orgName)}}</strong></td>
+            <td>${{stats.total}}</td>
+            <td><span class="status-completed">${{stats.completed}}</span></td>
+            <td><span class="status-failed">${{stats.failed}}</span></td>
+            <td><span class="status-skipped">${{stats.skipped}}</span></td>
+            <td><span class="success-rate ${{rateClass}}">${{successRate}}%</span></td>
+            <td style="font-size: 0.85em;">${{stats.resource_types.join(', ')}}</td>
+        </tr>`;
     }});
-
     tableHtml += '</tbody></table>';
-    document.getElementById('contentContainer').innerHTML = tableHtml;
+    document.getElementById('summaryContent').innerHTML = tableHtml;
+    document.getElementById('paginationContainer').classList.add('hidden');
 }}
 
-function selectOrg(orgName) {{
+function goToOrg(orgName) {{
     document.getElementById('orgSelect').value = orgName;
-    handleOrgChange();
+    currentOrg = orgName;
+    populateResourceTypeFilter();
+    switchTab('failures');
 }}
 
-function handleOrgChange() {{
-    const orgName = document.getElementById('orgSelect').value;
-
-    if (!orgName) {{
-        renderSummary();
-        document.getElementById('paginationContainer').style.display = 'none';
-        return;
-    }}
-
-    currentOrg = orgName;
-    currentPage = 1;
-
-    // Update resource type filter
-    const orgData = DATA.organizations[orgName];
+function populateResourceTypeFilter() {{
+    if (!currentOrg) return;
+    const orgData = DATA.organizations[currentOrg];
     const resourceTypeSelect = document.getElementById('resourceTypeFilter');
     resourceTypeSelect.innerHTML = '<option value="">All Types</option>';
     orgData.resource_types.forEach(type => {{
@@ -1535,22 +1603,26 @@ function handleOrgChange() {{
         option.textContent = type;
         resourceTypeSelect.appendChild(option);
     }});
-
-    renderOrgDetails();
 }}
 
-function renderOrgDetails() {{
-    if (!currentOrg) return;
-
+function renderDetailTab() {{
+    if (!currentOrg) {{
+        const contentId = `${{currentTab}}Content`;
+        document.getElementById(contentId).innerHTML = '<div class="no-data"><h3>Please select an organization from the dropdown above</h3></div>';
+        document.getElementById('statsContainer').innerHTML = '';
+        document.getElementById('paginationContainer').classList.add('hidden');
+        return;
+    }}
     const orgData = DATA.organizations[currentOrg];
     const resourceTypeFilter = document.getElementById('resourceTypeFilter').value;
-    const statusFilter = document.getElementById('statusFilter').value;
     const searchTerm = document.getElementById('searchInput').value.toLowerCase();
-
-    // Filter resources
+    let statusFilter = [];
+    if (currentTab === 'failures') statusFilter = ['failed', 'skipped'];
+    else if (currentTab === 'successful') statusFilter = ['completed'];
+    else statusFilter = ['completed', 'failed', 'skipped'];
     filteredData = orgData.resources.filter(resource => {{
+        if (!statusFilter.includes(resource.status)) return false;
         if (resourceTypeFilter && resource.resource_type !== resourceTypeFilter) return false;
-        if (statusFilter && resource.status !== statusFilter) return false;
         if (searchTerm) {{
             const matchName = resource.source_name && resource.source_name.toLowerCase().includes(searchTerm);
             const matchId = resource.source_id && resource.source_id.toString().includes(searchTerm);
@@ -1559,31 +1631,17 @@ function renderOrgDetails() {{
         }}
         return true;
     }});
-
-    // Update stats
+    const completed = filteredData.filter(r => r.status === 'completed').length;
     const failed = filteredData.filter(r => r.status === 'failed').length;
     const skipped = filteredData.filter(r => r.status === 'skipped').length;
-
+    const successRate = filteredData.length > 0 ? Math.round((completed / filteredData.length) * 100) : 0;
     document.getElementById('statsContainer').innerHTML = `
-        <div class="stat-card">
-            <div class="value">${{escapeHtml(currentOrg)}}</div>
-            <div class="label">Selected Organization</div>
-        </div>
-        <div class="stat-card failed">
-            <div class="value">${{failed}}</div>
-            <div class="label">Failed</div>
-        </div>
-        <div class="stat-card skipped">
-            <div class="value">${{skipped}}</div>
-            <div class="label">Skipped</div>
-        </div>
-        <div class="stat-card">
-            <div class="value">${{filteredData.length}}</div>
-            <div class="label">Total Showing</div>
-        </div>
+        <div class="stat-card"><div class="value" style="font-size: 1.8em;">${{escapeHtml(currentOrg)}}</div><div class="label">Selected Organization</div></div>
+        <div class="stat-card success"><div class="value">${{completed}}</div><div class="label">Successful</div></div>
+        <div class="stat-card failed"><div class="value">${{failed}}</div><div class="label">Failed</div></div>
+        <div class="stat-card skipped"><div class="value">${{skipped}}</div><div class="label">Skipped</div></div>
+        <div class="stat-card"><div class="value">${{successRate}}%</div><div class="label">Success Rate</div></div>
     `;
-
-    // Render paginated results
     renderPage();
 }}
 
@@ -1591,92 +1649,65 @@ function renderPage() {{
     const start = (currentPage - 1) * itemsPerPage;
     const end = start + itemsPerPage;
     const pageData = filteredData.slice(start, end);
-
-    // Group by resource type
+    const contentId = `${{currentTab}}Content`;
+    if (pageData.length === 0) {{
+        document.getElementById(contentId).innerHTML = '<div class="no-data"><p>No resources match the current filters</p></div>';
+        document.getElementById('paginationContainer').classList.add('hidden');
+        return;
+    }}
     const byType = {{}};
     pageData.forEach(resource => {{
-        if (!byType[resource.resource_type]) {{
-            byType[resource.resource_type] = [];
-        }}
+        if (!byType[resource.resource_type]) byType[resource.resource_type] = [];
         byType[resource.resource_type].push(resource);
     }});
-
     let html = '';
     Object.keys(byType).sort().forEach(resourceType => {{
         const resources = byType[resourceType];
-        html += `
-            <div class="resource-type-section">
-                <h3>${{resourceType}} (${{resources.length}})</h3>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Source ID</th>
-                            <th>Name</th>
-                            <th>Status</th>
-                            <th>Error/Reason</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-        `;
-
+        html += `<div class="resource-type-section"><h3>${{resourceType}} (${{resources.length}})</h3><table><thead><tr><th>Source ID</th><th>Name</th><th>Status</th>${{currentTab !== 'successful' ? '<th>Error/Reason</th>' : ''}}</tr></thead><tbody>`;
         resources.forEach(resource => {{
-            const statusClass = resource.status === 'failed' ? 'status-failed' : 'status-skipped';
-            const error = resource.error_message || 'No error message';
-            const truncatedError = error.length > 200 ? error.substring(0, 200) + '...' : error;
-
-            html += `
-                <tr title="${{escapeHtml(error)}}">
-                    <td>${{resource.source_id}}</td>
-                    <td>${{escapeHtml(resource.source_name || 'N/A')}}</td>
-                    <td><span class="${{statusClass}}">${{resource.status}}</span></td>
-                    <td class="error-cell">${{escapeHtml(truncatedError)}}</td>
-                </tr>
-            `;
+            const statusMap = {{'completed': 'status-completed', 'failed': 'status-failed', 'skipped': 'status-skipped'}};
+            const statusClass = statusMap[resource.status];
+            const error = resource.error_message || (resource.status === 'completed' ? 'Success' : 'No message');
+            const truncatedError = error.length > 150 ? error.substring(0, 150) + '...' : error;
+            html += `<tr title="${{escapeHtml(error)}}"><td>${{resource.source_id}}</td><td>${{escapeHtml(resource.source_name || 'N/A')}}</td><td><span class="${{statusClass}}">${{resource.status}}</span></td>${{currentTab !== 'successful' ? `<td class="error-cell">${{escapeHtml(truncatedError)}}</td>` : ''}}</tr>`;
         }});
-
         html += '</tbody></table></div>';
     }});
-
-    document.getElementById('contentContainer').innerHTML = html || '<div class="no-selection"><p>No resources match the current filters</p></div>';
-
-    // Update pagination
+    document.getElementById(contentId).innerHTML = html;
     const totalPages = Math.ceil(filteredData.length / itemsPerPage);
     if (totalPages > 1) {{
-        document.getElementById('paginationContainer').style.display = 'flex';
+        document.getElementById('paginationContainer').classList.remove('hidden');
         document.getElementById('pageInfo').textContent = `Page ${{currentPage}} of ${{totalPages}} (Showing ${{start + 1}}-${{Math.min(end, filteredData.length)}} of ${{filteredData.length}})`;
         document.getElementById('prevPage').disabled = currentPage === 1;
         document.getElementById('nextPage').disabled = currentPage === totalPages;
     }} else {{
-        document.getElementById('paginationContainer').style.display = 'none';
+        document.getElementById('paginationContainer').classList.add('hidden');
     }}
 }}
 
 function attachEventListeners() {{
-    document.getElementById('orgSelect').addEventListener('change', handleOrgChange);
-    document.getElementById('resourceTypeFilter').addEventListener('change', () => {{
-        currentPage = 1;
-        renderOrgDetails();
+    document.querySelectorAll('.tab').forEach(tab => {{
+        tab.addEventListener('click', () => switchTab(tab.dataset.tab));
     }});
-    document.getElementById('statusFilter').addEventListener('change', () => {{
+    document.getElementById('orgSelect').addEventListener('change', () => {{
+        currentOrg = document.getElementById('orgSelect').value;
         currentPage = 1;
-        renderOrgDetails();
-    }});
-    document.getElementById('searchInput').addEventListener('input', () => {{
-        currentPage = 1;
-        renderOrgDetails();
-    }});
-    document.getElementById('prevPage').addEventListener('click', () => {{
-        if (currentPage > 1) {{
-            currentPage--;
-            renderPage();
+        if (currentOrg) {{
+            populateResourceTypeFilter();
+            renderDetailTab();
+        }} else {{
+            const contentId = `${{currentTab}}Content`;
+            document.getElementById(contentId).innerHTML = '<div class="no-data"><h3>Please select an organization</h3></div>';
+            document.getElementById('statsContainer').innerHTML = '';
+            document.getElementById('paginationContainer').classList.add('hidden');
         }}
     }});
+    document.getElementById('resourceTypeFilter').addEventListener('change', () => {{ currentPage = 1; renderDetailTab(); }});
+    document.getElementById('searchInput').addEventListener('input', () => {{ currentPage = 1; renderDetailTab(); }});
+    document.getElementById('prevPage').addEventListener('click', () => {{ if (currentPage > 1) {{ currentPage--; renderPage(); }} }});
     document.getElementById('nextPage').addEventListener('click', () => {{
         const totalPages = Math.ceil(filteredData.length / itemsPerPage);
-        if (currentPage < totalPages) {{
-            currentPage++;
-            renderPage();
-        }}
+        if (currentPage < totalPages) {{ currentPage++; renderPage(); }}
     }});
 }}
 
@@ -1686,7 +1717,6 @@ function escapeHtml(text) {{
     return div.innerHTML;
 }}
 
-// Start the app
 init();
 </script>
 </body>
