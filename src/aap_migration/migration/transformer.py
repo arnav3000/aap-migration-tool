@@ -1513,8 +1513,9 @@ class ProjectTransformer(DataTransformer):
     DEPENDENCIES = {
         "organization": "organizations",
         "credential": "credentials",
+        "signature_validation_credential": "credentials",  # CRITICAL FIX (Customer B - content signing)
     }
-    # Organization is required; credential (for SCM auth) is optional
+    # Organization is required; credential (for SCM auth) and signature_validation_credential are optional
     REQUIRED_DEPENDENCIES = {"organization"}
 
     def __init__(self, *args: Any, defer_project_sync: bool = True, **kwargs: Any):
@@ -1596,10 +1597,12 @@ class ProjectTransformer(DataTransformer):
                     "scm_type": scm_type,
                     "scm_url": data.get("scm_url"),
                     "scm_branch": data.get("scm_branch", ""),
+                    "scm_refspec": data.get("scm_refspec", ""),  # CRITICAL FIX (Customer B)
                     "scm_clean": data.get("scm_clean", False),
                     "scm_delete_on_update": data.get("scm_delete_on_update", False),
                     "scm_update_on_launch": data.get("scm_update_on_launch", False),
                     "scm_update_cache_timeout": data.get("scm_update_cache_timeout", 0),
+                    "scm_track_submodules": data.get("scm_track_submodules", False),  # CRITICAL FIX
                     "credential": data.get("credential"),  # Keep source credential ID
                 }
 
@@ -1609,10 +1612,12 @@ class ProjectTransformer(DataTransformer):
                 # Remove other SCM fields to be clean
                 for field in [
                     "scm_branch",
+                    "scm_refspec",  # CRITICAL FIX: Also remove from main data (Customer B)
                     "scm_clean",
                     "scm_delete_on_update",
                     "scm_update_on_launch",
                     "scm_update_cache_timeout",
+                    "scm_track_submodules",  # CRITICAL FIX: Also remove from main data
                     "credential",
                 ]:
                     data.pop(field, None)
