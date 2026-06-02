@@ -1417,9 +1417,95 @@ def import_cmd(
             filters = {filter_key: ",".join(batch_identifiers)}
 
             try:
-                existing_batch = await client.list_resources(
-                    resource_type=resource_type, filters=filters
+                # BUGFIX: Use manual pagination for resource types with known infinite loop bug
+                # in list_resources() when target has >100 existing resources.
+                # Root cause: list_resources() strips query params during pagination (line 585 in aap_target_client.py)
+                # causing infinite loop that returns page 1 repeatedly.
+                # Temporary fix until list_resources() is corrected in core client.
+                # See: Global-CTO/ORG_IMPORT_HANG_ROOT_CAUSE_ANALYSIS.md for details
+                MANUAL_PAGINATION_RESOURCE_TYPES = (
+                    "organizations",
+                    "credentials",
+                    "projects",
+                    "inventories",
+                    "job_templates",
+                    "workflow_job_templates",
+                    "schedules",
                 )
+
+                if resource_type in MANUAL_PAGINATION_RESOURCE_TYPES:
+                    # Use manual pagination (same pattern as credential_comparator.py)
+                    # to avoid infinite loop bug in list_resources()
+                    logger.info(
+                        "using_manual_pagination_for_batch_precheck",
+                        resource_type=resource_type,
+                        batch_idx=batch_idx,
+                        batch_size=len(batch_identifiers),
+                        reason="Avoiding infinite loop bug in list_resources()",
+                    )
+
+                    # Fetch all resources from target with manual pagination
+                    all_target_resources = []
+                    page = 1
+                    MAX_PAGES = 500  # Safety limit to prevent infinite loops
+
+                    endpoint = get_endpoint(resource_type)
+
+                    while page <= MAX_PAGES:
+                        params = {"page": page, "page_size": 200}
+
+                        response = await client.get(endpoint, params=params)
+                        results = response.get("results", [])
+                        all_target_resources.extend(results)
+
+                        if not response.get("next"):
+                            break
+
+                        page += 1
+
+                    if page > MAX_PAGES:
+                        logger.error(
+                            "manual_pagination_limit_exceeded",
+                            resource_type=resource_type,
+                            max_pages=MAX_PAGES,
+                            resources_fetched=len(all_target_resources),
+                        )
+
+                    logger.info(
+                        "manual_pagination_completed",
+                        resource_type=resource_type,
+                        total_pages=page,
+                        total_resources=len(all_target_resources),
+                    )
+
+                    # Filter down to batch identifiers (client-side filtering)
+                    # Normalize identifiers for matching (strip whitespace, case-insensitive)
+                    batch_identifiers_normalized = {
+                        str(ident).strip().lower() for ident in batch_identifiers if ident
+                    }
+
+                    existing_batch = [
+                        resource
+                        for resource in all_target_resources
+                        if str(resource.get(identifier_field, "")).strip().lower()
+                        in batch_identifiers_normalized
+                    ]
+
+                    logger.debug(
+                        "batch_filtered_client_side",
+                        resource_type=resource_type,
+                        batch_idx=batch_idx,
+                        batch_size=len(batch_identifiers),
+                        all_target_count=len(all_target_resources),
+                        matched_count=len(existing_batch),
+                    )
+
+                else:
+                    # Other resource types use existing list_resources()
+                    # (credential_types, teams, etc. - small datasets that don't trigger bug)
+                    existing_batch = await client.list_resources(
+                        resource_type=resource_type, filters=filters
+                    )
 
                 # Index by identifier for fast lookup
                 # For organization-scoped resources, use composite key (name, organization)
