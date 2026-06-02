@@ -1144,239 +1144,555 @@ def _format_org_report_csv(org_summary: dict) -> str:
 
 
 def _format_org_report_html(org_summary: dict, migration_state) -> str:
-    """Format organization summary as HTML."""
+    """Format organization summary as interactive HTML with dropdowns and filtering.
+
+    Designed to handle 1000+ organizations and 2M+ objects efficiently by:
+    - Loading data once as embedded JSON
+    - Using JavaScript for client-side filtering
+    - Only rendering visible content
+    - Pagination for large result sets
+    """
+    import json
     from html import escape
 
-    # Generate HTML from markdown content first
-    md_content = _format_org_report_markdown(org_summary, migration_state)
+    # Prepare data for JSON embedding
+    json_data = {
+        "metadata": {
+            "generated": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "migration_id": str(migration_state.migration_id),
+        },
+        "organizations": {}
+    }
 
-    # Convert markdown tables and formatting to HTML
-    lines = []
+    # Convert org_summary to JSON-friendly format
+    for org_name, summary in org_summary.items():
+        json_data["organizations"][org_name] = {
+            "failed": summary["failed"],
+            "skipped": summary["skipped"],
+            "total": summary["total"],
+            "resource_types": sorted(list(summary["resource_types"])),
+            "resources": summary["resources"]
+        }
 
-    # HTML header with styling
-    lines.append("""<!DOCTYPE html>
+    # Generate single-page interactive HTML app
+    html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AAP Migration - Organization Failure Report</title>
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
-            max-width: 1600px;
-            margin: 0 auto;
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             padding: 20px;
-            line-height: 1.6;
-            color: #333;
-            background-color: #f5f5f5;
-        }
-        .container {
-            background-color: white;
-            padding: 30px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        h1 {
-            color: #2c3e50;
-            border-bottom: 3px solid #3498db;
-            padding-bottom: 12px;
-            margin-top: 0;
-        }
-        h2 {
-            color: #34495e;
-            border-bottom: 2px solid #95a5a6;
-            padding-bottom: 8px;
-            margin-top: 35px;
-        }
-        h3 {
-            color: #7f8c8d;
-            margin-top: 25px;
-        }
-        .metadata {
-            color: #7f8c8d;
-            font-size: 0.9em;
-            margin-bottom: 20px;
-        }
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            margin: 20px 0;
-            font-size: 0.95em;
-        }
-        th {
-            background-color: #3498db;
+            min-height: 100vh;
+        }}
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            padding: 12px 10px;
+            padding: 30px;
+            text-align: center;
+        }}
+        .header h1 {{ font-size: 2em; margin-bottom: 10px; }}
+        .header .metadata {{ opacity: 0.9; font-size: 0.9em; }}
+        .controls {{
+            background: #f8f9fa;
+            padding: 20px 30px;
+            border-bottom: 2px solid #e9ecef;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }}
+        .control-group {{
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }}
+        .control-group label {{
+            font-size: 0.85em;
+            font-weight: 600;
+            color: #495057;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        select, input[type="text"] {{
+            padding: 10px 15px;
+            border: 2px solid #dee2e6;
+            border-radius: 6px;
+            font-size: 14px;
+            min-width: 200px;
+            transition: all 0.3s;
+        }}
+        select:focus, input[type="text"]:focus {{
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }}
+        .stats {{
+            padding: 20px 30px;
+            background: #fff;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }}
+        .stat-card {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }}
+        .stat-card.failed {{ background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }}
+        .stat-card.skipped {{ background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%); }}
+        .stat-card .value {{ font-size: 2.5em; font-weight: bold; margin-bottom: 5px; }}
+        .stat-card .label {{ font-size: 0.9em; opacity: 0.9; }}
+        .content {{
+            padding: 30px;
+        }}
+        .no-selection {{
+            text-align: center;
+            padding: 60px 20px;
+            color: #6c757d;
+        }}
+        .no-selection svg {{ width: 120px; height: 120px; opacity: 0.3; margin-bottom: 20px; }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            font-size: 0.9em;
+        }}
+        th {{
+            background: #667eea;
+            color: white;
+            padding: 12px;
             text-align: left;
             font-weight: 600;
-        }
-        td {
-            border: 1px solid #ddd;
-            padding: 10px;
-        }
-        tr:nth-child(even) {
-            background-color: #f9f9f9;
-        }
-        tr:hover {
-            background-color: #e8f4f8;
-        }
-        .failed {
-            color: #e74c3c;
-            font-weight: bold;
-        }
-        .skipped {
-            color: #f39c12;
-            font-weight: bold;
-        }
-        .total-row {
-            background-color: #ecf0f1 !important;
-            font-weight: bold;
-        }
-        .stat-list {
-            background-color: #f8f9fa;
-            padding: 15px;
-            border-left: 4px solid #3498db;
-            margin: 15px 0;
-        }
-        .stat-list li {
-            margin: 5px 0;
-        }
-        hr {
-            border: none;
-            border-top: 1px solid #ddd;
-            margin: 30px 0;
-        }
-        .error-cell {
-            font-size: 0.9em;
-            color: #555;
+            position: sticky;
+            top: 0;
+        }}
+        td {{
+            padding: 10px 12px;
+            border-bottom: 1px solid #e9ecef;
+        }}
+        tr:hover {{ background: #f8f9fa; }}
+        .status-failed {{
+            background: #f5576c;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }}
+        .status-skipped {{
+            background: #fcb69f;
+            color: #333;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }}
+        .error-cell {{
             max-width: 400px;
             word-wrap: break-word;
-        }
+            font-size: 0.85em;
+            color: #495057;
+        }}
+        .pagination {{
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }}
+        .pagination button {{
+            padding: 8px 16px;
+            border: 2px solid #667eea;
+            background: white;
+            color: #667eea;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }}
+        .pagination button:hover:not(:disabled) {{
+            background: #667eea;
+            color: white;
+        }}
+        .pagination button:disabled {{
+            opacity: 0.3;
+            cursor: not-allowed;
+        }}
+        .pagination .page-info {{
+            padding: 0 15px;
+            font-weight: 600;
+            color: #495057;
+        }}
+        .resource-type-section {{
+            margin-bottom: 30px;
+        }}
+        .resource-type-section h3 {{
+            color: #495057;
+            padding: 10px 0;
+            border-bottom: 2px solid #e9ecef;
+            margin-bottom: 15px;
+        }}
+        .loading {{
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }}
+        .summary-table {{
+            margin-top: 0;
+        }}
+        .summary-table th {{
+            background: #495057;
+        }}
     </style>
 </head>
 <body>
 <div class="container">
-""")
+    <div class="header">
+        <h1>🔍 AAP Migration - Organization Failure Report</h1>
+        <div class="metadata">
+            Generated: {escape(json_data["metadata"]["generated"])} |
+            Migration ID: {escape(json_data["metadata"]["migration_id"])}
+        </div>
+    </div>
 
-    # Title and metadata
-    lines.append(f"<h1>AAP Migration - Organization Failure Report</h1>")
-    lines.append(f'<div class="metadata">')
-    lines.append(f"<strong>Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>")
-    lines.append(f"<strong>Migration ID:</strong> {escape(str(migration_state.migration_id))}")
-    lines.append("</div>")
-    lines.append("<hr>")
+    <div class="controls">
+        <div class="control-group">
+            <label for="orgSelect">Select Organization</label>
+            <select id="orgSelect">
+                <option value="">-- All Organizations (Summary) --</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="resourceTypeFilter">Resource Type</label>
+            <select id="resourceTypeFilter">
+                <option value="">All Types</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="statusFilter">Status</label>
+            <select id="statusFilter">
+                <option value="">All</option>
+                <option value="failed">Failed Only</option>
+                <option value="skipped">Skipped Only</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="searchInput">Search</label>
+            <input type="text" id="searchInput" placeholder="Search by name or ID...">
+        </div>
+    </div>
 
-    # Summary section
-    lines.append("<h2>Summary by Organization</h2>")
-    lines.append("<table>")
-    lines.append("<thead><tr>")
-    lines.append("<th>Organization</th><th>Failed</th><th>Skipped</th><th>Total</th><th>Resource Types Affected</th>")
-    lines.append("</tr></thead>")
-    lines.append("<tbody>")
+    <div class="stats" id="statsContainer">
+        <!-- Stats populated by JavaScript -->
+    </div>
 
-    # Sort organizations by total
-    sorted_orgs = sorted(
-        org_summary.items(),
-        key=lambda x: x[1]["total"],
-        reverse=True,
-    )
+    <div class="content" id="contentContainer">
+        <div class="no-selection">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            </svg>
+            <h2>Select an organization to view details</h2>
+            <p>Or view the summary of all organizations above</p>
+        </div>
+    </div>
 
-    total_failed = 0
-    total_skipped = 0
-    total_all = 0
+    <div class="pagination" id="paginationContainer" style="display: none;">
+        <button id="prevPage">← Previous</button>
+        <span class="page-info" id="pageInfo">Page 1 of 1</span>
+        <button id="nextPage">Next →</button>
+    </div>
+</div>
 
-    for org_name, summary in sorted_orgs:
-        failed = summary["failed"]
-        skipped = summary["skipped"]
-        total = summary["total"]
-        resource_types = ", ".join(sorted(summary["resource_types"]))
+<script>
+// Embedded data
+const DATA = {json.dumps(json_data, indent=2)};
 
-        failed_str = f'<span class="failed">{failed}</span>' if failed > 0 else str(failed)
-        skipped_str = f'<span class="skipped">{skipped}</span>' if skipped > 0 else str(skipped)
+// State
+let currentOrg = null;
+let currentPage = 1;
+const itemsPerPage = 50;
+let filteredData = [];
 
-        lines.append(f"<tr>")
-        lines.append(f"<td>{escape(org_name)}</td>")
-        lines.append(f"<td>{failed_str}</td>")
-        lines.append(f"<td>{skipped_str}</td>")
-        lines.append(f"<td>{total}</td>")
-        lines.append(f"<td>{escape(resource_types)}</td>")
-        lines.append(f"</tr>")
+// Initialize
+function init() {{
+    populateOrgDropdown();
+    renderSummary();
+    attachEventListeners();
+}}
 
-        total_failed += failed
-        total_skipped += skipped
-        total_all += total
+function populateOrgDropdown() {{
+    const select = document.getElementById('orgSelect');
+    const orgs = Object.keys(DATA.organizations).sort((a, b) => {{
+        return DATA.organizations[b].total - DATA.organizations[a].total;
+    }});
 
-    # Totals row
-    lines.append(f'<tr class="total-row">')
-    lines.append(f"<td><strong>TOTAL</strong></td>")
-    lines.append(f'<td class="failed">{total_failed}</td>')
-    lines.append(f'<td class="skipped">{total_skipped}</td>')
-    lines.append(f"<td><strong>{total_all}</strong></td>")
-    lines.append(f"<td>-</td>")
-    lines.append(f"</tr>")
+    orgs.forEach(org => {{
+        const option = document.createElement('option');
+        option.value = org;
+        const stats = DATA.organizations[org];
+        option.textContent = `${{org}} (Failed: ${{stats.failed}}, Skipped: ${{stats.skipped}})`;
+        select.appendChild(option);
+    }});
+}}
 
-    lines.append("</tbody></table>")
-    lines.append("<hr>")
+function renderSummary() {{
+    const orgs = Object.entries(DATA.organizations);
+    const totalFailed = orgs.reduce((sum, [_, data]) => sum + data.failed, 0);
+    const totalSkipped = orgs.reduce((sum, [_, data]) => sum + data.skipped, 0);
+    const totalAll = orgs.reduce((sum, [_, data]) => sum + data.total, 0);
 
-    # Detailed sections per organization
-    for org_name, summary in sorted_orgs:
-        lines.append(f"<h2>{escape(org_name)}</h2>")
+    document.getElementById('statsContainer').innerHTML = `
+        <div class="stat-card">
+            <div class="value">${{orgs.length}}</div>
+            <div class="label">Organizations</div>
+        </div>
+        <div class="stat-card failed">
+            <div class="value">${{totalFailed}}</div>
+            <div class="label">Total Failed</div>
+        </div>
+        <div class="stat-card skipped">
+            <div class="value">${{totalSkipped}}</div>
+            <div class="label">Total Skipped</div>
+        </div>
+        <div class="stat-card">
+            <div class="value">${{totalAll}}</div>
+            <div class="label">Total Issues</div>
+        </div>
+    `;
 
-        lines.append('<div class="stat-list">')
-        lines.append("<ul>")
-        lines.append(f"<li><strong>Failed:</strong> {summary['failed']}</li>")
-        lines.append(f"<li><strong>Skipped:</strong> {summary['skipped']}</li>")
-        lines.append(f"<li><strong>Total:</strong> {summary['total']}</li>")
-        lines.append(f"<li><strong>Resource Types:</strong> {escape(', '.join(sorted(summary['resource_types'])))}</li>")
-        lines.append("</ul>")
-        lines.append("</div>")
+    // Render summary table
+    const sortedOrgs = orgs.sort((a, b) => b[1].total - a[1].total);
+    let tableHtml = `
+        <table class="summary-table">
+            <thead>
+                <tr>
+                    <th>Organization</th>
+                    <th>Failed</th>
+                    <th>Skipped</th>
+                    <th>Total</th>
+                    <th>Resource Types</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
 
-        # Group by resource type
-        by_type = {}
-        for resource in summary["resources"]:
-            rtype = resource["resource_type"]
-            if rtype not in by_type:
-                by_type[rtype] = []
-            by_type[rtype].append(resource)
+    sortedOrgs.forEach(([orgName, stats]) => {{
+        tableHtml += `
+            <tr style="cursor: pointer;" onclick="selectOrg('${{orgName.replace(/'/g, "\\\\'")}}')" title="Click to view details">
+                <td><strong>${{escapeHtml(orgName)}}</strong></td>
+                <td><span class="status-failed">${{stats.failed}}</span></td>
+                <td><span class="status-skipped">${{stats.skipped}}</span></td>
+                <td>${{stats.total}}</td>
+                <td>${{stats.resource_types.join(', ')}}</td>
+            </tr>
+        `;
+    }});
 
-        for rtype in sorted(by_type.keys()):
-            resources = by_type[rtype]
-            lines.append(f"<h3>{escape(rtype)} ({len(resources)})</h3>")
+    tableHtml += '</tbody></table>';
+    document.getElementById('contentContainer').innerHTML = tableHtml;
+}}
 
-            lines.append("<table>")
-            lines.append("<thead><tr>")
-            lines.append("<th>Source ID</th><th>Name</th><th>Status</th><th>Error/Reason</th>")
-            lines.append("</tr></thead>")
-            lines.append("<tbody>")
+function selectOrg(orgName) {{
+    document.getElementById('orgSelect').value = orgName;
+    handleOrgChange();
+}}
 
-            for resource in resources:
-                source_id = resource["source_id"]
-                source_name = resource.get("source_name", "N/A")
-                status = resource["status"]
-                error = resource.get("error_message", "No error message")
+function handleOrgChange() {{
+    const orgName = document.getElementById('orgSelect').value;
 
-                # Truncate long errors for display
-                display_error = error[:200] + "..." if len(error) > 200 else error
+    if (!orgName) {{
+        renderSummary();
+        document.getElementById('paginationContainer').style.display = 'none';
+        return;
+    }}
 
-                status_class = "failed" if status == "failed" else "skipped"
+    currentOrg = orgName;
+    currentPage = 1;
 
-                lines.append("<tr>")
-                lines.append(f"<td>{source_id}</td>")
-                lines.append(f"<td>{escape(source_name)}</td>")
-                lines.append(f'<td><span class="{status_class}">{status}</span></td>')
-                lines.append(f'<td class="error-cell">{escape(display_error)}</td>')
-                lines.append("</tr>")
+    // Update resource type filter
+    const orgData = DATA.organizations[orgName];
+    const resourceTypeSelect = document.getElementById('resourceTypeFilter');
+    resourceTypeSelect.innerHTML = '<option value="">All Types</option>';
+    orgData.resource_types.forEach(type => {{
+        const option = document.createElement('option');
+        option.value = type;
+        option.textContent = type;
+        resourceTypeSelect.appendChild(option);
+    }});
 
-            lines.append("</tbody></table>")
+    renderOrgDetails();
+}}
 
-        lines.append("<hr>")
+function renderOrgDetails() {{
+    if (!currentOrg) return;
 
-    # Close HTML
-    lines.append("</div>")
-    lines.append("</body>")
-    lines.append("</html>")
+    const orgData = DATA.organizations[currentOrg];
+    const resourceTypeFilter = document.getElementById('resourceTypeFilter').value;
+    const statusFilter = document.getElementById('statusFilter').value;
+    const searchTerm = document.getElementById('searchInput').value.toLowerCase();
 
-    return "\n".join(lines)
+    // Filter resources
+    filteredData = orgData.resources.filter(resource => {{
+        if (resourceTypeFilter && resource.resource_type !== resourceTypeFilter) return false;
+        if (statusFilter && resource.status !== statusFilter) return false;
+        if (searchTerm) {{
+            const matchName = resource.source_name && resource.source_name.toLowerCase().includes(searchTerm);
+            const matchId = resource.source_id && resource.source_id.toString().includes(searchTerm);
+            const matchError = resource.error_message && resource.error_message.toLowerCase().includes(searchTerm);
+            if (!matchName && !matchId && !matchError) return false;
+        }}
+        return true;
+    }});
+
+    // Update stats
+    const failed = filteredData.filter(r => r.status === 'failed').length;
+    const skipped = filteredData.filter(r => r.status === 'skipped').length;
+
+    document.getElementById('statsContainer').innerHTML = `
+        <div class="stat-card">
+            <div class="value">${{escapeHtml(currentOrg)}}</div>
+            <div class="label">Selected Organization</div>
+        </div>
+        <div class="stat-card failed">
+            <div class="value">${{failed}}</div>
+            <div class="label">Failed</div>
+        </div>
+        <div class="stat-card skipped">
+            <div class="value">${{skipped}}</div>
+            <div class="label">Skipped</div>
+        </div>
+        <div class="stat-card">
+            <div class="value">${{filteredData.length}}</div>
+            <div class="label">Total Showing</div>
+        </div>
+    `;
+
+    // Render paginated results
+    renderPage();
+}}
+
+function renderPage() {{
+    const start = (currentPage - 1) * itemsPerPage;
+    const end = start + itemsPerPage;
+    const pageData = filteredData.slice(start, end);
+
+    // Group by resource type
+    const byType = {{}};
+    pageData.forEach(resource => {{
+        if (!byType[resource.resource_type]) {{
+            byType[resource.resource_type] = [];
+        }}
+        byType[resource.resource_type].push(resource);
+    }});
+
+    let html = '';
+    Object.keys(byType).sort().forEach(resourceType => {{
+        const resources = byType[resourceType];
+        html += `
+            <div class="resource-type-section">
+                <h3>${{resourceType}} (${{resources.length}})</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Source ID</th>
+                            <th>Name</th>
+                            <th>Status</th>
+                            <th>Error/Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+
+        resources.forEach(resource => {{
+            const statusClass = resource.status === 'failed' ? 'status-failed' : 'status-skipped';
+            const error = resource.error_message || 'No error message';
+            const truncatedError = error.length > 200 ? error.substring(0, 200) + '...' : error;
+
+            html += `
+                <tr title="${{escapeHtml(error)}}">
+                    <td>${{resource.source_id}}</td>
+                    <td>${{escapeHtml(resource.source_name || 'N/A')}}</td>
+                    <td><span class="${{statusClass}}">${{resource.status}}</span></td>
+                    <td class="error-cell">${{escapeHtml(truncatedError)}}</td>
+                </tr>
+            `;
+        }});
+
+        html += '</tbody></table></div>';
+    }});
+
+    document.getElementById('contentContainer').innerHTML = html || '<div class="no-selection"><p>No resources match the current filters</p></div>';
+
+    // Update pagination
+    const totalPages = Math.ceil(filteredData.length / itemsPerPage);
+    if (totalPages > 1) {{
+        document.getElementById('paginationContainer').style.display = 'flex';
+        document.getElementById('pageInfo').textContent = `Page ${{currentPage}} of ${{totalPages}} (Showing ${{start + 1}}-${{Math.min(end, filteredData.length)}} of ${{filteredData.length}})`;
+        document.getElementById('prevPage').disabled = currentPage === 1;
+        document.getElementById('nextPage').disabled = currentPage === totalPages;
+    }} else {{
+        document.getElementById('paginationContainer').style.display = 'none';
+    }}
+}}
+
+function attachEventListeners() {{
+    document.getElementById('orgSelect').addEventListener('change', handleOrgChange);
+    document.getElementById('resourceTypeFilter').addEventListener('change', () => {{
+        currentPage = 1;
+        renderOrgDetails();
+    }});
+    document.getElementById('statusFilter').addEventListener('change', () => {{
+        currentPage = 1;
+        renderOrgDetails();
+    }});
+    document.getElementById('searchInput').addEventListener('input', () => {{
+        currentPage = 1;
+        renderOrgDetails();
+    }});
+    document.getElementById('prevPage').addEventListener('click', () => {{
+        if (currentPage > 1) {{
+            currentPage--;
+            renderPage();
+        }}
+    }});
+    document.getElementById('nextPage').addEventListener('click', () => {{
+        const totalPages = Math.ceil(filteredData.length / itemsPerPage);
+        if (currentPage < totalPages) {{
+            currentPage++;
+            renderPage();
+        }}
+    }});
+}}
+
+function escapeHtml(text) {{
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}}
+
+// Start the app
+init();
+</script>
+</body>
+</html>"""
+
+    return html
 
 
 def _print_org_summary(org_summary: dict) -> None:
