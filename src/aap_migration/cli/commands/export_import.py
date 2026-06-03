@@ -23,11 +23,10 @@ from aap_migration.cli.utils import (
     format_count,
     step_progress,
 )
-from aap_migration.migration.database import get_session
 from aap_migration.migration.exporter import create_exporter
 from aap_migration.migration.importer import create_importer
 from aap_migration.migration.parallel_exporter import ParallelExportCoordinator
-from aap_migration.migration.state import MigrationProgress, MigrationState
+from aap_migration.migration.state import MigrationState
 from aap_migration.reporting.live_progress import MigrationProgressDisplay
 from aap_migration.resources import (
     MANUAL_MIGRATION_ENDPOINTS,
@@ -1411,74 +1410,88 @@ def import_cmd(
             max_query_chars=MAX_QUERY_CHARS,
         )
 
+        # PERFORMANCE FIX: For resource types using manual pagination, fetch ALL target
+        # resources ONCE before the batch loop, then filter client-side per batch.
+        # Previously this fetch was inside the batch loop, causing O(N*M) API calls:
+        #   - 24,247 credentials: 186 batches x 122 pages = 22,692 API calls (2.6 hours)
+        #   - 78,000 job_templates: 600 batches x 390 pages = 234,000 API calls (27+ hours)
+        # With caching: O(M) API calls (just the target pages fetched once).
+        #   - 24,247 credentials: 122 pages = 122 API calls (~1 minute)
+        #   - 78,000 job_templates: 390 pages = 390 API calls (~3 minutes)
+        #
+        # BUGFIX context: list_resources() has an infinite loop bug where it strips
+        # query params during pagination (line 585 in aap_target_client.py).
+        # Manual pagination avoids this. See: Global-CTO/ORG_IMPORT_HANG_ROOT_CAUSE_ANALYSIS.md
+        MANUAL_PAGINATION_RESOURCE_TYPES = (
+            "organizations",
+            "credentials",
+            "projects",
+            "inventories",
+            "job_templates",
+            "workflow_job_templates",
+            "schedules",
+        )
+
+        # Cache: fetch all target resources once for manual-pagination types
+        cached_target_resources = None
+        if resource_type in MANUAL_PAGINATION_RESOURCE_TYPES:
+            logger.info(
+                "caching_target_resources_for_batch_precheck",
+                resource_type=resource_type,
+                num_batches=len(batches),
+                reason="Fetching target resources once to avoid O(N*M) API calls",
+            )
+
+            cached_target_resources = []
+            page = 1
+            MAX_PAGES = 500  # Safety limit to prevent infinite loops
+
+            endpoint = get_endpoint(resource_type)
+
+            while page <= MAX_PAGES:
+                params = {"page": page, "page_size": 200}
+
+                response = await client.get(endpoint, params=params)
+                results = response.get("results", [])
+                cached_target_resources.extend(results)
+
+                # Log progress every 50 pages for large datasets
+                if page % 50 == 0:
+                    logger.info(
+                        "target_cache_fetch_progress",
+                        resource_type=resource_type,
+                        pages_fetched=page,
+                        resources_fetched=len(cached_target_resources),
+                    )
+
+                if not response.get("next"):
+                    break
+
+                page += 1
+
+            if page > MAX_PAGES:
+                logger.error(
+                    "manual_pagination_limit_exceeded",
+                    resource_type=resource_type,
+                    max_pages=MAX_PAGES,
+                    resources_fetched=len(cached_target_resources),
+                )
+
+            logger.info(
+                "target_resources_cached",
+                resource_type=resource_type,
+                total_pages=page,
+                total_resources=len(cached_target_resources),
+            )
+
         for batch_idx, batch_identifiers in enumerate(batches):
             # Query target: GET /api/v2/{resource_type}/?{field}__in=val1,val2,val3
             filter_key = f"{identifier_field}__in"
             filters = {filter_key: ",".join(batch_identifiers)}
 
             try:
-                # BUGFIX: Use manual pagination for resource types with known infinite loop bug
-                # in list_resources() when target has >100 existing resources.
-                # Root cause: list_resources() strips query params during pagination (line 585 in aap_target_client.py)
-                # causing infinite loop that returns page 1 repeatedly.
-                # Temporary fix until list_resources() is corrected in core client.
-                # See: Global-CTO/ORG_IMPORT_HANG_ROOT_CAUSE_ANALYSIS.md for details
-                MANUAL_PAGINATION_RESOURCE_TYPES = (
-                    "organizations",
-                    "credentials",
-                    "projects",
-                    "inventories",
-                    "job_templates",
-                    "workflow_job_templates",
-                    "schedules",
-                )
-
-                if resource_type in MANUAL_PAGINATION_RESOURCE_TYPES:
-                    # Use manual pagination (same pattern as credential_comparator.py)
-                    # to avoid infinite loop bug in list_resources()
-                    logger.info(
-                        "using_manual_pagination_for_batch_precheck",
-                        resource_type=resource_type,
-                        batch_idx=batch_idx,
-                        batch_size=len(batch_identifiers),
-                        reason="Avoiding infinite loop bug in list_resources()",
-                    )
-
-                    # Fetch all resources from target with manual pagination
-                    all_target_resources = []
-                    page = 1
-                    MAX_PAGES = 500  # Safety limit to prevent infinite loops
-
-                    endpoint = get_endpoint(resource_type)
-
-                    while page <= MAX_PAGES:
-                        params = {"page": page, "page_size": 200}
-
-                        response = await client.get(endpoint, params=params)
-                        results = response.get("results", [])
-                        all_target_resources.extend(results)
-
-                        if not response.get("next"):
-                            break
-
-                        page += 1
-
-                    if page > MAX_PAGES:
-                        logger.error(
-                            "manual_pagination_limit_exceeded",
-                            resource_type=resource_type,
-                            max_pages=MAX_PAGES,
-                            resources_fetched=len(all_target_resources),
-                        )
-
-                    logger.info(
-                        "manual_pagination_completed",
-                        resource_type=resource_type,
-                        total_pages=page,
-                        total_resources=len(all_target_resources),
-                    )
-
-                    # Filter down to batch identifiers (client-side filtering)
+                if cached_target_resources is not None:
+                    # Use cached target resources - filter client-side per batch
                     # Normalize identifiers for matching (strip whitespace, case-insensitive)
                     batch_identifiers_normalized = {
                         str(ident).strip().lower() for ident in batch_identifiers if ident
@@ -1486,7 +1499,7 @@ def import_cmd(
 
                     existing_batch = [
                         resource
-                        for resource in all_target_resources
+                        for resource in cached_target_resources
                         if str(resource.get(identifier_field, "")).strip().lower()
                         in batch_identifiers_normalized
                     ]
@@ -1496,7 +1509,7 @@ def import_cmd(
                         resource_type=resource_type,
                         batch_idx=batch_idx,
                         batch_size=len(batch_identifiers),
-                        all_target_count=len(all_target_resources),
+                        all_target_count=len(cached_target_resources),
                         matched_count=len(existing_batch),
                     )
 
@@ -1874,133 +1887,22 @@ def import_cmd(
                         }
 
                         method_name = method_map.get(rtype)
-                        echo_info(f"📋 Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}")
+                        echo_info(f"Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}")
                         if method_name and hasattr(importer, method_name):
-                            # TEMPORARY FIX: Skip batch precheck for automation resources to avoid hang
-                            # TODO: Investigate why batch_precheck_resources blocks for these types
-                            if rtype in ("job_templates", "workflow_job_templates", "schedules"):
-                                echo_warning(f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using database check)")
-                                logger.warning(
-                                    "batch_precheck_skipped_temporary_fix",
-                                    resource_type=rtype,
-                                    message="Skipping batch precheck due to known hang issue, using database check instead"
-                                )
-
-                                # Database check to avoid re-importing already completed resources
-                                # This prevents "already exists" errors on re-runs while avoiding the API hang
-                                # CRITICAL FIX: Also verify target_id still exists in target AAP
-
-                                # Step 1: Query database for completed/skipped resources (sync)
-                                resources_needing_validation = []
-                                resources_to_import = []
-                                already_completed_count = 0
-
-                                with get_session(ctx.migration_state.database_url) as session:
-                                    for resource in transformed_resources:
-                                        source_id = resource.get("_source_id")
-
-                                        # Check if already successfully completed or intentionally skipped
-                                        existing = session.query(MigrationProgress).filter_by(
-                                            resource_type=rtype,
-                                            source_id=source_id
-                                        ).first()
-
-                                        # If completed/skipped, need to validate target still exists
-                                        if existing and existing.status in ("completed", "skipped") and existing.target_id:
-                                            resources_needing_validation.append({
-                                                "resource": resource,
-                                                "source_id": source_id,
-                                                "target_id": existing.target_id,
-                                                "status": existing.status,
-                                            })
-                                        elif existing and existing.status in ("completed", "skipped"):
-                                            # No target_id but marked completed/skipped (shouldn't happen)
-                                            # Skip anyway to be safe
-                                            already_completed_count += 1
-                                            logger.info(
-                                                "resource_already_processed_skip",
-                                                resource_type=rtype,
-                                                source_id=source_id,
-                                                status=existing.status,
-                                                target_id=None,
-                                                verified="no_target_id"
-                                            )
-                                        else:
-                                            # Not completed/skipped (pending, failed, or no record)
-                                            resources_to_import.append(resource)
-
-                                # Step 2: Validate target resources exist (async, outside session)
-                                endpoint = get_endpoint(rtype)
-                                for item in resources_needing_validation:
-                                    target_id = item["target_id"]
-                                    source_id = item["source_id"]
-                                    resource = item["resource"]
-
-                                    try:
-                                        # Quick existence check (will raise if not found)
-                                        await ctx.target_client.get(f"{endpoint}{target_id}/")
-                                        # Target exists - safe to skip
-                                        # Mark as skipped in database for accurate reporting
-                                        ctx.migration_state.mark_skipped(
-                                            resource_type=rtype,
-                                            source_id=source_id,
-                                            reason=f"Pre-existing in target (validated via database check)",
-                                            target_id=target_id,
-                                            target_name=resource.get("name"),
-                                            source_name=resource.get("name"),
-                                        )
-                                        already_completed_count += 1
-                                        logger.info(
-                                            "resource_already_processed_skip",
-                                            resource_type=rtype,
-                                            source_id=source_id,
-                                            target_id=target_id,
-                                            status=item["status"],
-                                            verified="target_exists"
-                                        )
-                                    except Exception as e:
-                                        # Target deleted from AAP - need to re-import
-                                        logger.warning(
-                                            "target_deleted_re_importing",
-                                            resource_type=rtype,
-                                            source_id=source_id,
-                                            target_id=target_id,
-                                            error=str(e),
-                                            action="clearing_status_and_reimporting"
-                                        )
-                                        # Add to import list
-                                        resources_to_import.append(resource)
-
-                                        # Clear database status (new session)
-                                        with get_session(ctx.migration_state.database_url) as session:
-                                            existing = session.query(MigrationProgress).filter_by(
-                                                resource_type=rtype,
-                                                source_id=source_id
-                                            ).first()
-                                            if existing:
-                                                existing.status = "pending"
-                                                existing.target_id = None
-                                                session.commit()
-
-                                logger.info(
-                                    "database_check_result",
-                                    resource_type=rtype,
-                                    total=len(transformed_resources),
-                                    already_completed=already_completed_count,
-                                    to_import=len(resources_to_import)
-                                )
-                            else:
-                                # Proactive batch pre-check: query target to find existing resources
-                                # This avoids "already exists" errors and shows accurate progress
-                                resources_to_import = await batch_precheck_resources(
-                                    resource_type=rtype,
-                                    resources=transformed_resources,
-                                    importer=importer,
-                                    client=ctx.target_client,
-                                    state=ctx.migration_state,
-                                    progress=progress,
-                                    phase_id=phase_id,
-                                )
+                            # Proactive batch pre-check: query target to find existing resources
+                            # This avoids "already exists" errors and shows accurate progress
+                            # NOTE: Previously job_templates/workflow_job_templates/schedules were
+                            # bypassed here due to O(N*M) hang bug. That bug is now fixed by
+                            # caching target resources before the batch loop in batch_precheck_resources().
+                            resources_to_import = await batch_precheck_resources(
+                                resource_type=rtype,
+                                resources=transformed_resources,
+                                importer=importer,
+                                client=ctx.target_client,
+                                state=ctx.migration_state,
+                                progress=progress,
+                                phase_id=phase_id,
+                            )
 
                             # Calculate skipped count (resources that already exist)
                             skipped_count = len(transformed_resources) - len(resources_to_import)
