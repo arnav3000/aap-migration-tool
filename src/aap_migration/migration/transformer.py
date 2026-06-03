@@ -2185,6 +2185,22 @@ class ScheduleTransformer(DataTransformer):
                             if key.startswith("ask_") and key.endswith("_on_launch"):
                                 launch_config[key] = bool(value)
 
+                        # CRITICAL FIX: Also capture survey_enabled for schedule extra_data validation
+                        # Schedules with survey-enabled templates must preserve survey variable values
+                        # even when ask_variables_on_launch=False
+                        launch_config["survey_enabled"] = bool(template.get("survey_enabled", False))
+
+                        # Extract survey variable names for granular filtering
+                        # Only preserve extra_data variables that are defined in the survey spec
+                        survey_spec = template.get("survey_spec")
+                        if survey_spec and isinstance(survey_spec, dict) and "spec" in survey_spec:
+                            survey_vars = set()
+                            for question in survey_spec["spec"]:
+                                if isinstance(question, dict) and "variable" in question:
+                                    survey_vars.add(question["variable"])
+                            if survey_vars:
+                                launch_config["_survey_vars"] = survey_vars
+
                         if launch_config:
                             cache[(resource_type, int(source_id))] = launch_config
 
@@ -2303,25 +2319,96 @@ class ScheduleTransformer(DataTransformer):
             if isinstance(value, dict) and not value:
                 continue
 
-            # Check if template allows this field to be overridden at launch
-            if not config.get(launch_flag, False):
-                removed_value = schedule_data.pop(field)
-                logger.warning(
-                    f"schedule_{field}_override_stripped"
-                    if field != "extra_data"
-                    else "schedule_extra_vars_stripped",
-                    source_id=source_id,
-                    source_name=source_name,
-                    ujt_type=ujt_type,
-                    ujt_id=ujt_id,
-                    field=field,
-                    launch_flag=launch_flag,
-                    removed_value_preview=str(removed_value)[:200],
-                    message=(
-                        f"Stripped '{field}' override from schedule - "
-                        f"template does not have '{launch_flag}' enabled"
-                    ),
-                )
+            # CRITICAL FIX: For extra_data, check survey_enabled as well
+            # In AAP 2.4, templates can have survey_enabled=True AND ask_variables_on_launch=False
+            # Survey variables must be preserved, but non-survey variables should be stripped
+            if field == "extra_data":
+                survey_enabled = config.get("survey_enabled", False)
+                ask_variables = config.get(launch_flag, False)
+
+                if ask_variables:
+                    # ask_variables_on_launch=True: keep all extra_data (unchanged behavior)
+                    pass
+                elif survey_enabled:
+                    # survey_enabled=True but ask_variables=False:
+                    # Only keep variables defined in the survey spec
+                    survey_vars = config.get("_survey_vars", set())
+                    if survey_vars and isinstance(value, dict):
+                        non_survey = {k: v for k, v in value.items() if k not in survey_vars}
+                        survey_only = {k: v for k, v in value.items() if k in survey_vars}
+
+                        if non_survey:
+                            # Strip non-survey variables
+                            for k in non_survey:
+                                value.pop(k)
+                            logger.warning(
+                                "schedule_non_survey_extra_vars_stripped",
+                                source_id=source_id,
+                                source_name=source_name,
+                                ujt_type=ujt_type,
+                                ujt_id=ujt_id,
+                                stripped_vars=list(non_survey.keys()),
+                                kept_vars=list(survey_only.keys()),
+                                message="Stripped non-survey variables from extra_data - template has survey_enabled but not ask_variables_on_launch",
+                            )
+
+                        # If all variables were stripped, remove the empty dict
+                        if not value:
+                            schedule_data.pop(field)
+
+                        if survey_only:
+                            logger.debug(
+                                "schedule_extra_vars_preserved_for_survey",
+                                source_id=source_id,
+                                source_name=source_name,
+                                ujt_type=ujt_type,
+                                ujt_id=ujt_id,
+                                survey_vars=list(survey_only.keys()),
+                                message="Preserved survey variables in extra_data",
+                            )
+                    else:
+                        # Survey enabled but no survey_spec available - be permissive
+                        logger.debug(
+                            "schedule_extra_vars_preserved_no_survey_spec",
+                            source_id=source_id,
+                            source_name=source_name,
+                            ujt_type=ujt_type,
+                            ujt_id=ujt_id,
+                            message="Survey enabled but no survey_spec available - preserving all extra_data",
+                        )
+                else:
+                    # Neither ask_variables nor survey enabled - strip all extra_data
+                    removed_value = schedule_data.pop(field)
+                    logger.warning(
+                        "schedule_extra_vars_stripped",
+                        source_id=source_id,
+                        source_name=source_name,
+                        ujt_type=ujt_type,
+                        ujt_id=ujt_id,
+                        field=field,
+                        launch_flag=launch_flag,
+                        removed_value_preview=str(removed_value)[:200],
+                        message="Stripped extra_data - template has neither survey nor ask_variables_on_launch enabled",
+                    )
+            else:
+                # For other fields (inventory, limit, etc.), original logic is correct
+                # These fields don't have survey interaction
+                if not config.get(launch_flag, False):
+                    removed_value = schedule_data.pop(field)
+                    logger.warning(
+                        f"schedule_{field}_override_stripped",
+                        source_id=source_id,
+                        source_name=source_name,
+                        ujt_type=ujt_type,
+                        ujt_id=ujt_id,
+                        field=field,
+                        launch_flag=launch_flag,
+                        removed_value_preview=str(removed_value)[:200],
+                        message=(
+                            f"Stripped '{field}' override from schedule - "
+                            f"template does not have '{launch_flag}' enabled"
+                        ),
+                    )
 
         return schedule_data
 
@@ -2582,6 +2669,22 @@ class WorkflowNodeTransformer(DataTransformer):
                             if key.startswith("ask_") and key.endswith("_on_launch"):
                                 launch_config[key] = bool(value)
 
+                        # CRITICAL FIX: Also capture survey_enabled for workflow node extra_data validation
+                        # Workflow nodes with survey-enabled templates must preserve survey variable values
+                        # even when ask_variables_on_launch=False
+                        launch_config["survey_enabled"] = bool(template.get("survey_enabled", False))
+
+                        # Extract survey variable names for granular filtering
+                        # Only preserve extra_data variables that are defined in the survey spec
+                        survey_spec = template.get("survey_spec")
+                        if survey_spec and isinstance(survey_spec, dict) and "spec" in survey_spec:
+                            survey_vars = set()
+                            for question in survey_spec["spec"]:
+                                if isinstance(question, dict) and "variable" in question:
+                                    survey_vars.add(question["variable"])
+                            if survey_vars:
+                                launch_config["_survey_vars"] = survey_vars
+
                         if launch_config:
                             cache[(resource_type, int(source_id))] = launch_config
 
@@ -2669,24 +2772,91 @@ class WorkflowNodeTransformer(DataTransformer):
             if isinstance(value, dict) and not value:
                 continue
 
-            # Check if template allows this field to be overridden at launch
-            if not config.get(launch_flag, False):
-                removed_value = node_data.pop(field)
-                logger.warning(
-                    f"workflow_node_{field}_override_stripped"
-                    if field != "extra_data"
-                    else "workflow_node_extra_vars_stripped",
-                    source_id=source_id,
-                    ujt_type=ujt_type,
-                    ujt_id=ujt_id,
-                    field=field,
-                    launch_flag=launch_flag,
-                    removed_value_preview=str(removed_value)[:200],
-                    message=(
-                        f"Stripped '{field}' override from workflow node - "
-                        f"template does not have '{launch_flag}' enabled"
-                    ),
-                )
+            # CRITICAL FIX: For extra_data, check survey_enabled as well
+            # In AAP 2.4, templates can have survey_enabled=True AND ask_variables_on_launch=False
+            # Survey variables must be preserved, but non-survey variables should be stripped
+            if field == "extra_data":
+                survey_enabled = config.get("survey_enabled", False)
+                ask_variables = config.get(launch_flag, False)
+
+                if ask_variables:
+                    # ask_variables_on_launch=True: keep all extra_data (unchanged behavior)
+                    pass
+                elif survey_enabled:
+                    # survey_enabled=True but ask_variables=False:
+                    # Only keep variables defined in the survey spec
+                    survey_vars = config.get("_survey_vars", set())
+                    if survey_vars and isinstance(value, dict):
+                        non_survey = {k: v for k, v in value.items() if k not in survey_vars}
+                        survey_only = {k: v for k, v in value.items() if k in survey_vars}
+
+                        if non_survey:
+                            # Strip non-survey variables
+                            for k in non_survey:
+                                value.pop(k)
+                            logger.warning(
+                                "workflow_node_non_survey_extra_vars_stripped",
+                                source_id=source_id,
+                                ujt_type=ujt_type,
+                                ujt_id=ujt_id,
+                                stripped_vars=list(non_survey.keys()),
+                                kept_vars=list(survey_only.keys()),
+                                message="Stripped non-survey variables from extra_data - template has survey_enabled but not ask_variables_on_launch",
+                            )
+
+                        # If all variables were stripped, remove the empty dict
+                        if not value:
+                            node_data.pop(field)
+
+                        if survey_only:
+                            logger.debug(
+                                "workflow_node_extra_vars_preserved_for_survey",
+                                source_id=source_id,
+                                ujt_type=ujt_type,
+                                ujt_id=ujt_id,
+                                survey_vars=list(survey_only.keys()),
+                                message="Preserved survey variables in extra_data",
+                            )
+                    else:
+                        # Survey enabled but no survey_spec available - be permissive
+                        logger.debug(
+                            "workflow_node_extra_vars_preserved_no_survey_spec",
+                            source_id=source_id,
+                            ujt_type=ujt_type,
+                            ujt_id=ujt_id,
+                            message="Survey enabled but no survey_spec available - preserving all extra_data",
+                        )
+                else:
+                    # Neither ask_variables nor survey enabled - strip all extra_data
+                    removed_value = node_data.pop(field)
+                    logger.warning(
+                        "workflow_node_extra_vars_stripped",
+                        source_id=source_id,
+                        ujt_type=ujt_type,
+                        ujt_id=ujt_id,
+                        field=field,
+                        launch_flag=launch_flag,
+                        removed_value_preview=str(removed_value)[:200],
+                        message="Stripped extra_data - template has neither survey nor ask_variables_on_launch enabled",
+                    )
+            else:
+                # For other fields (inventory, limit, etc.), original logic is correct
+                # These fields don't have survey interaction
+                if not config.get(launch_flag, False):
+                    removed_value = node_data.pop(field)
+                    logger.warning(
+                        f"workflow_node_{field}_override_stripped",
+                        source_id=source_id,
+                        ujt_type=ujt_type,
+                        ujt_id=ujt_id,
+                        field=field,
+                        launch_flag=launch_flag,
+                        removed_value_preview=str(removed_value)[:200],
+                        message=(
+                            f"Stripped '{field}' override from workflow node - "
+                            f"template does not have '{launch_flag}' enabled"
+                        ),
+                    )
 
         return node_data
 
