@@ -1421,15 +1421,25 @@ def import_cmd(
         #
         # BUGFIX context: list_resources() has an infinite loop bug where it strips
         # query params during pagination (line 585 in aap_target_client.py).
-        # Manual pagination avoids this. See: Global-CTO/ORG_IMPORT_HANG_ROOT_CAUSE_ANALYSIS.md
+        # Manual pagination avoids this infinite loop for high-volume resource types.
         MANUAL_PAGINATION_RESOURCE_TYPES = (
             "organizations",
+            "credential_types",
             "credentials",
+            "execution_environments",
             "projects",
             "inventories",
+            "inventory_sources",
+            "inventory_groups",
+            "hosts",
             "job_templates",
             "workflow_job_templates",
             "schedules",
+            "notification_templates",
+            "applications",
+            "users",
+            "teams",
+            "labels",
         )
 
         # Cache: fetch all target resources once for manual-pagination types
@@ -1514,8 +1524,9 @@ def import_cmd(
                     )
 
                 else:
-                    # Other resource types use existing list_resources()
-                    # (credential_types, teams, etc. - small datasets that don't trigger bug)
+                    # Fallback for resource types not in MANUAL_PAGINATION_RESOURCE_TYPES.
+                    # list_resources() pagination is now fixed (manual page increment),
+                    # but the cached approach above is preferred for performance.
                     existing_batch = await client.list_resources(
                         resource_type=resource_type, filters=filters
                     )
