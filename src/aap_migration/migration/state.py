@@ -1165,6 +1165,52 @@ class MigrationState:
                 )
                 raise StateError(f"Failed to get mapped ID: {e}") from e
 
+    def get_all_mappings_dict(
+        self,
+        resource_type: str,
+    ) -> dict[int, int]:
+        """
+        Get all source_id -> target_id mappings for a resource type as a dict.
+
+        Used for efficient bulk FK translation (e.g., in batch_precheck_resources).
+        Returns only mappings where target_id is not NULL.
+
+        Args:
+            resource_type: Type of resource (e.g., 'organizations', 'inventories')
+
+        Returns:
+            Dict mapping source_id -> target_id for all mapped resources
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    results = (
+                        session.query(IDMapping.source_id, IDMapping.target_id)
+                        .filter(
+                            IDMapping.resource_type == resource_type,
+                            IDMapping.target_id.isnot(None),
+                        )
+                        .all()
+                    )
+
+                    mapping_dict = {row[0]: row[1] for row in results}
+
+                    logger.debug(
+                        "loaded_all_mappings_dict",
+                        resource_type=resource_type,
+                        count=len(mapping_dict),
+                    )
+
+                    return mapping_dict
+
+            except Exception as e:
+                logger.error(
+                    "Failed to get all mappings dict",
+                    resource_type=resource_type,
+                    error=str(e),
+                )
+                raise StateError(f"Failed to get all mappings dict: {e}") from e
+
     def get_id_mapping(
         self,
         resource_type: str,

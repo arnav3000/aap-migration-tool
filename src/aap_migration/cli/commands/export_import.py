@@ -1252,6 +1252,46 @@ def import_cmd(
         resource_by_identifier = {}
         duplicates_skipped = []  # Track duplicates for reporting
 
+        # PRE-LOAD FK MAPPINGS: Load source_id -> target_id dicts for FK fields
+        # used in composite keys. This avoids O(N) database calls per resource.
+        # These mappings were created when parent resources (orgs, inventories, etc.)
+        # were imported earlier in the import order.
+        org_mappings = {}  # source_org_id -> target_org_id
+        cred_type_mappings = {}  # source_cred_type_id -> target_cred_type_id
+        parent_mappings = {}  # source_parent_id -> target_parent_id
+
+        if resource_type in ORGANIZATION_SCOPED_RESOURCES:
+            org_mappings = state.get_all_mappings_dict("organizations")
+            if resource_type == "credentials":
+                cred_type_mappings = state.get_all_mappings_dict("credential_types")
+            logger.info(
+                "loaded_fk_mappings_for_precheck",
+                resource_type=resource_type,
+                org_mappings_count=len(org_mappings),
+                cred_type_mappings_count=len(cred_type_mappings),
+            )
+        elif resource_type in PARENT_SCOPED_RESOURCES:
+            parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+            # Determine the resource type for the parent field
+            # e.g., "inventory" -> "inventories", "unified_job_template" -> need to check multiple types
+            parent_type_map = {
+                "inventory": "inventories",
+                "unified_job_template": None,  # Special case: multiple types
+            }
+            parent_resource_type = parent_type_map.get(parent_field)
+            if parent_resource_type:
+                parent_mappings = state.get_all_mappings_dict(parent_resource_type)
+            else:
+                # For unified_job_template, load mappings from all possible parent types
+                for ptype in ("job_templates", "workflow_job_templates", "projects", "inventory_sources"):
+                    parent_mappings.update(state.get_all_mappings_dict(ptype))
+            logger.info(
+                "loaded_fk_mappings_for_precheck",
+                resource_type=resource_type,
+                parent_field=parent_field,
+                parent_mappings_count=len(parent_mappings),
+            )
+
         for resource in resources:
             identifier = resource.get(identifier_field)
             source_id = resource.get("_source_id")
@@ -1259,12 +1299,17 @@ def import_cmd(
             parent_id = None  # Initialize parent_id for parent-scoped resources
             if identifier and source_id:
                 # Use composite key for organization-scoped resources to avoid duplicates
+                # CRITICAL: Translate source FK IDs to target FK IDs so keys match
+                # the target-side keys built from API responses (which use target IDs)
                 if resource_type in ORGANIZATION_SCOPED_RESOURCES:
-                    org = resource.get("organization")
+                    source_org = resource.get("organization")
+                    # Translate source org ID to target org ID for key matching
+                    org = org_mappings.get(source_org, source_org) if source_org is not None else None
                     # For credentials, include credential_type in uniqueness check
                     # AAP constraint: (name, organization, credential_type) must be unique
                     if resource_type == "credentials":
-                        cred_type = resource.get("credential_type")
+                        source_cred_type = resource.get("credential_type")
+                        cred_type = cred_type_mappings.get(source_cred_type, source_cred_type) if source_cred_type is not None else None
                         dict_key = (identifier, org, cred_type)
                     else:
                         # Other org-scoped resources: (name, org) is unique
@@ -1272,7 +1317,9 @@ def import_cmd(
                 elif resource_type in PARENT_SCOPED_RESOURCES:
                     # Parent-scoped resources: unique within parent (e.g., inventory_sources scoped to inventory)
                     parent_field = PARENT_SCOPED_RESOURCES[resource_type]
-                    parent_id = resource.get(parent_field)
+                    source_parent = resource.get(parent_field)
+                    # Translate source parent ID to target parent ID for key matching
+                    parent_id = parent_mappings.get(source_parent, source_parent) if source_parent is not None else None
                     dict_key = (identifier, parent_id) if parent_id is not None else identifier
                 else:
                     # Use name only for globally unique resources
