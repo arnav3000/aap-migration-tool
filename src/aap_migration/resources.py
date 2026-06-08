@@ -426,6 +426,9 @@ ORGANIZATION_SCOPED_RESOURCES = {
     "job_templates",
     "workflow_job_templates",
     "teams",
+    "notification_templates",
+    "execution_environments",
+    "labels",
 }
 
 # Parent-scoped resources: unique within parent resource
