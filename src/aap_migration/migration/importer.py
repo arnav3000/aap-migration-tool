@@ -33,6 +33,8 @@ ORGANIZATION_SCOPED_RESOURCES = {
     "job_templates",
     "workflow_job_templates",
     "notification_templates",
+    "execution_environments",
+    "labels",
 }
 
 # Resource types that REQUIRE an organization (cannot be global/None)
@@ -793,7 +795,25 @@ class ResourceImporter:
             return None
 
         try:
-            existing = await self.client.find_resource_by_name(resource_type, resource_name)
+            # For organization-scoped resources, filter by organization to find the
+            # correct resource (same name can exist in different organizations)
+            organization_id = None
+            parent_id = None
+            parent_field = None
+
+            if resource_type in ORGANIZATION_SCOPED_RESOURCES:
+                organization_id = data.get("organization")
+            elif resource_type in PARENT_SCOPED_RESOURCES:
+                parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+                parent_id = data.get(parent_field)
+
+            existing = await self.client.find_resource_by_name(
+                resource_type,
+                resource_name,
+                organization_id=organization_id,
+                parent_id=parent_id,
+                parent_field=parent_field,
+            )
 
             if existing:
                 # Compare resources to determine action
@@ -1400,7 +1420,7 @@ class UserImporter(ResourceImporter):
 
         except ConflictError as e:
             # Handle conflict (user already exists)
-            result = await self._handle_conflict(resource_type, source_id, data, e)
+            result = await self._handle_conflict(resource_type, source_id, data)
             if result:
                 self.stats["conflict_count"] += 1
             return result
@@ -2373,6 +2393,48 @@ class WorkflowNodeImporter(ResourceImporter):
 
                     # Return None to stop processing this broken node
                     return None
+
+            # Resolve inventory FK (optional override on workflow node)
+            if "inventory" in resolved and resolved["inventory"]:
+                inv_source_id = resolved["inventory"]
+                inv_target_id = self.state.get_mapped_id("inventories", inv_source_id)
+                if inv_target_id:
+                    resolved["inventory"] = inv_target_id
+                    logger.debug(
+                        "workflow_node_inventory_resolved",
+                        source_id=source_id,
+                        inv_source_id=inv_source_id,
+                        inv_target_id=inv_target_id,
+                    )
+                else:
+                    logger.warning(
+                        "workflow_node_inventory_unresolved",
+                        source_id=source_id,
+                        inv_source_id=inv_source_id,
+                    )
+                    # Remove unresolved inventory to allow partial import
+                    resolved.pop("inventory", None)
+
+            # Resolve execution_environment FK (optional override on workflow node)
+            if "execution_environment" in resolved and resolved["execution_environment"]:
+                ee_source_id = resolved["execution_environment"]
+                ee_target_id = self.state.get_mapped_id("execution_environments", ee_source_id)
+                if ee_target_id:
+                    resolved["execution_environment"] = ee_target_id
+                    logger.debug(
+                        "workflow_node_ee_resolved",
+                        source_id=source_id,
+                        ee_source_id=ee_source_id,
+                        ee_target_id=ee_target_id,
+                    )
+                else:
+                    logger.warning(
+                        "workflow_node_ee_unresolved",
+                        source_id=source_id,
+                        ee_source_id=ee_source_id,
+                    )
+                    # Remove unresolved EE to allow partial import
+                    resolved.pop("execution_environment", None)
 
             # Keep workflow_job_template in data (it's required for POST even though it's in the URL)
             # Just remove the source workflow ID tracking field
