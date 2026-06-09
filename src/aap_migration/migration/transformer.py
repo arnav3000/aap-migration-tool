@@ -2417,30 +2417,116 @@ class ScheduleTransformer(DataTransformer):
         return schedule_data
 
     @staticmethod
-    def _get_empty_value_for_type(var_type: str) -> Any:
-        """Return appropriate empty/default value for a survey variable type.
+    def _get_valid_default_value(var_spec: dict[str, Any]) -> Any:
+        """Return a valid default value that satisfies AAP 2.6 validation rules.
 
-        AAP 2.6 requires all required survey variables in schedule extra_data.
-        When a variable has no default defined, this provides a type-appropriate
-        placeholder value.
+        AAP 2.6 validates survey variable values against the survey spec's
+        constraints (min/max length, valid choices, type requirements).
+        This method generates values that will pass validation.
 
         Args:
-            var_type: Survey variable type (text, textarea, password, integer, float,
-                      multiplechoice, multiselect)
+            var_spec: Full survey variable specification dict containing
+                      type, default, min, max, choices, required fields.
 
         Returns:
-            Type-appropriate empty value
+            A value that satisfies AAP 2.6 validation for this variable.
         """
-        if var_type in ("text", "textarea", "password"):
-            return ""
-        elif var_type == "integer":
-            return 0
-        elif var_type == "float":
-            return 0.0
-        elif var_type in ("multiplechoice", "multiselect"):
-            return ""
+        var_type = var_spec.get("type", "text")
+        var_default = var_spec.get("default")
+        var_min = var_spec.get("min", 0)
+        var_max = var_spec.get("max", 1024)
+        var_choices = var_spec.get("choices", "")
+
+        # Parse choices: can be a list or newline-separated string
+        if isinstance(var_choices, list):
+            choices_list = [c for c in var_choices if c]
+        elif isinstance(var_choices, str) and var_choices.strip():
+            choices_list = [c.strip() for c in var_choices.split("\n") if c.strip()]
         else:
+            choices_list = []
+
+        # Ensure min is an int for length/value comparisons
+        try:
+            min_val = int(var_min) if var_min else 0
+        except (ValueError, TypeError):
+            min_val = 0
+
+        try:
+            max_val = int(var_max) if var_max else 1024
+        except (ValueError, TypeError):
+            max_val = 1024
+
+        if var_type == "password":
+            # Password defaults are always $encrypted$ from source (non-exportable).
+            # Generate a placeholder string that meets the minimum length requirement.
+            # Users MUST update with actual password after migration.
+            if min_val > 0:
+                return "x" * min_val
             return ""
+
+        elif var_type == "multiplechoice":
+            # Must be one of the defined choices
+            if choices_list:
+                # If default is a valid choice, use it
+                if var_default and var_default in choices_list:
+                    return var_default
+                # Otherwise pick the first valid choice
+                return choices_list[0]
+            # No choices defined (edge case) - return empty
+            return ""
+
+        elif var_type == "multiselect":
+            # Must be a list (AAP 2.6 enforces list type)
+            if choices_list:
+                # If default is already a valid choice string, wrap in list
+                if var_default and isinstance(var_default, str) and var_default in choices_list:
+                    return [var_default]
+                elif var_default and isinstance(var_default, list):
+                    # Already a list, validate entries
+                    valid = [c for c in var_default if c in choices_list]
+                    return valid if valid else [choices_list[0]]
+                # Pick the first choice
+                return [choices_list[0]]
+            return []
+
+        elif var_type in ("text", "textarea"):
+            # Check if default meets minimum length requirement
+            if var_default is not None and var_default != "" and var_default != "$encrypted$":
+                default_str = str(var_default)
+                if len(default_str) >= min_val:
+                    return default_str
+                # Pad to minimum length
+                return default_str + "x" * (min_val - len(default_str))
+            # No usable default - generate placeholder meeting min length
+            if min_val > 0:
+                return "x" * min_val
+            return ""
+
+        elif var_type == "integer":
+            # Value must be >= min and <= max
+            if var_default is not None and var_default != "":
+                try:
+                    val = int(var_default)
+                    if val >= min_val:
+                        return val
+                except (ValueError, TypeError):
+                    pass
+            # Use min as safe default
+            return min_val
+
+        elif var_type == "float":
+            # Value must be >= min and <= max
+            if var_default is not None and var_default != "":
+                try:
+                    val = float(var_default)
+                    if val >= float(min_val):
+                        return val
+                except (ValueError, TypeError):
+                    pass
+            return float(min_val)
+
+        # Unknown type - return default or empty string
+        return var_default if var_default is not None else ""
 
     def _inject_missing_survey_defaults(
         self,
@@ -2511,7 +2597,6 @@ class ScheduleTransformer(DataTransformer):
             var_name = var_spec.get("variable")
             var_type = var_spec.get("type", "text")
             var_required = var_spec.get("required", False)
-            var_default = var_spec.get("default")
 
             if not var_name:
                 continue
@@ -2524,30 +2609,48 @@ class ScheduleTransformer(DataTransformer):
                 # Variable already present - do not overwrite
                 continue
 
-            # Determine the value to inject
-            if var_type == "password":
-                # Password defaults are $encrypted$ which is not valid for import
-                # Use empty string - user must re-enter password after migration
-                default_value = ""
-            elif var_default is not None and var_default != "":
-                default_value = var_default
-            else:
-                # No default specified, use type-appropriate empty value
-                default_value = self._get_empty_value_for_type(var_type)
+            # Use validation-aware default generation that respects
+            # min/max length, valid choices, and type requirements
+            default_value = self._get_valid_default_value(var_spec)
 
             extra_data[var_name] = default_value
             injected_vars.append(var_name)
 
-            logger.warning(
-                "survey_variable_default_injected",
-                resource_type="schedules",
-                source_id=source_id,
-                source_name=source_name,
-                variable=var_name,
-                var_type=var_type,
-                injected_value=str(default_value)[:100] if var_type != "password" else "***",
-                reason="Required survey variable missing from source extra_data, injected default",
-            )
+            # Enhanced logging with validation context
+            var_min = var_spec.get("min", 0)
+            var_max = var_spec.get("max")
+            var_choices = var_spec.get("choices", "")
+
+            if var_type == "password":
+                # Special warning for password placeholders
+                placeholder_len = len(default_value) if isinstance(default_value, str) else 0
+                logger.warning(
+                    "survey_password_placeholder_injected",
+                    resource_type="schedules",
+                    source_id=source_id,
+                    source_name=source_name,
+                    variable=var_name,
+                    placeholder_length=placeholder_len,
+                    min_length=var_min,
+                    reason="Password values are encrypted in source AAP (non-exportable). "
+                           "Injected placeholder to satisfy validation. "
+                           "User MUST update with actual password after migration.",
+                )
+            else:
+                logger.warning(
+                    "survey_variable_default_injected",
+                    resource_type="schedules",
+                    source_id=source_id,
+                    source_name=source_name,
+                    variable=var_name,
+                    var_type=var_type,
+                    injected_value=str(default_value)[:100],
+                    min_constraint=var_min,
+                    max_constraint=var_max,
+                    has_choices=bool(var_choices),
+                    reason="Required survey variable missing from source extra_data - "
+                           "injected validation-compliant default",
+                )
 
         # Update schedule data if we injected anything
         if injected_vars:
