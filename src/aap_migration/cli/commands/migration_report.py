@@ -377,6 +377,8 @@ def _analyze_resource_type(
         "transform_skipped": [],
         "import_failed": [],
         "import_skipped": [],
+        # Phase-specific counts for accurate discrepancy calculation
+        "import_skipped_count": 0,
     }
 
     # Count exported resources (handle both flat and directory structure)
@@ -498,13 +500,20 @@ def _analyze_resource_type(
                         stats["transform_skipped"].append(skip_info)
                     elif record.phase == "import":
                         stats["import_skipped"].append(skip_info)
+                        stats["import_skipped_count"] += 1
 
     except Exception as e:
         logger.warning(f"Failed to query database for {resource_type}: {e}")
 
     # Calculate discrepancy (resources that are neither completed, failed, nor skipped)
+    # Use import_skipped_count (not total skipped_count) because transform-phase skips
+    # are NOT in the transformed files, so they shouldn't reduce the discrepancy.
+    # Include in_progress_count since those resources are being processed.
     stats["discrepancy"] = stats["transformed_count"] - (
-        stats["completed_count"] + stats["failed_count"] + stats["skipped_count"]
+        stats["completed_count"]
+        + stats["failed_count"]
+        + stats["import_skipped_count"]
+        + stats["in_progress_count"]
     )
 
     # Identify specific missing resources if there's a discrepancy
@@ -533,14 +542,15 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
     ]
 
     # Summary table
-    lines.append("| Resource Type | Exported | Transformed | Imported | Failed | Skipped | Discrepancy |")
-    lines.append("|---------------|----------|-------------|----------|--------|---------|-------------|")
+    lines.append("| Resource Type | Exported | Transformed | Imported | Failed | Skipped | In Progress | Discrepancy |")
+    lines.append("|---------------|----------|-------------|----------|--------|---------|-------------|-------------|")
 
     total_exported = 0
     total_transformed = 0
     total_imported = 0
     total_failed = 0
     total_skipped = 0
+    total_in_progress = 0
     total_discrepancy = 0
 
     for stats in report_data:
@@ -550,15 +560,17 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
         imported = stats["completed_count"]
         failed = stats["failed_count"]
         skipped = stats["skipped_count"]
+        in_progress = stats["in_progress_count"]
         discrepancy = stats["discrepancy"]
 
         # Format discrepancy with warning emoji if non-zero
         discrepancy_str = f"**{discrepancy}** ⚠️" if discrepancy != 0 else str(discrepancy)
         failed_str = f"**{failed}** ❌" if failed > 0 else str(failed)
         skipped_str = f"**{skipped}** ⏭️" if skipped > 0 else str(skipped)
+        in_progress_str = f"**{in_progress}** ⏳" if in_progress > 0 else str(in_progress)
 
         lines.append(
-            f"| {rtype} | {exported} | {transformed} | {imported} | {failed_str} | {skipped_str} | {discrepancy_str} |"
+            f"| {rtype} | {exported} | {transformed} | {imported} | {failed_str} | {skipped_str} | {in_progress_str} | {discrepancy_str} |"
         )
 
         total_exported += exported
@@ -566,15 +578,17 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
         total_imported += imported
         total_failed += failed
         total_skipped += skipped
+        total_in_progress += in_progress
         total_discrepancy += discrepancy
 
     # Totals row
     total_discrepancy_str = f"**{total_discrepancy}**" if total_discrepancy != 0 else str(total_discrepancy)
     total_failed_str = f"**{total_failed}**" if total_failed > 0 else str(total_failed)
     total_skipped_str = f"**{total_skipped}**" if total_skipped > 0 else str(total_skipped)
+    total_in_progress_str = f"**{total_in_progress}**" if total_in_progress > 0 else str(total_in_progress)
 
     lines.append(
-        f"| **TOTAL** | **{total_exported}** | **{total_transformed}** | **{total_imported}** | {total_failed_str} | {total_skipped_str} | {total_discrepancy_str} |"
+        f"| **TOTAL** | **{total_exported}** | **{total_transformed}** | **{total_imported}** | {total_failed_str} | {total_skipped_str} | {total_in_progress_str} | {total_discrepancy_str} |"
     )
 
     lines.append("")
@@ -1772,12 +1786,15 @@ def _print_summary(report_data: list[dict]) -> None:
         discrepancy = stats["discrepancy"]
         failed = stats["failed_count"]
         skipped = stats["skipped_count"]
+        in_progress = stats["in_progress_count"]
 
         # Color code based on status
         if failed > 0:
             status = click.style("FAILED", fg="red", bold=True)
         elif discrepancy > 0:
             status = click.style("WARNING", fg="yellow", bold=True)
+        elif in_progress > 0:
+            status = click.style("IN PROGRESS", fg="yellow")
         elif skipped > 0:
             status = click.style("SKIPPED", fg="cyan", bold=True)
         else:
@@ -1786,7 +1803,7 @@ def _print_summary(report_data: list[dict]) -> None:
         click.echo(
             f"{rtype:30s} | Exported: {stats['exported_count']:5d} | "
             f"Imported: {stats['completed_count']:5d} | "
-            f"Failed: {failed:4d} | Skipped: {skipped:4d} | Discrepancy: {discrepancy:4d} | {status}"
+            f"Failed: {failed:4d} | Skipped: {skipped:4d} | In Progress: {in_progress:4d} | Discrepancy: {discrepancy:4d} | {status}"
         )
 
     click.echo("=" * 100)
