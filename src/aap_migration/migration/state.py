@@ -696,6 +696,7 @@ class MigrationState:
                             progress.status = "completed"
                         progress.phase = "import"  # Mark phase as import when target_id is set
                         progress.target_id = target_id
+                        progress.error_message = None  # Clear any previous error (e.g., from a retry)
                         progress.completed_at = datetime.now(UTC)
 
                     # Update or create ID mapping IN THE SAME TRANSACTION
@@ -867,8 +868,6 @@ class MigrationState:
                             # Set target_id if provided (duplicate detection case)
                             if target_id is not None:
                                 progress.target_id = target_id
-                            if target_name is not None:
-                                progress.target_name = target_name
                             session.add(progress)
                         else:
                             raise StateError(
@@ -888,10 +887,39 @@ class MigrationState:
                         # Record target_id if duplicate was found (optional)
                         if target_id is not None:
                             progress.target_id = target_id
-                        if target_name is not None:
-                            progress.target_name = target_name
                         if source_name is not None:
                             progress.source_name = source_name
+
+                    # Update or create ID mapping when target_id is provided
+                    # (duplicate detection case - resource exists in target)
+                    # This mirrors mark_completed() to ensure FK resolution works
+                    # for dependent resources referencing skipped parents.
+                    if target_id is not None:
+                        mapping = (
+                            session.query(IDMapping)
+                            .filter_by(resource_type=resource_type, source_id=source_id)
+                            .first()
+                        )
+
+                        if mapping:
+                            # Update existing mapping
+                            mapping.target_id = target_id
+                            if target_name:
+                                mapping.target_name = target_name
+                            if progress.source_name:
+                                mapping.source_name = progress.source_name
+                            mapping.migration_progress_id = progress.id
+                        else:
+                            # Create new mapping
+                            mapping = IDMapping(
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                target_id=target_id,
+                                source_name=progress.source_name,
+                                target_name=target_name,
+                                migration_progress_id=progress.id,
+                            )
+                            session.add(mapping)
 
                     session.commit()
 
