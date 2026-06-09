@@ -2201,6 +2201,10 @@ class ScheduleTransformer(DataTransformer):
                             if survey_vars:
                                 launch_config["_survey_vars"] = survey_vars
 
+                            # Cache full survey spec for default injection
+                            # Required to fill in missing required survey variables
+                            launch_config["_survey_spec"] = survey_spec["spec"]
+
                         if launch_config:
                             cache[(resource_type, int(source_id))] = launch_config
 
@@ -2412,6 +2416,157 @@ class ScheduleTransformer(DataTransformer):
 
         return schedule_data
 
+    @staticmethod
+    def _get_empty_value_for_type(var_type: str) -> Any:
+        """Return appropriate empty/default value for a survey variable type.
+
+        AAP 2.6 requires all required survey variables in schedule extra_data.
+        When a variable has no default defined, this provides a type-appropriate
+        placeholder value.
+
+        Args:
+            var_type: Survey variable type (text, textarea, password, integer, float,
+                      multiplechoice, multiselect)
+
+        Returns:
+            Type-appropriate empty value
+        """
+        if var_type in ("text", "textarea", "password"):
+            return ""
+        elif var_type == "integer":
+            return 0
+        elif var_type == "float":
+            return 0.0
+        elif var_type in ("multiplechoice", "multiselect"):
+            return ""
+        else:
+            return ""
+
+    def _inject_missing_survey_defaults(
+        self,
+        schedule_data: dict[str, Any],
+        ujt_type: str,
+        ujt_id: int,
+    ) -> dict[str, Any]:
+        """Inject default values for required survey variables missing from extra_data.
+
+        AAP 2.6 requires ALL required survey variables to be present in
+        schedule extra_data at creation time. Source AAP 2.4 allowed schedules
+        to omit required survey variables from extra_data (they would use
+        the survey default at runtime). This method fills in those missing
+        variables with their defined defaults.
+
+        Only injects defaults for:
+        - Variables marked as required in the survey spec
+        - Variables NOT already present in extra_data (preserves existing values)
+
+        Args:
+            schedule_data: Schedule dict with potential extra_data
+            ujt_type: Resource type of the parent template
+            ujt_id: Source template ID
+
+        Returns:
+            Modified schedule_data with missing required survey defaults injected.
+        """
+        # Only applies to job_templates and workflow_job_templates
+        if ujt_type not in ("job_templates", "workflow_job_templates"):
+            return schedule_data
+
+        config = self._get_template_launch_config(ujt_type, ujt_id)
+        if config is None:
+            return schedule_data
+
+        # Only inject if survey is enabled
+        if not config.get("survey_enabled", False):
+            return schedule_data
+
+        # Get the full survey spec (cached in _load_template_launch_config)
+        survey_spec_list = config.get("_survey_spec")
+        if not survey_spec_list or not isinstance(survey_spec_list, list):
+            return schedule_data
+
+        source_id = schedule_data.get("_source_id") or schedule_data.get("id")
+        source_name = schedule_data.get("name")
+
+        # Get current extra_data (may be None, missing, or empty dict)
+        extra_data = schedule_data.get("extra_data")
+        if extra_data is None:
+            extra_data = {}
+        elif not isinstance(extra_data, dict):
+            # extra_data could be a JSON string in some edge cases
+            if isinstance(extra_data, str):
+                try:
+                    extra_data = json.loads(extra_data)
+                except (json.JSONDecodeError, TypeError):
+                    extra_data = {}
+            else:
+                extra_data = {}
+
+        injected_vars = []
+
+        for var_spec in survey_spec_list:
+            if not isinstance(var_spec, dict):
+                continue
+
+            var_name = var_spec.get("variable")
+            var_type = var_spec.get("type", "text")
+            var_required = var_spec.get("required", False)
+            var_default = var_spec.get("default")
+
+            if not var_name:
+                continue
+
+            # Only inject for required variables that are missing
+            if not var_required:
+                continue
+
+            if var_name in extra_data:
+                # Variable already present - do not overwrite
+                continue
+
+            # Determine the value to inject
+            if var_type == "password":
+                # Password defaults are $encrypted$ which is not valid for import
+                # Use empty string - user must re-enter password after migration
+                default_value = ""
+            elif var_default is not None and var_default != "":
+                default_value = var_default
+            else:
+                # No default specified, use type-appropriate empty value
+                default_value = self._get_empty_value_for_type(var_type)
+
+            extra_data[var_name] = default_value
+            injected_vars.append(var_name)
+
+            logger.warning(
+                "survey_variable_default_injected",
+                resource_type="schedules",
+                source_id=source_id,
+                source_name=source_name,
+                variable=var_name,
+                var_type=var_type,
+                injected_value=str(default_value)[:100] if var_type != "password" else "***",
+                reason="Required survey variable missing from source extra_data, injected default",
+            )
+
+        # Update schedule data if we injected anything
+        if injected_vars:
+            schedule_data["extra_data"] = extra_data
+            logger.info(
+                "survey_defaults_injected_summary",
+                resource_type="schedules",
+                source_id=source_id,
+                source_name=source_name,
+                ujt_type=ujt_type,
+                ujt_id=ujt_id,
+                injected_count=len(injected_vars),
+                injected_vars=injected_vars,
+                total_extra_data_vars=len(extra_data),
+                message="Injected default values for required survey variables missing from schedule extra_data",
+            )
+
+        return schedule_data
+
     def _apply_specific_transformations(
         self,
         data: dict[str, Any],
@@ -2421,13 +2576,20 @@ class ScheduleTransformer(DataTransformer):
 
         Strips non-promptable overrides from schedule data to prevent
         AAP 2.6 import failures due to strict launch config validation.
+        Then injects missing required survey variable defaults.
         """
         # Get template type and ID (set by _validate_dependencies)
         ujt_type = data.get("_ujt_resource_type")
         ujt_id = data.get("unified_job_template")
 
         if ujt_type and ujt_id:
+            # Step 1: Strip non-promptable overrides (existing behavior)
             data = self._strip_non_promptable_overrides(data, ujt_type, ujt_id)
+
+            # Step 2: Inject missing required survey variable defaults (new enhancement)
+            # This runs AFTER stripping so we don't inject variables that would be stripped.
+            # It ensures AAP 2.6 receives all required survey variables in extra_data.
+            data = self._inject_missing_survey_defaults(data, ujt_type, ujt_id)
 
         return data
 
