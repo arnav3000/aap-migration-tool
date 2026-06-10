@@ -2510,69 +2510,6 @@ class WorkflowNodeImporter(ResourceImporter):
         from aap_migration.migration.transformer import ScheduleTransformer
         return ScheduleTransformer._get_valid_default_value(var_spec)
 
-    @staticmethod
-    def _coerce_survey_value(value: Any, var_spec: dict[str, Any]) -> Any:
-        var_type = var_spec.get("type", "text")
-        var_choices = var_spec.get("choices", "")
-
-        if isinstance(var_choices, list):
-            choices_list = [c for c in var_choices if c]
-        elif isinstance(var_choices, str) and var_choices.strip():
-            choices_list = [c.strip() for c in var_choices.split("\n") if c.strip()]
-        else:
-            choices_list = []
-
-        if var_type == "multiplechoice":
-            if choices_list and str(value) not in choices_list:
-                from aap_migration.migration.transformer import ScheduleTransformer
-                return ScheduleTransformer._get_valid_default_value(var_spec)
-            return value
-
-        elif var_type == "multiselect":
-            if isinstance(value, str):
-                if choices_list and value in choices_list:
-                    return [value]
-                from aap_migration.migration.transformer import ScheduleTransformer
-                return ScheduleTransformer._get_valid_default_value(var_spec)
-            elif isinstance(value, list):
-                if choices_list:
-                    valid = [v for v in value if str(v) in choices_list]
-                    if valid:
-                        return valid
-                from aap_migration.migration.transformer import ScheduleTransformer
-                return ScheduleTransformer._get_valid_default_value(var_spec)
-            from aap_migration.migration.transformer import ScheduleTransformer
-            return ScheduleTransformer._get_valid_default_value(var_spec)
-
-        elif var_type in ("text", "textarea"):
-            if isinstance(value, list):
-                return str(value[0]) if value else ""
-            if isinstance(value, bool):
-                return str(value).lower()
-            return str(value) if value is not None else ""
-
-        elif var_type == "integer":
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                from aap_migration.migration.transformer import ScheduleTransformer
-                return ScheduleTransformer._get_valid_default_value(var_spec)
-
-        elif var_type == "float":
-            try:
-                return float(value)
-            except (ValueError, TypeError):
-                from aap_migration.migration.transformer import ScheduleTransformer
-                return ScheduleTransformer._get_valid_default_value(var_spec)
-
-        elif var_type == "password":
-            if isinstance(value, str) and ("encrypted" in value.lower() or value == ""):
-                from aap_migration.migration.transformer import ScheduleTransformer
-                return ScheduleTransformer._get_valid_default_value(var_spec)
-            return value
-
-        return value
-
     def _sanitize_node_extra_data(
         self,
         node_data: dict[str, Any],
@@ -2626,30 +2563,6 @@ class WorkflowNodeImporter(ResourceImporter):
                         reason="ask_variables_on_launch=False and survey not enabled",
                     )
                     extra_data = {}
-
-            if extra_data and survey_spec_list and isinstance(survey_spec_list, list):
-                spec_by_var = {
-                    s["variable"]: s for s in survey_spec_list
-                    if isinstance(s, dict) and "variable" in s
-                }
-                coerced_vars = []
-                for var_name in list(extra_data.keys()):
-                    if var_name not in spec_by_var:
-                        continue
-                    current_value = extra_data[var_name]
-                    coerced = self._coerce_survey_value(current_value, spec_by_var[var_name])
-                    if coerced != current_value:
-                        extra_data[var_name] = coerced
-                        coerced_vars.append(var_name)
-
-                if coerced_vars:
-                    logger.warning(
-                        "workflow_node_survey_values_coerced",
-                        source_id=source_id,
-                        ujt_type=ujt_type,
-                        ujt_id=ujt_source_id,
-                        coerced_vars=coerced_vars,
-                    )
 
             if survey_enabled and survey_spec_list:
                 injected_vars = []
