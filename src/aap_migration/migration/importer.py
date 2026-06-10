@@ -2505,17 +2505,17 @@ class WorkflowNodeImporter(ResourceImporter):
         cache = self._load_template_launch_config()
         return cache.get((ujt_type, int(ujt_id)))
 
-    @staticmethod
-    def _get_valid_default_value(var_spec: dict[str, Any]) -> Any:
-        from aap_migration.migration.transformer import ScheduleTransformer
-        return ScheduleTransformer._get_valid_default_value(var_spec)
-
     def _sanitize_node_extra_data(
         self,
         node_data: dict[str, Any],
         ujt_type: str,
         ujt_source_id: int,
     ) -> dict[str, Any]:
+        """Log workflow node overrides that may conflict with template launch config.
+
+        Data is preserved as-is and passed through to AAP 2.6. If the target
+        API rejects an override, the failure is captured in the migration report.
+        """
         if ujt_type not in ("job_templates", "workflow_job_templates"):
             return node_data
 
@@ -2524,75 +2524,8 @@ class WorkflowNodeImporter(ResourceImporter):
             return node_data
 
         source_id = node_data.get("_source_id") or node_data.get("id")
-        ask_variables = config.get("ask_variables_on_launch", False)
-        survey_enabled = config.get("survey_enabled", False)
-        survey_vars = config.get("_survey_vars", set())
-        survey_spec_list = config.get("_survey_spec", [])
-
-        extra_data = node_data.get("extra_data")
-        if extra_data is not None:
-            if isinstance(extra_data, str):
-                try:
-                    extra_data = json.loads(extra_data)
-                except (json.JSONDecodeError, TypeError):
-                    extra_data = {}
-            if not isinstance(extra_data, dict):
-                extra_data = {}
-
-            if extra_data:
-                if ask_variables:
-                    pass
-                elif survey_enabled and survey_vars:
-                    non_survey = {k for k in extra_data if k not in survey_vars}
-                    if non_survey:
-                        for k in non_survey:
-                            extra_data.pop(k)
-                        logger.warning(
-                            "workflow_node_non_survey_vars_stripped",
-                            source_id=source_id,
-                            ujt_type=ujt_type,
-                            ujt_id=ujt_source_id,
-                            stripped_vars=list(non_survey),
-                        )
-                else:
-                    logger.warning(
-                        "workflow_node_extra_data_stripped",
-                        source_id=source_id,
-                        ujt_type=ujt_type,
-                        ujt_id=ujt_source_id,
-                        reason="ask_variables_on_launch=False and survey not enabled",
-                    )
-                    extra_data = {}
-
-            if survey_enabled and survey_spec_list:
-                injected_vars = []
-                for var_spec in survey_spec_list:
-                    if not isinstance(var_spec, dict):
-                        continue
-                    var_name = var_spec.get("variable")
-                    if not var_name or not var_spec.get("required", False):
-                        continue
-                    if extra_data and var_name in extra_data:
-                        continue
-                    if extra_data is None:
-                        extra_data = {}
-                    extra_data[var_name] = self._get_valid_default_value(var_spec)
-                    injected_vars.append(var_name)
-
-                if injected_vars:
-                    logger.warning(
-                        "workflow_node_survey_defaults_injected",
-                        source_id=source_id,
-                        ujt_type=ujt_type,
-                        ujt_id=ujt_source_id,
-                        injected_vars=injected_vars,
-                    )
-
-            node_data["extra_data"] = extra_data if extra_data else None
 
         for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
-            if field == "extra_data":
-                continue
             if field not in node_data:
                 continue
             value = node_data[field]
@@ -2602,15 +2535,20 @@ class WorkflowNodeImporter(ResourceImporter):
                 continue
             if isinstance(value, dict) and not value:
                 continue
+
             if not config.get(launch_flag, False):
-                node_data.pop(field)
-                logger.warning(
-                    "workflow_node_field_override_stripped",
+                logger.info(
+                    f"workflow_node_{field}_override_preserved",
                     source_id=source_id,
                     field=field,
                     launch_flag=launch_flag,
                     ujt_type=ujt_type,
                     ujt_id=ujt_source_id,
+                    message=(
+                        f"Preserving '{field}' override as-is — template does not "
+                        f"have '{launch_flag}' enabled. If AAP 2.6 rejects this, "
+                        f"the failure will appear in the migration report."
+                    ),
                 )
 
         return node_data
