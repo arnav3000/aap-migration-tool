@@ -945,9 +945,105 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
             lines.append("---")
             lines.append("")
 
+    # Collect all failed resources across all resource types for pattern detection
+    all_failures = []
+    for stats in report_data:
+        for f in stats.get("failed_resources", []):
+            f_with_type = dict(f, resource_type=stats["resource_type"])
+            all_failures.append(f_with_type)
+
+    # Schedule/workflow node launch config advisory
+    prompt_on_launch_failures = [
+        f for f in all_failures
+        if f.get("error") and (
+            "not configured to prompt on launch" in f["error"].lower()
+            or "variables are not allowed on launch" in f["error"].lower()
+            or "field is not configured to prompt" in f["error"].lower()
+        )
+    ]
+    if prompt_on_launch_failures:
+        lines.append("## Schedule/Workflow Node Launch Config Conflicts")
+        lines.append("")
+        lines.append(
+            f"**{len(prompt_on_launch_failures)} resource(s)** failed because the schedule or workflow node "
+            f"contains overrides (extra_data, inventory, limit, job_tags, etc.) that the parent "
+            f"template does not allow via its 'Prompt on Launch' settings."
+        )
+        lines.append("")
+        lines.append("**Root Cause:** AAP 2.6 strictly validates that schedule/node overrides match the "
+                      "template's `ask_*_on_launch` configuration. AAP 2.4 was more permissive.")
+        lines.append("")
+        lines.append("**Remediation Options:**")
+        lines.append("1. In AAP 2.6, edit the parent job template and enable 'Prompt on Launch' "
+                      "for the required fields (inventory, variables, limit, etc.)")
+        lines.append("2. Re-run the schedule/workflow import after adjusting the template settings")
+        lines.append("3. Alternatively, manually recreate the schedules in AAP 2.6 with the correct overrides")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    # Missing required survey variables advisory
+    survey_var_failures = [
+        f for f in all_failures
+        if f.get("error") and (
+            "required" in f["error"].lower()
+            and ("survey" in f["error"].lower() or "extra_data" in f["error"].lower())
+        )
+    ]
+    if survey_var_failures:
+        lines.append("## Missing Required Survey Variables")
+        lines.append("")
+        lines.append(
+            f"**{len(survey_var_failures)} resource(s)** failed because the schedule or workflow node "
+            f"is missing required survey variables in `extra_data`."
+        )
+        lines.append("")
+        lines.append("**Root Cause:** AAP 2.6 requires ALL required survey variables to be present in "
+                      "schedule `extra_data` at creation time. AAP 2.4 allowed schedules to omit "
+                      "required variables (they would use the survey default at runtime).")
+        lines.append("")
+        lines.append("**Remediation Options:**")
+        lines.append("1. In source AAP 2.4, edit the schedule and provide values for all required survey variables")
+        lines.append("2. Re-export and re-run the migration")
+        lines.append("3. Alternatively, manually create the schedule in AAP 2.6 with all required survey values")
+        lines.append("")
+        lines.append("**Note:** Password-type survey variables cannot be exported from AAP 2.4 "
+                      "(they appear as `$encrypted$`). These must be manually set in AAP 2.6 after migration.")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    # Job template inventory requirement advisory
+    inventory_required_failures = [
+        f for f in all_failures
+        if f.get("error") and f.get("resource_type") == "job_templates" and (
+            ("inventory" in f["error"].lower() and "null" in f["error"].lower())
+            or ("inventory" in f["error"].lower() and "required" in f["error"].lower())
+        )
+    ]
+    if inventory_required_failures:
+        lines.append("## Job Template Inventory Requirement")
+        lines.append("")
+        lines.append(
+            f"**{len(inventory_required_failures)} job template(s)** failed because they have no default "
+            f"inventory and `ask_inventory_on_launch` is not enabled."
+        )
+        lines.append("")
+        lines.append("**Root Cause:** AAP 2.6 requires job templates to either have a default inventory "
+                      "OR have `ask_inventory_on_launch=true`. AAP 2.4 allowed templates with neither.")
+        lines.append("")
+        lines.append("**Remediation Options:**")
+        lines.append("1. In source AAP 2.4, edit the job template and either set a default inventory "
+                      "or enable 'Prompt on Launch' for inventory")
+        lines.append("2. Re-export and re-run the migration")
+        lines.append("3. Alternatively, manually create the job template in AAP 2.6 with the correct settings")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
     # Success message if everything is clean
     if total_failed == 0 and total_discrepancy == 0:
-        lines.append("## ✅ Migration Completed Successfully")
+        lines.append("## Migration Completed Successfully")
         lines.append("")
         lines.append(f"All {total_imported} resources were imported successfully with no failures or discrepancies.")
         lines.append("")
