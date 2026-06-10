@@ -921,6 +921,30 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
             lines.append("---")
             lines.append("")
 
+    # Host subscription limit advisory
+    host_stats = next((s for s in report_data if s["resource_type"] == "hosts"), None)
+    if host_stats and host_stats["failed_count"] > 0:
+        host_limit_failures = [
+            f for f in host_stats["failed_resources"]
+            if f.get("error") and "maximum number of" in f["error"].lower()
+        ]
+        if host_limit_failures:
+            lines.append("## Host Subscription Limit Detected")
+            lines.append("")
+            lines.append(f"**{len(host_limit_failures)} host(s)** failed due to AAP 2.6 organization host subscription limits.")
+            lines.append("")
+            lines.append("**Error:** *You have already reached the maximum number of hosts allowed for your organization.*")
+            lines.append("")
+            lines.append("**Required Actions:**")
+            lines.append("1. Check AAP 2.6 subscription settings and verify the host limit per organization")
+            lines.append("2. Contact your AAP administrator to increase the host limit if needed")
+            lines.append("3. Re-run host import after the subscription limit is adjusted")
+            lines.append("")
+            lines.append("**Note:** This is an AAP 2.6 subscription/license constraint, not a migration tool issue.")
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
     # Success message if everything is clean
     if total_failed == 0 and total_discrepancy == 0:
         lines.append("## ✅ Migration Completed Successfully")
