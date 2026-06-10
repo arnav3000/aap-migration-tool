@@ -1031,33 +1031,43 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
         )
     ]
     if survey_var_failures:
-        lines.append("## Missing Required Survey Variables")
+        lines.append("## Schedule Survey Variable Compatibility (AAP 2.4 → 2.6)")
         lines.append("")
         lines.append(
-            f"**{len(survey_var_failures)} resource(s)** failed because the schedule or workflow node "
-            f"is missing required survey variables in `extra_data`."
+            f"**{len(survey_var_failures)} schedule(s)** failed due to a behavioral difference "
+            f"between AAP 2.4 and AAP 2.6 in how schedules handle survey variables."
         )
         lines.append("")
         lines.append("### What happened")
         lines.append("")
         lines.append(
-            "In AAP 2.4, schedules could run without providing values for required survey variables — "
-            "the survey's own default values would be used at runtime. AAP 2.6 changed this behavior: "
-            "it now requires ALL required survey variables to be explicitly present in the schedule's "
-            "`extra_data` field at creation time. Schedules that relied on runtime defaults in AAP 2.4 "
-            "are rejected by AAP 2.6 with a `variables_needed_to_start` error listing each missing variable."
+            "In AAP, the **survey spec** (defined on the job/workflow template) and the **schedule** "
+            "are separate objects. The survey spec defines which variables exist, their types, defaults, "
+            "and whether they are required. The schedule's `extra_data` carries runtime variable overrides."
         )
         lines.append("")
         lines.append(
-            "The migration tool preserves source data exactly as-is without modification. "
-            "If a schedule was missing survey variables in AAP 2.4, those same missing variables "
-            "cause the import to fail in AAP 2.6, and the failure is reported here for manual resolution."
+            "**AAP 2.4 behavior:** Schedules only needed to include variables they wanted to override. "
+            "Any required survey variable not in the schedule's `extra_data` would use the survey's "
+            "default value at runtime. A schedule could carry just 1 variable even if the survey had 10."
+        )
+        lines.append("")
+        lines.append(
+            "**AAP 2.6 behavior:** Schedules must include ALL required survey variables in `extra_data` "
+            "at creation time, even if they match the survey defaults. AAP 2.6 rejects schedule creation "
+            "with a `variables_needed_to_start` error listing each missing variable name."
+        )
+        lines.append("")
+        lines.append(
+            "The migration tool preserves schedule data exactly as-is from AAP 2.4 without modification. "
+            "The survey specs are migrated separately. The schedule failures below are caused by AAP 2.6's "
+            "stricter validation, not missing data."
         )
         lines.append("")
         lines.append("### Affected Resources")
         lines.append("")
-        lines.append("| Source ID | Name | Missing Variables |")
-        lines.append("|-----------|------|-------------------|")
+        lines.append("| Source ID | Name | Variables in Schedule | Missing (Required by Survey) |")
+        lines.append("|-----------|------|----------------------|------------------------------|")
         for f in survey_var_failures:
             source_id = f.get("source_id", "N/A")
             name = f.get("source_name") or "N/A"
@@ -1067,28 +1077,30 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
                 vars_str = ", ".join(f"`{v}`" for v in missing_vars)
             else:
                 vars_str = error.replace("|", "\\|")[:200]
-            lines.append(f"| {source_id} | {name} | {vars_str} |")
+            lines.append(f"| {source_id} | {name} | *(partial — see AAP 2.4 source)* | {vars_str} |")
         lines.append("")
         lines.append("### Remediation Options")
         lines.append("")
         lines.append(
-            "1. **Update in source AAP 2.4** (recommended): Edit each affected schedule and "
-            "provide explicit values for the missing survey variables in `extra_data`. "
+            "1. **Re-create schedules in AAP 2.6** (recommended): After migration, manually create "
+            "the failed schedules in AAP 2.6 UI. AAP 2.6 will prompt for all required survey variable "
+            "values during schedule creation."
+        )
+        lines.append(
+            "2. **Update schedules in AAP 2.4 before migration**: Edit each affected schedule in the "
+            "AAP 2.4 UI and populate all required survey variables in the schedule's extra variables. "
             "Then re-export and re-run the migration."
         )
         lines.append(
-            "2. **Create manually in AAP 2.6**: After migration completes, manually create "
-            "the failed schedules in AAP 2.6 with all required survey variable values."
-        )
-        lines.append(
-            "3. **Adjust survey spec**: If the survey variables are no longer needed, "
-            "edit the job template survey in AAP 2.6 to mark them as optional (`required=false`)."
+            "3. **Mark survey variables as optional**: If certain survey variables are not needed for "
+            "scheduled runs, edit the template's survey in AAP 2.6 to set those variables as "
+            "optional (`required=false`), then re-run the schedule import."
         )
         lines.append("")
         lines.append(
             "**Note:** Password-type survey variables cannot be exported from AAP 2.4 "
             "(they appear as `$encrypted$`). Schedules referencing password survey variables "
-            "must have those values manually re-entered in AAP 2.6 after migration."
+            "will always need those values manually re-entered in AAP 2.6 after migration."
         )
         lines.append("")
         lines.append("---")
