@@ -2307,6 +2307,80 @@ class ScheduleTransformer(DataTransformer):
 
         return schedule_data
 
+    def _augment_survey_defaults(
+        self,
+        schedule_data: dict[str, Any],
+        ujt_type: str,
+        ujt_id: int,
+    ) -> dict[str, Any]:
+        """Fill in missing required survey variable defaults for AAP 2.6 compatibility.
+
+        AAP 2.4 allowed schedules to carry partial extra_data — missing required
+        survey variables used the survey's default at runtime. AAP 2.6 requires
+        ALL required survey variables in extra_data at schedule creation time.
+
+        This fills in the survey spec's own default values for any required
+        variable not already present in the schedule's extra_data, preserving
+        the effective runtime behavior from AAP 2.4.
+        """
+        config = self._get_template_launch_config(ujt_type, ujt_id)
+        if config is None:
+            return schedule_data
+        if not config.get("survey_enabled", False):
+            return schedule_data
+
+        survey_spec = config.get("_survey_spec")
+        if not survey_spec:
+            return schedule_data
+
+        extra_data = schedule_data.get("extra_data", {})
+        if isinstance(extra_data, str):
+            try:
+                extra_data = json.loads(extra_data) if extra_data else {}
+            except (json.JSONDecodeError, TypeError):
+                extra_data = {}
+
+        source_id = schedule_data.get("_source_id") or schedule_data.get("id")
+        augmented = []
+
+        for question in survey_spec:
+            var_name = question.get("variable")
+            if not var_name:
+                continue
+            if not question.get("required", False):
+                continue
+            if var_name in extra_data:
+                continue
+
+            default = question.get("default")
+            if default is None:
+                default = ""
+            q_type = question.get("type", "")
+
+            if q_type == "multiselect" and isinstance(default, str):
+                default = default.split("\n") if default else []
+
+            extra_data[var_name] = default
+            augmented.append(var_name)
+
+        if augmented:
+            schedule_data["extra_data"] = extra_data
+            logger.info(
+                "schedule_survey_defaults_augmented",
+                source_id=source_id,
+                source_name=schedule_data.get("name"),
+                ujt_type=ujt_type,
+                ujt_id=ujt_id,
+                augmented_vars=augmented,
+                count=len(augmented),
+                message=(
+                    f"Augmented extra_data with {len(augmented)} survey default(s) "
+                    f"for AAP 2.6 compatibility: {augmented}"
+                ),
+            )
+
+        return schedule_data
+
     def _apply_specific_transformations(
         self,
         data: dict[str, Any],
@@ -2314,7 +2388,8 @@ class ScheduleTransformer(DataTransformer):
     ) -> dict[str, Any]:
         """Apply schedule-specific transformations.
 
-        Logs potential launch config conflicts but preserves all data as-is.
+        Logs potential launch config conflicts and augments extra_data with
+        missing required survey variable defaults for AAP 2.6 compatibility.
         """
         # Get template type and ID (set by _validate_dependencies)
         ujt_type = data.get("_ujt_resource_type")
@@ -2322,6 +2397,7 @@ class ScheduleTransformer(DataTransformer):
 
         if ujt_type and ujt_id:
             data = self._strip_non_promptable_overrides(data, ujt_type, ujt_id)
+            data = self._augment_survey_defaults(data, ujt_type, ujt_id)
 
         return data
 
@@ -2578,6 +2654,7 @@ class WorkflowNodeTransformer(DataTransformer):
                                     survey_vars.add(question["variable"])
                             if survey_vars:
                                 launch_config["_survey_vars"] = survey_vars
+                                launch_config["_survey_spec"] = survey_spec["spec"]
 
                         if launch_config:
                             cache[(resource_type, int(source_id))] = launch_config
