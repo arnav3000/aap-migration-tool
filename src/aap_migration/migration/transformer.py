@@ -1369,17 +1369,6 @@ class JobTemplateTransformer(DataTransformer):
         """
         source_id = data.get("_source_id") or data.get("id")
 
-        # Auto-enable ask_inventory_on_launch for templates without default inventory
-        # AAP 2.6 requires either a default inventory OR ask_inventory_on_launch=true
-        if not data.get("inventory") and not data.get("ask_inventory_on_launch"):
-            data["ask_inventory_on_launch"] = True
-            logger.info(
-                "enabled_ask_inventory_on_launch",
-                source_id=source_id,
-                source_name=data.get("name"),
-                message="Enabled ask_inventory_on_launch because template has no default inventory (AAP 2.6 requirement)",
-            )
-
         # Handle execution environment migration
         if "custom_virtualenv" in data and "execution_environment" not in data:
             # Mark that this needs an execution environment
@@ -2272,50 +2261,27 @@ class ScheduleTransformer(DataTransformer):
         ujt_type: str,
         ujt_id: int,
     ) -> dict[str, Any]:
-        """Remove schedule overrides that the template doesn't allow.
+        """Log schedule overrides that may conflict with template launch config.
 
-        AAP 2.6 strictly validates that schedule overrides match the template's
-        'Prompt on Launch' configuration. This method strips fields that would
-        cause import failures like:
-        - 'inventory: Field is not configured to prompt on launch.'
-        - 'extra_data: Variables are not allowed on launch.'
-
-        Args:
-            schedule_data: Schedule dict with potential overrides
-            ujt_type: Resource type of the template
-            ujt_id: Source template ID
-
-        Returns:
-            Modified schedule_data with non-promptable fields removed.
+        Data is preserved as-is and passed through to AAP 2.6. If the target
+        API rejects an override, the failure is captured in the migration report
+        with the exact validation error for manual remediation.
         """
-        # Only check job_templates and workflow_job_templates
-        # Projects and inventory_sources don't have schedule launch overrides
         if ujt_type not in ("job_templates", "workflow_job_templates"):
             return schedule_data
 
         config = self._get_template_launch_config(ujt_type, ujt_id)
         if config is None:
-            logger.debug(
-                "schedule_prompt_check_skipped",
-                source_id=schedule_data.get("_source_id") or schedule_data.get("id"),
-                source_name=schedule_data.get("name"),
-                ujt_type=ujt_type,
-                ujt_id=ujt_id,
-                message="Template launch config not found - skipping prompt-on-launch check",
-            )
             return schedule_data
 
         source_id = schedule_data.get("_source_id") or schedule_data.get("id")
         source_name = schedule_data.get("name")
 
-        # Check each overridable field
         for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
             if field not in schedule_data:
                 continue
 
             value = schedule_data[field]
-
-            # Skip if value is None or empty - nothing to strip
             if value is None:
                 continue
             if isinstance(value, str) and not value.strip():
@@ -2323,350 +2289,21 @@ class ScheduleTransformer(DataTransformer):
             if isinstance(value, dict) and not value:
                 continue
 
-            # CRITICAL FIX: For extra_data, check survey_enabled as well
-            # In AAP 2.4, templates can have survey_enabled=True AND ask_variables_on_launch=False
-            # Survey variables must be preserved, but non-survey variables should be stripped
-            if field == "extra_data":
-                survey_enabled = config.get("survey_enabled", False)
-                ask_variables = config.get(launch_flag, False)
-
-                if ask_variables:
-                    # ask_variables_on_launch=True: keep all extra_data (unchanged behavior)
-                    pass
-                elif survey_enabled:
-                    # survey_enabled=True but ask_variables=False:
-                    # Only keep variables defined in the survey spec
-                    survey_vars = config.get("_survey_vars", set())
-                    if survey_vars and isinstance(value, dict):
-                        non_survey = {k: v for k, v in value.items() if k not in survey_vars}
-                        survey_only = {k: v for k, v in value.items() if k in survey_vars}
-
-                        if non_survey:
-                            # Strip non-survey variables
-                            for k in non_survey:
-                                value.pop(k)
-                            logger.warning(
-                                "schedule_non_survey_extra_vars_stripped",
-                                source_id=source_id,
-                                source_name=source_name,
-                                ujt_type=ujt_type,
-                                ujt_id=ujt_id,
-                                stripped_vars=list(non_survey.keys()),
-                                kept_vars=list(survey_only.keys()),
-                                message="Stripped non-survey variables from extra_data - template has survey_enabled but not ask_variables_on_launch",
-                            )
-
-                        # If all variables were stripped, remove the empty dict
-                        if not value:
-                            schedule_data.pop(field)
-
-                        if survey_only:
-                            logger.debug(
-                                "schedule_extra_vars_preserved_for_survey",
-                                source_id=source_id,
-                                source_name=source_name,
-                                ujt_type=ujt_type,
-                                ujt_id=ujt_id,
-                                survey_vars=list(survey_only.keys()),
-                                message="Preserved survey variables in extra_data",
-                            )
-                    else:
-                        # Survey enabled but no survey_spec available - be permissive
-                        logger.debug(
-                            "schedule_extra_vars_preserved_no_survey_spec",
-                            source_id=source_id,
-                            source_name=source_name,
-                            ujt_type=ujt_type,
-                            ujt_id=ujt_id,
-                            message="Survey enabled but no survey_spec available - preserving all extra_data",
-                        )
-                else:
-                    # Neither ask_variables nor survey enabled - strip all extra_data
-                    removed_value = schedule_data.pop(field)
-                    logger.warning(
-                        "schedule_extra_vars_stripped",
-                        source_id=source_id,
-                        source_name=source_name,
-                        ujt_type=ujt_type,
-                        ujt_id=ujt_id,
-                        field=field,
-                        launch_flag=launch_flag,
-                        removed_value_preview=str(removed_value)[:200],
-                        message="Stripped extra_data - template has neither survey nor ask_variables_on_launch enabled",
-                    )
-            else:
-                # For other fields (inventory, limit, etc.), original logic is correct
-                # These fields don't have survey interaction
-                if not config.get(launch_flag, False):
-                    removed_value = schedule_data.pop(field)
-                    logger.warning(
-                        f"schedule_{field}_override_stripped",
-                        source_id=source_id,
-                        source_name=source_name,
-                        ujt_type=ujt_type,
-                        ujt_id=ujt_id,
-                        field=field,
-                        launch_flag=launch_flag,
-                        removed_value_preview=str(removed_value)[:200],
-                        message=(
-                            f"Stripped '{field}' override from schedule - "
-                            f"template does not have '{launch_flag}' enabled"
-                        ),
-                    )
-
-        return schedule_data
-
-    @staticmethod
-    def _get_valid_default_value(var_spec: dict[str, Any]) -> Any:
-        """Return a valid default value that satisfies AAP 2.6 validation rules.
-
-        AAP 2.6 validates survey variable values against the survey spec's
-        constraints (min/max length, valid choices, type requirements).
-        This method generates values that will pass validation.
-
-        Args:
-            var_spec: Full survey variable specification dict containing
-                      type, default, min, max, choices, required fields.
-
-        Returns:
-            A value that satisfies AAP 2.6 validation for this variable.
-        """
-        var_type = var_spec.get("type", "text")
-        var_default = var_spec.get("default")
-        var_min = var_spec.get("min", 0)
-        var_max = var_spec.get("max", 1024)
-        var_choices = var_spec.get("choices", "")
-
-        # Parse choices: can be a list or newline-separated string
-        if isinstance(var_choices, list):
-            choices_list = [c for c in var_choices if c]
-        elif isinstance(var_choices, str) and var_choices.strip():
-            choices_list = [c.strip() for c in var_choices.split("\n") if c.strip()]
-        else:
-            choices_list = []
-
-        # Ensure min is an int for length/value comparisons
-        try:
-            min_val = int(var_min) if var_min else 0
-        except (ValueError, TypeError):
-            min_val = 0
-
-        try:
-            max_val = int(var_max) if var_max else 1024
-        except (ValueError, TypeError):
-            max_val = 1024
-
-        if var_type == "password":
-            # Password defaults are always $encrypted$ from source (non-exportable).
-            # Generate a placeholder string that meets the minimum length requirement.
-            # Users MUST update with actual password after migration.
-            if min_val > 0:
-                return "x" * min_val
-            return ""
-
-        elif var_type == "multiplechoice":
-            # Must be one of the defined choices
-            if choices_list:
-                # If default is a valid choice, use it
-                if var_default and var_default in choices_list:
-                    return var_default
-                # Otherwise pick the first valid choice
-                return choices_list[0]
-            # No choices defined (edge case) - return empty
-            return ""
-
-        elif var_type == "multiselect":
-            # Must be a list (AAP 2.6 enforces list type)
-            if choices_list:
-                # If default is already a valid choice string, wrap in list
-                if var_default and isinstance(var_default, str) and var_default in choices_list:
-                    return [var_default]
-                elif var_default and isinstance(var_default, list):
-                    # Already a list, validate entries
-                    valid = [c for c in var_default if c in choices_list]
-                    return valid if valid else [choices_list[0]]
-                # Pick the first choice
-                return [choices_list[0]]
-            return []
-
-        elif var_type in ("text", "textarea"):
-            # Check if default meets minimum length requirement
-            if var_default is not None and var_default != "" and var_default != "$encrypted$":
-                default_str = str(var_default)
-                if len(default_str) >= min_val:
-                    return default_str
-                # Pad to minimum length
-                return default_str + "x" * (min_val - len(default_str))
-            # No usable default - generate placeholder meeting min length
-            if min_val > 0:
-                return "x" * min_val
-            return ""
-
-        elif var_type == "integer":
-            # Value must be >= min and <= max
-            if var_default is not None and var_default != "":
-                try:
-                    val = int(var_default)
-                    if val >= min_val:
-                        return val
-                except (ValueError, TypeError):
-                    pass
-            # Use min as safe default
-            return min_val
-
-        elif var_type == "float":
-            # Value must be >= min and <= max
-            if var_default is not None and var_default != "":
-                try:
-                    val = float(var_default)
-                    if val >= float(min_val):
-                        return val
-                except (ValueError, TypeError):
-                    pass
-            return float(min_val)
-
-        # Unknown type - return default or empty string
-        return var_default if var_default is not None else ""
-
-    def _inject_missing_survey_defaults(
-        self,
-        schedule_data: dict[str, Any],
-        ujt_type: str,
-        ujt_id: int,
-    ) -> dict[str, Any]:
-        """Inject default values for required survey variables missing from extra_data.
-
-        AAP 2.6 requires ALL required survey variables to be present in
-        schedule extra_data at creation time. Source AAP 2.4 allowed schedules
-        to omit required survey variables from extra_data (they would use
-        the survey default at runtime). This method fills in those missing
-        variables with their defined defaults.
-
-        Only injects defaults for:
-        - Variables marked as required in the survey spec
-        - Variables NOT already present in extra_data (preserves existing values)
-
-        Args:
-            schedule_data: Schedule dict with potential extra_data
-            ujt_type: Resource type of the parent template
-            ujt_id: Source template ID
-
-        Returns:
-            Modified schedule_data with missing required survey defaults injected.
-        """
-        # Only applies to job_templates and workflow_job_templates
-        if ujt_type not in ("job_templates", "workflow_job_templates"):
-            return schedule_data
-
-        config = self._get_template_launch_config(ujt_type, ujt_id)
-        if config is None:
-            return schedule_data
-
-        # Only inject if survey is enabled
-        if not config.get("survey_enabled", False):
-            return schedule_data
-
-        # Get the full survey spec (cached in _load_template_launch_config)
-        survey_spec_list = config.get("_survey_spec")
-        if not survey_spec_list or not isinstance(survey_spec_list, list):
-            return schedule_data
-
-        source_id = schedule_data.get("_source_id") or schedule_data.get("id")
-        source_name = schedule_data.get("name")
-
-        # Get current extra_data (may be None, missing, or empty dict)
-        extra_data = schedule_data.get("extra_data")
-        if extra_data is None:
-            extra_data = {}
-        elif not isinstance(extra_data, dict):
-            # extra_data could be a JSON string in some edge cases
-            if isinstance(extra_data, str):
-                try:
-                    extra_data = json.loads(extra_data)
-                except (json.JSONDecodeError, TypeError):
-                    extra_data = {}
-            else:
-                extra_data = {}
-
-        injected_vars = []
-
-        for var_spec in survey_spec_list:
-            if not isinstance(var_spec, dict):
-                continue
-
-            var_name = var_spec.get("variable")
-            var_type = var_spec.get("type", "text")
-            var_required = var_spec.get("required", False)
-
-            if not var_name:
-                continue
-
-            # Only inject for required variables that are missing
-            if not var_required:
-                continue
-
-            if var_name in extra_data:
-                # Variable already present - do not overwrite
-                continue
-
-            # Use validation-aware default generation that respects
-            # min/max length, valid choices, and type requirements
-            default_value = self._get_valid_default_value(var_spec)
-
-            extra_data[var_name] = default_value
-            injected_vars.append(var_name)
-
-            # Enhanced logging with validation context
-            var_min = var_spec.get("min", 0)
-            var_max = var_spec.get("max")
-            var_choices = var_spec.get("choices", "")
-
-            if var_type == "password":
-                # Special warning for password placeholders
-                placeholder_len = len(default_value) if isinstance(default_value, str) else 0
-                logger.warning(
-                    "survey_password_placeholder_injected",
-                    resource_type="schedules",
+            if not config.get(launch_flag, False):
+                logger.info(
+                    f"schedule_{field}_override_preserved",
                     source_id=source_id,
                     source_name=source_name,
-                    variable=var_name,
-                    placeholder_length=placeholder_len,
-                    min_length=var_min,
-                    reason="Password values are encrypted in source AAP (non-exportable). "
-                           "Injected placeholder to satisfy validation. "
-                           "User MUST update with actual password after migration.",
+                    ujt_type=ujt_type,
+                    ujt_id=ujt_id,
+                    field=field,
+                    launch_flag=launch_flag,
+                    message=(
+                        f"Preserving '{field}' override as-is — template does not "
+                        f"have '{launch_flag}' enabled. If AAP 2.6 rejects this, "
+                        f"the failure will appear in the migration report."
+                    ),
                 )
-            else:
-                logger.warning(
-                    "survey_variable_default_injected",
-                    resource_type="schedules",
-                    source_id=source_id,
-                    source_name=source_name,
-                    variable=var_name,
-                    var_type=var_type,
-                    injected_value=str(default_value)[:100],
-                    min_constraint=var_min,
-                    max_constraint=var_max,
-                    has_choices=bool(var_choices),
-                    reason="Required survey variable missing from source extra_data - "
-                           "injected validation-compliant default",
-                )
-
-        # Update schedule data if we injected anything
-        if injected_vars:
-            schedule_data["extra_data"] = extra_data
-            logger.info(
-                "survey_defaults_injected_summary",
-                resource_type="schedules",
-                source_id=source_id,
-                source_name=source_name,
-                ujt_type=ujt_type,
-                ujt_id=ujt_id,
-                injected_count=len(injected_vars),
-                injected_vars=injected_vars,
-                total_extra_data_vars=len(extra_data),
-                message="Injected default values for required survey variables missing from schedule extra_data",
-            )
 
         return schedule_data
 
@@ -2677,22 +2314,14 @@ class ScheduleTransformer(DataTransformer):
     ) -> dict[str, Any]:
         """Apply schedule-specific transformations.
 
-        Strips non-promptable overrides from schedule data to prevent
-        AAP 2.6 import failures due to strict launch config validation.
-        Then injects missing required survey variable defaults.
+        Logs potential launch config conflicts but preserves all data as-is.
         """
         # Get template type and ID (set by _validate_dependencies)
         ujt_type = data.get("_ujt_resource_type")
         ujt_id = data.get("unified_job_template")
 
         if ujt_type and ujt_id:
-            # Step 1: Strip non-promptable overrides (existing behavior)
             data = self._strip_non_promptable_overrides(data, ujt_type, ujt_id)
-
-            # Step 2: Inject missing required survey variable defaults (new enhancement)
-            # This runs AFTER stripping so we don't inject variables that would be stripped.
-            # It ensures AAP 2.6 receives all required survey variables in extra_data.
-            data = self._inject_missing_survey_defaults(data, ujt_type, ujt_id)
 
         return data
 
@@ -2991,45 +2620,25 @@ class WorkflowNodeTransformer(DataTransformer):
         ujt_type: str,
         ujt_id: int,
     ) -> dict[str, Any]:
-        """Remove workflow node overrides that the template doesn't allow.
+        """Log workflow node overrides that may conflict with template launch config.
 
-        AAP 2.6 strictly validates that workflow node overrides match the template's
-        'Prompt on Launch' configuration. This method strips fields that would
-        cause import failures.
-
-        Args:
-            node_data: Workflow node dict with potential overrides
-            ujt_type: Resource type of the template
-            ujt_id: Source template ID
-
-        Returns:
-            Modified node_data with non-promptable fields removed.
+        Data is preserved as-is and passed through to AAP 2.6. If the target
+        API rejects an override, the failure is captured in the migration report.
         """
-        # Only check job_templates and workflow_job_templates
         if ujt_type not in ("job_templates", "workflow_job_templates"):
             return node_data
 
         config = self._get_template_launch_config(ujt_type, ujt_id)
         if config is None:
-            logger.debug(
-                "workflow_node_prompt_check_skipped",
-                source_id=node_data.get("_source_id") or node_data.get("id"),
-                ujt_type=ujt_type,
-                ujt_id=ujt_id,
-                message="Template launch config not found - skipping prompt-on-launch check",
-            )
             return node_data
 
         source_id = node_data.get("_source_id") or node_data.get("id")
 
-        # Check each overridable field
         for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
             if field not in node_data:
                 continue
 
             value = node_data[field]
-
-            # Skip if value is None or empty - nothing to strip
             if value is None:
                 continue
             if isinstance(value, str) and not value.strip():
@@ -3037,91 +2646,20 @@ class WorkflowNodeTransformer(DataTransformer):
             if isinstance(value, dict) and not value:
                 continue
 
-            # CRITICAL FIX: For extra_data, check survey_enabled as well
-            # In AAP 2.4, templates can have survey_enabled=True AND ask_variables_on_launch=False
-            # Survey variables must be preserved, but non-survey variables should be stripped
-            if field == "extra_data":
-                survey_enabled = config.get("survey_enabled", False)
-                ask_variables = config.get(launch_flag, False)
-
-                if ask_variables:
-                    # ask_variables_on_launch=True: keep all extra_data (unchanged behavior)
-                    pass
-                elif survey_enabled:
-                    # survey_enabled=True but ask_variables=False:
-                    # Only keep variables defined in the survey spec
-                    survey_vars = config.get("_survey_vars", set())
-                    if survey_vars and isinstance(value, dict):
-                        non_survey = {k: v for k, v in value.items() if k not in survey_vars}
-                        survey_only = {k: v for k, v in value.items() if k in survey_vars}
-
-                        if non_survey:
-                            # Strip non-survey variables
-                            for k in non_survey:
-                                value.pop(k)
-                            logger.warning(
-                                "workflow_node_non_survey_extra_vars_stripped",
-                                source_id=source_id,
-                                ujt_type=ujt_type,
-                                ujt_id=ujt_id,
-                                stripped_vars=list(non_survey.keys()),
-                                kept_vars=list(survey_only.keys()),
-                                message="Stripped non-survey variables from extra_data - template has survey_enabled but not ask_variables_on_launch",
-                            )
-
-                        # If all variables were stripped, remove the empty dict
-                        if not value:
-                            node_data.pop(field)
-
-                        if survey_only:
-                            logger.debug(
-                                "workflow_node_extra_vars_preserved_for_survey",
-                                source_id=source_id,
-                                ujt_type=ujt_type,
-                                ujt_id=ujt_id,
-                                survey_vars=list(survey_only.keys()),
-                                message="Preserved survey variables in extra_data",
-                            )
-                    else:
-                        # Survey enabled but no survey_spec available - be permissive
-                        logger.debug(
-                            "workflow_node_extra_vars_preserved_no_survey_spec",
-                            source_id=source_id,
-                            ujt_type=ujt_type,
-                            ujt_id=ujt_id,
-                            message="Survey enabled but no survey_spec available - preserving all extra_data",
-                        )
-                else:
-                    # Neither ask_variables nor survey enabled - strip all extra_data
-                    removed_value = node_data.pop(field)
-                    logger.warning(
-                        "workflow_node_extra_vars_stripped",
-                        source_id=source_id,
-                        ujt_type=ujt_type,
-                        ujt_id=ujt_id,
-                        field=field,
-                        launch_flag=launch_flag,
-                        removed_value_preview=str(removed_value)[:200],
-                        message="Stripped extra_data - template has neither survey nor ask_variables_on_launch enabled",
-                    )
-            else:
-                # For other fields (inventory, limit, etc.), original logic is correct
-                # These fields don't have survey interaction
-                if not config.get(launch_flag, False):
-                    removed_value = node_data.pop(field)
-                    logger.warning(
-                        f"workflow_node_{field}_override_stripped",
-                        source_id=source_id,
-                        ujt_type=ujt_type,
-                        ujt_id=ujt_id,
-                        field=field,
-                        launch_flag=launch_flag,
-                        removed_value_preview=str(removed_value)[:200],
-                        message=(
-                            f"Stripped '{field}' override from workflow node - "
-                            f"template does not have '{launch_flag}' enabled"
-                        ),
-                    )
+            if not config.get(launch_flag, False):
+                logger.info(
+                    f"workflow_node_{field}_override_preserved",
+                    source_id=source_id,
+                    ujt_type=ujt_type,
+                    ujt_id=ujt_id,
+                    field=field,
+                    launch_flag=launch_flag,
+                    message=(
+                        f"Preserving '{field}' override as-is — template does not "
+                        f"have '{launch_flag}' enabled. If AAP 2.6 rejects this, "
+                        f"the failure will appear in the migration report."
+                    ),
+                )
 
         return node_data
 
@@ -3132,8 +2670,7 @@ class WorkflowNodeTransformer(DataTransformer):
     ) -> dict[str, Any]:
         """Apply workflow node-specific transformations.
 
-        Strips non-promptable overrides from workflow node data to prevent
-        AAP 2.6 import failures due to strict launch config validation.
+        Logs potential launch config conflicts but preserves all data as-is.
         """
         # Determine the template type and ID
         # Workflow nodes reference a unified_job_template which could be
