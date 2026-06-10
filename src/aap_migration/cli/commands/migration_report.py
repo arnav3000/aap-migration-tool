@@ -446,6 +446,19 @@ def _analyze_resource_type(
 
     stats["transformed_count"] = len(transformed_data)
 
+    if resource_type == "schedules":
+        pwd_placeholders = []
+        for sched in transformed_data:
+            pvars = sched.get("_password_placeholder_vars", [])
+            if pvars:
+                pwd_placeholders.append({
+                    "source_id": sched.get("_source_id") or sched.get("id"),
+                    "name": sched.get("name", "unknown"),
+                    "password_vars": pvars,
+                })
+        if pwd_placeholders:
+            stats["password_placeholder_schedules"] = pwd_placeholders
+
     # Query database for migration progress
     try:
         with get_session(database_url) as session:
@@ -1102,6 +1115,34 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
             "(they appear as `$encrypted$`). Schedules referencing password survey variables "
             "will always need those values manually re-entered in AAP 2.6 after migration."
         )
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    # Password placeholder advisory for schedules
+    pwd_placeholder_schedules = []
+    for rd in report_data:
+        pwd_placeholder_schedules.extend(rd.get("password_placeholder_schedules", []))
+    if pwd_placeholder_schedules:
+        lines.append("## Schedule Password Variables — Action Required")
+        lines.append("")
+        lines.append(
+            f"**{len(pwd_placeholder_schedules)} schedule(s)** were imported with empty placeholder "
+            f"values for password-type survey variables. Password values cannot be exported from "
+            f"AAP 2.4 (they appear as `$encrypted$`), so the migration tool sets them to empty strings "
+            f"to allow schedule creation to succeed."
+        )
+        lines.append("")
+        lines.append(
+            "**After migration, update these password values** in the AAP 2.6 UI under each "
+            "schedule's extra variables."
+        )
+        lines.append("")
+        lines.append("| Source ID | Schedule Name | Password Variables |")
+        lines.append("|-----------|---------------|--------------------|")
+        for p in pwd_placeholder_schedules:
+            vars_str = ", ".join(f"`{v}`" for v in p["password_vars"])
+            lines.append(f"| {p['source_id']} | {p['name']} | {vars_str} |")
         lines.append("")
         lines.append("---")
         lines.append("")

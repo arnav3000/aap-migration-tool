@@ -2342,6 +2342,12 @@ class ScheduleTransformer(DataTransformer):
 
         source_id = schedule_data.get("_source_id") or schedule_data.get("id")
         augmented = []
+        password_placeholders = []
+
+        for key, value in list(extra_data.items()):
+            if value == "$encrypted$":
+                extra_data[key] = ""
+                password_placeholders.append(key)
 
         for question in survey_spec:
             var_name = question.get("variable")
@@ -2353,11 +2359,14 @@ class ScheduleTransformer(DataTransformer):
                 continue
 
             default = question.get("default")
-            if default is None:
-                default = ""
             q_type = question.get("type", "")
 
-            if q_type == "multiselect" and isinstance(default, str):
+            if q_type == "password" or default == "$encrypted$":
+                default = ""
+                password_placeholders.append(var_name)
+            elif default is None:
+                default = ""
+            elif q_type == "multiselect" and isinstance(default, str):
                 default = default.split("\n") if default else []
 
             extra_data[var_name] = default
@@ -2372,12 +2381,16 @@ class ScheduleTransformer(DataTransformer):
                 ujt_type=ujt_type,
                 ujt_id=ujt_id,
                 augmented_vars=augmented,
+                password_placeholders=password_placeholders,
                 count=len(augmented),
                 message=(
                     f"Augmented extra_data with {len(augmented)} survey default(s) "
                     f"for AAP 2.6 compatibility: {augmented}"
                 ),
             )
+
+        if password_placeholders:
+            schedule_data["_password_placeholder_vars"] = password_placeholders
 
         return schedule_data
 
