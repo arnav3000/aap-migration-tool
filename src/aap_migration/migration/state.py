@@ -751,6 +751,7 @@ class MigrationState:
         source_id: int,
         error_message: str,
         increment_retry: bool = True,
+        source_name: str | None = None,
     ) -> None:
         """
         Mark a resource migration as failed.
@@ -760,6 +761,7 @@ class MigrationState:
             source_id: Source system resource ID
             error_message: Error message describing the failure
             increment_retry: Whether to increment retry counter
+            source_name: Optional name in source system (enables auto-create when record missing)
 
         Raises:
             StateError: If operation fails
@@ -774,6 +776,27 @@ class MigrationState:
                     )
 
                     if progress is None:
+                        if source_name:
+                            progress = MigrationProgress(
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=source_name,
+                                status="failed",
+                                phase="import",
+                                error_message=error_message,
+                                started_at=datetime.now(UTC),
+                                completed_at=datetime.now(UTC),
+                            )
+                            session.add(progress)
+                            session.commit()
+                            logger.warning(
+                                "mark_failed_auto_created",
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=source_name,
+                                error_message=error_message,
+                            )
+                            return
                         raise StateError(
                             f"Cannot mark as failed: Resource not found "
                             f"(type={resource_type}, source_id={source_id})"

@@ -3109,11 +3109,21 @@ class HostImporter(ResourceImporter):
                 # Mark failed in state
                 for source_id in source_ids:
                     source_name = source_name_by_id.get(source_id, f"host_{source_id}")
-                    if not self.state.has_source_mapping("hosts", source_id):
-                        self.state.create_source_mapping(
-                            "hosts", source_id, source_name=source_name
+                    try:
+                        if not self.state.has_source_mapping("hosts", source_id):
+                            self.state.create_source_mapping(
+                                "hosts", source_id, source_name=source_name
+                            )
+                        self.state.mark_failed(
+                            "hosts", source_id, str(e), source_name=source_name
                         )
-                    self.state.mark_failed("hosts", source_id, str(e))
+                    except Exception as state_error:
+                        logger.error(
+                            "mark_failed_state_error",
+                            resource_type="hosts",
+                            source_id=source_id,
+                            error=str(state_error),
+                        )
 
                 self.stats["error_count"] += len(source_ids)
                 total_failed += len(source_ids)
