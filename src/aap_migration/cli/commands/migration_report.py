@@ -986,8 +986,12 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
     survey_var_failures = [
         f for f in all_failures
         if f.get("error") and (
-            "required" in f["error"].lower()
-            and ("survey" in f["error"].lower() or "extra_data" in f["error"].lower())
+            "variables_needed_to_start" in f["error"].lower()
+            or "value missing" in f["error"].lower()
+            or (
+                "required" in f["error"].lower()
+                and ("survey" in f["error"].lower() or "extra_data" in f["error"].lower())
+            )
         )
     ]
     if survey_var_failures:
