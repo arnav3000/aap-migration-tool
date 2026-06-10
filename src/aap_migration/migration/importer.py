@@ -2057,6 +2057,13 @@ class InventorySourceImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # Resolve FK fields (source IDs → target IDs)
+                    for fk_field, fk_resource_type in [("inventory", "inventories"), ("execution_environment", "execution_environments")]:
+                        if schedule_to_import.get(fk_field):
+                            target_fk_id = self.state.get_mapped_id(fk_resource_type, schedule_to_import[fk_field])
+                            if target_fk_id:
+                                schedule_to_import[fk_field] = target_fk_id
+
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
                     schedule_to_import["enabled"] = False
@@ -3967,6 +3974,13 @@ class ProjectImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # Resolve FK fields (source IDs → target IDs)
+                    for fk_field, fk_resource_type in [("inventory", "inventories"), ("execution_environment", "execution_environments")]:
+                        if schedule_to_import.get(fk_field):
+                            target_fk_id = self.state.get_mapped_id(fk_resource_type, schedule_to_import[fk_field])
+                            if target_fk_id:
+                                schedule_to_import[fk_field] = target_fk_id
+
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
                     schedule_to_import["enabled"] = False
@@ -4318,7 +4332,39 @@ class JobTemplateImporter(ResourceImporter):
             if progress_callback:
                 progress_callback(success_count, failed_count, skipped_count)
 
-        # Import schedules
+        # Import surveys BEFORE schedules so AAP 2.6 knows about survey variables
+        if templates_with_surveys:
+            logger.info(
+                "importing_job_template_surveys",
+                total_surveys=len(templates_with_surveys),
+            )
+
+            for survey_data in templates_with_surveys:
+                source_template_id = survey_data["source_template_id"]
+                template_id = survey_data["template_id"]
+                template_name = survey_data["template_name"]
+                survey_spec = survey_data["survey_spec"]
+
+                try:
+                    await self.client.post(
+                        f"job_templates/{template_id}/survey_spec/",
+                        json_data=survey_spec,
+                    )
+                    logger.info(
+                        "job_template_survey_imported",
+                        template_id=template_id,
+                        template_name=template_name,
+                        survey_questions=len(survey_spec.get("spec", [])),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "job_template_survey_import_failed",
+                        template_id=template_id,
+                        template_name=template_name,
+                        error=str(e),
+                    )
+
+        # Import schedules (after surveys, so survey validation works correctly)
         if templates_with_schedules:
             logger.info(
                 "importing_job_template_schedules",
@@ -4342,6 +4388,13 @@ class JobTemplateImporter(ResourceImporter):
                         "created", "modified", "last_run", "next_run",
                         "status", "unified_job_template"
                     ]}
+
+                    # Resolve FK fields (source IDs → target IDs)
+                    for fk_field, fk_resource_type in [("inventory", "inventories"), ("execution_environment", "execution_environments")]:
+                        if schedule_to_import.get(fk_field):
+                            target_fk_id = self.state.get_mapped_id(fk_resource_type, schedule_to_import[fk_field])
+                            if target_fk_id:
+                                schedule_to_import[fk_field] = target_fk_id
 
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
@@ -4403,38 +4456,6 @@ class JobTemplateImporter(ResourceImporter):
                             schedule_name=schedule_name,
                             error=str(e),
                         )
-
-        # Import surveys
-        if templates_with_surveys:
-            logger.info(
-                "importing_job_template_surveys",
-                total_surveys=len(templates_with_surveys),
-            )
-
-            for survey_data in templates_with_surveys:
-                source_template_id = survey_data["source_template_id"]
-                template_id = survey_data["template_id"]
-                template_name = survey_data["template_name"]
-                survey_spec = survey_data["survey_spec"]
-
-                try:
-                    await self.client.post(
-                        f"job_templates/{template_id}/survey_spec/",
-                        json_data=survey_spec,
-                    )
-                    logger.info(
-                        "job_template_survey_imported",
-                        template_id=template_id,
-                        template_name=template_name,
-                        survey_questions=len(survey_spec.get("spec", [])),
-                    )
-                except Exception as e:
-                    logger.error(
-                        "job_template_survey_import_failed",
-                        template_id=template_id,
-                        template_name=template_name,
-                        error=str(e),
-                    )
 
         # Associate notification templates
         if templates_with_notifications:
@@ -5011,6 +5032,13 @@ class WorkflowImporter(ResourceImporter):
                         "created", "modified", "last_run", "next_run",
                         "status", "unified_job_template"
                     ]}
+
+                    # Resolve FK fields (source IDs → target IDs)
+                    for fk_field, fk_resource_type in [("inventory", "inventories"), ("execution_environment", "execution_environments")]:
+                        if schedule_to_import.get(fk_field):
+                            target_fk_id = self.state.get_mapped_id(fk_resource_type, schedule_to_import[fk_field])
+                            if target_fk_id:
+                                schedule_to_import[fk_field] = target_fk_id
 
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
