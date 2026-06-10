@@ -4332,39 +4332,9 @@ class JobTemplateImporter(ResourceImporter):
             if progress_callback:
                 progress_callback(success_count, failed_count, skipped_count)
 
-        # Import surveys BEFORE schedules so AAP 2.6 knows about survey variables
-        if templates_with_surveys:
-            logger.info(
-                "importing_job_template_surveys",
-                total_surveys=len(templates_with_surveys),
-            )
-
-            for survey_data in templates_with_surveys:
-                source_template_id = survey_data["source_template_id"]
-                template_id = survey_data["template_id"]
-                template_name = survey_data["template_name"]
-                survey_spec = survey_data["survey_spec"]
-
-                try:
-                    await self.client.post(
-                        f"job_templates/{template_id}/survey_spec/",
-                        json_data=survey_spec,
-                    )
-                    logger.info(
-                        "job_template_survey_imported",
-                        template_id=template_id,
-                        template_name=template_name,
-                        survey_questions=len(survey_spec.get("spec", [])),
-                    )
-                except Exception as e:
-                    logger.error(
-                        "job_template_survey_import_failed",
-                        template_id=template_id,
-                        template_name=template_name,
-                        error=str(e),
-                    )
-
-        # Import schedules (after surveys, so survey validation works correctly)
+        # Import schedules BEFORE surveys — AAP 2.6 doesn't validate survey
+        # variables on schedule creation if the survey doesn't exist yet, but DOES
+        # retroactively associate them once the survey is added afterward.
         if templates_with_schedules:
             logger.info(
                 "importing_job_template_schedules",
@@ -4456,6 +4426,38 @@ class JobTemplateImporter(ResourceImporter):
                             schedule_name=schedule_name,
                             error=str(e),
                         )
+
+        # Import surveys AFTER schedules
+        if templates_with_surveys:
+            logger.info(
+                "importing_job_template_surveys",
+                total_surveys=len(templates_with_surveys),
+            )
+
+            for survey_data in templates_with_surveys:
+                source_template_id = survey_data["source_template_id"]
+                template_id = survey_data["template_id"]
+                template_name = survey_data["template_name"]
+                survey_spec = survey_data["survey_spec"]
+
+                try:
+                    await self.client.post(
+                        f"job_templates/{template_id}/survey_spec/",
+                        json_data=survey_spec,
+                    )
+                    logger.info(
+                        "job_template_survey_imported",
+                        template_id=template_id,
+                        template_name=template_name,
+                        survey_questions=len(survey_spec.get("spec", [])),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "job_template_survey_import_failed",
+                        template_id=template_id,
+                        template_name=template_name,
+                        error=str(e),
+                    )
 
         # Associate notification templates
         if templates_with_notifications:
@@ -4977,38 +4979,9 @@ class WorkflowImporter(ResourceImporter):
                     success_count -= workflows_failed
                     failed_count += workflows_failed
 
-        # Phase 4: Import survey specs
-        if workflows_with_surveys:
-            logger.info(
-                "importing_workflow_surveys",
-                total_surveys=len(workflows_with_surveys),
-            )
-
-            for survey_data in workflows_with_surveys:
-                workflow_id = survey_data["workflow_id"]
-                workflow_name = survey_data["workflow_name"]
-                survey_spec = survey_data["survey_spec"]
-
-                try:
-                    await self.client.post(
-                        f"workflow_job_templates/{workflow_id}/survey_spec/",
-                        json_data=survey_spec,
-                    )
-                    logger.info(
-                        "workflow_survey_imported",
-                        workflow_id=workflow_id,
-                        workflow_name=workflow_name,
-                        survey_questions=len(survey_spec.get("spec", [])),
-                    )
-                except Exception as e:
-                    logger.error(
-                        "workflow_survey_import_failed",
-                        workflow_id=workflow_id,
-                        workflow_name=workflow_name,
-                        error=str(e),
-                    )
-
-        # Phase 5: Import schedules
+        # Phase 4: Import schedules BEFORE surveys — AAP 2.6 doesn't validate
+        # survey variables on schedule creation if the survey doesn't exist yet,
+        # but retroactively associates them once the survey is added afterward.
         if workflows_with_schedules:
             logger.info(
                 "importing_workflow_schedules",
@@ -5100,6 +5073,37 @@ class WorkflowImporter(ResourceImporter):
                             schedule_name=schedule_name,
                             error=str(e),
                         )
+
+        # Phase 5: Import survey specs (after schedules)
+        if workflows_with_surveys:
+            logger.info(
+                "importing_workflow_surveys",
+                total_surveys=len(workflows_with_surveys),
+            )
+
+            for survey_data in workflows_with_surveys:
+                workflow_id = survey_data["workflow_id"]
+                workflow_name = survey_data["workflow_name"]
+                survey_spec = survey_data["survey_spec"]
+
+                try:
+                    await self.client.post(
+                        f"workflow_job_templates/{workflow_id}/survey_spec/",
+                        json_data=survey_spec,
+                    )
+                    logger.info(
+                        "workflow_survey_imported",
+                        workflow_id=workflow_id,
+                        workflow_name=workflow_name,
+                        survey_questions=len(survey_spec.get("spec", [])),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "workflow_survey_import_failed",
+                        workflow_id=workflow_id,
+                        workflow_name=workflow_name,
+                        error=str(e),
+                    )
 
         # Phase 6: Associate notification templates
         if workflows_with_notifications:
