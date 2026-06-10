@@ -1897,6 +1897,7 @@ def import_cmd(
                                 ctx.config.performance,
                                 ctx.config.resource_mappings,
                             )
+                            importer.input_dir = input_dir
                         except NotImplementedError:
                             logger.info(
                                 "skipping_no_importer",
