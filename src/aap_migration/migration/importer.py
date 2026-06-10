@@ -5,7 +5,9 @@ that handle dependency resolution, bulk operations, and conflict handling.
 """
 
 import asyncio
+import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from packaging import version
@@ -2415,6 +2417,291 @@ class WorkflowNodeImporter(ResourceImporter):
         "execution_environment": "execution_environments",
     }
 
+    _FIELD_TO_LAUNCH_FLAG = {
+        "inventory": "ask_inventory_on_launch",
+        "extra_data": "ask_variables_on_launch",
+        "limit": "ask_limit_on_launch",
+        "diff_mode": "ask_diff_mode_on_launch",
+        "job_tags": "ask_tags_on_launch",
+        "skip_tags": "ask_skip_tags_on_launch",
+        "verbosity": "ask_verbosity_on_launch",
+        "job_type": "ask_job_type_on_launch",
+        "scm_branch": "ask_scm_branch_on_launch",
+        "forks": "ask_forks_on_launch",
+        "timeout": "ask_timeout_on_launch",
+        "job_slice_count": "ask_job_slice_count_on_launch",
+    }
+
+    def __init__(self, *args, input_dir: Path | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.input_dir = input_dir
+        self._template_launch_config_cache: dict[tuple[str, int], dict] | None = None
+
+    def _load_template_launch_config(self) -> dict[tuple[str, int], dict]:
+        if self._template_launch_config_cache is not None:
+            return self._template_launch_config_cache
+
+        cache: dict[tuple[str, int], dict] = {}
+        self._template_launch_config_cache = cache
+
+        if not self.input_dir:
+            return cache
+
+        for resource_type in ("job_templates", "workflow_job_templates"):
+            template_dir = self.input_dir / resource_type
+            if not template_dir.exists():
+                continue
+
+            for json_file in sorted(template_dir.glob(f"{resource_type}_*.json")):
+                try:
+                    with open(json_file) as f:
+                        templates = json.load(f)
+
+                    if not isinstance(templates, list):
+                        templates = [templates]
+
+                    for template in templates:
+                        source_id = template.get("_source_id") or template.get("id")
+                        if not source_id:
+                            continue
+
+                        launch_config = {}
+                        for key, value in template.items():
+                            if key.startswith("ask_") and key.endswith("_on_launch"):
+                                launch_config[key] = bool(value)
+
+                        launch_config["survey_enabled"] = bool(template.get("survey_enabled", False))
+
+                        survey_spec = template.get("survey_spec")
+                        if survey_spec and isinstance(survey_spec, dict) and "spec" in survey_spec:
+                            survey_vars = set()
+                            for question in survey_spec["spec"]:
+                                if isinstance(question, dict) and "variable" in question:
+                                    survey_vars.add(question["variable"])
+                            if survey_vars:
+                                launch_config["_survey_vars"] = survey_vars
+                            launch_config["_survey_spec"] = survey_spec["spec"]
+
+                        if launch_config:
+                            cache[(resource_type, int(source_id))] = launch_config
+
+                except Exception as e:
+                    logger.warning(
+                        "workflow_node_launch_config_load_error",
+                        file=str(json_file),
+                        error=str(e),
+                    )
+
+        logger.info(
+            "workflow_node_launch_config_loaded",
+            job_templates=sum(1 for k in cache if k[0] == "job_templates"),
+            workflow_templates=sum(1 for k in cache if k[0] == "workflow_job_templates"),
+            total=len(cache),
+        )
+
+        return cache
+
+    def _get_template_launch_config(self, ujt_type: str, ujt_id: int) -> dict | None:
+        cache = self._load_template_launch_config()
+        return cache.get((ujt_type, int(ujt_id)))
+
+    @staticmethod
+    def _get_valid_default_value(var_spec: dict[str, Any]) -> Any:
+        from aap_migration.migration.transformer import ScheduleTransformer
+        return ScheduleTransformer._get_valid_default_value(var_spec)
+
+    @staticmethod
+    def _coerce_survey_value(value: Any, var_spec: dict[str, Any]) -> Any:
+        var_type = var_spec.get("type", "text")
+        var_choices = var_spec.get("choices", "")
+
+        if isinstance(var_choices, list):
+            choices_list = [c for c in var_choices if c]
+        elif isinstance(var_choices, str) and var_choices.strip():
+            choices_list = [c.strip() for c in var_choices.split("\n") if c.strip()]
+        else:
+            choices_list = []
+
+        if var_type == "multiplechoice":
+            if choices_list and str(value) not in choices_list:
+                from aap_migration.migration.transformer import ScheduleTransformer
+                return ScheduleTransformer._get_valid_default_value(var_spec)
+            return value
+
+        elif var_type == "multiselect":
+            if isinstance(value, str):
+                if choices_list and value in choices_list:
+                    return [value]
+                from aap_migration.migration.transformer import ScheduleTransformer
+                return ScheduleTransformer._get_valid_default_value(var_spec)
+            elif isinstance(value, list):
+                if choices_list:
+                    valid = [v for v in value if str(v) in choices_list]
+                    if valid:
+                        return valid
+                from aap_migration.migration.transformer import ScheduleTransformer
+                return ScheduleTransformer._get_valid_default_value(var_spec)
+            from aap_migration.migration.transformer import ScheduleTransformer
+            return ScheduleTransformer._get_valid_default_value(var_spec)
+
+        elif var_type in ("text", "textarea"):
+            if isinstance(value, list):
+                return str(value[0]) if value else ""
+            if isinstance(value, bool):
+                return str(value).lower()
+            return str(value) if value is not None else ""
+
+        elif var_type == "integer":
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                from aap_migration.migration.transformer import ScheduleTransformer
+                return ScheduleTransformer._get_valid_default_value(var_spec)
+
+        elif var_type == "float":
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                from aap_migration.migration.transformer import ScheduleTransformer
+                return ScheduleTransformer._get_valid_default_value(var_spec)
+
+        elif var_type == "password":
+            if isinstance(value, str) and ("encrypted" in value.lower() or value == ""):
+                from aap_migration.migration.transformer import ScheduleTransformer
+                return ScheduleTransformer._get_valid_default_value(var_spec)
+            return value
+
+        return value
+
+    def _sanitize_node_extra_data(
+        self,
+        node_data: dict[str, Any],
+        ujt_type: str,
+        ujt_source_id: int,
+    ) -> dict[str, Any]:
+        if ujt_type not in ("job_templates", "workflow_job_templates"):
+            return node_data
+
+        config = self._get_template_launch_config(ujt_type, ujt_source_id)
+        if config is None:
+            return node_data
+
+        source_id = node_data.get("_source_id") or node_data.get("id")
+        ask_variables = config.get("ask_variables_on_launch", False)
+        survey_enabled = config.get("survey_enabled", False)
+        survey_vars = config.get("_survey_vars", set())
+        survey_spec_list = config.get("_survey_spec", [])
+
+        extra_data = node_data.get("extra_data")
+        if extra_data is not None:
+            if isinstance(extra_data, str):
+                try:
+                    extra_data = json.loads(extra_data)
+                except (json.JSONDecodeError, TypeError):
+                    extra_data = {}
+            if not isinstance(extra_data, dict):
+                extra_data = {}
+
+            if extra_data:
+                if ask_variables:
+                    pass
+                elif survey_enabled and survey_vars:
+                    non_survey = {k for k in extra_data if k not in survey_vars}
+                    if non_survey:
+                        for k in non_survey:
+                            extra_data.pop(k)
+                        logger.warning(
+                            "workflow_node_non_survey_vars_stripped",
+                            source_id=source_id,
+                            ujt_type=ujt_type,
+                            ujt_id=ujt_source_id,
+                            stripped_vars=list(non_survey),
+                        )
+                else:
+                    logger.warning(
+                        "workflow_node_extra_data_stripped",
+                        source_id=source_id,
+                        ujt_type=ujt_type,
+                        ujt_id=ujt_source_id,
+                        reason="ask_variables_on_launch=False and survey not enabled",
+                    )
+                    extra_data = {}
+
+            if extra_data and survey_spec_list and isinstance(survey_spec_list, list):
+                spec_by_var = {
+                    s["variable"]: s for s in survey_spec_list
+                    if isinstance(s, dict) and "variable" in s
+                }
+                coerced_vars = []
+                for var_name in list(extra_data.keys()):
+                    if var_name not in spec_by_var:
+                        continue
+                    current_value = extra_data[var_name]
+                    coerced = self._coerce_survey_value(current_value, spec_by_var[var_name])
+                    if coerced != current_value:
+                        extra_data[var_name] = coerced
+                        coerced_vars.append(var_name)
+
+                if coerced_vars:
+                    logger.warning(
+                        "workflow_node_survey_values_coerced",
+                        source_id=source_id,
+                        ujt_type=ujt_type,
+                        ujt_id=ujt_source_id,
+                        coerced_vars=coerced_vars,
+                    )
+
+            if survey_enabled and survey_spec_list:
+                injected_vars = []
+                for var_spec in survey_spec_list:
+                    if not isinstance(var_spec, dict):
+                        continue
+                    var_name = var_spec.get("variable")
+                    if not var_name or not var_spec.get("required", False):
+                        continue
+                    if extra_data and var_name in extra_data:
+                        continue
+                    if extra_data is None:
+                        extra_data = {}
+                    extra_data[var_name] = self._get_valid_default_value(var_spec)
+                    injected_vars.append(var_name)
+
+                if injected_vars:
+                    logger.warning(
+                        "workflow_node_survey_defaults_injected",
+                        source_id=source_id,
+                        ujt_type=ujt_type,
+                        ujt_id=ujt_source_id,
+                        injected_vars=injected_vars,
+                    )
+
+            node_data["extra_data"] = extra_data if extra_data else None
+
+        for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
+            if field == "extra_data":
+                continue
+            if field not in node_data:
+                continue
+            value = node_data[field]
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, dict) and not value:
+                continue
+            if not config.get(launch_flag, False):
+                node_data.pop(field)
+                logger.warning(
+                    "workflow_node_field_override_stripped",
+                    source_id=source_id,
+                    field=field,
+                    launch_flag=launch_flag,
+                    ujt_type=ujt_type,
+                    ujt_id=ujt_source_id,
+                )
+
+        return node_data
+
     async def import_resource(
         self,
         resource_type: str,
@@ -2460,6 +2747,8 @@ class WorkflowNodeImporter(ResourceImporter):
             # Resolve unified_job_template dependency only
             # (workflow_job_template is already the target ID)
             resolved = dict(data)
+            ujt_source_id = None
+            ujt_type = None
             if "unified_job_template" in resolved and resolved["unified_job_template"]:
                 ujt_source_id = resolved["unified_job_template"]
                 # Try to map the unified job template
@@ -2576,6 +2865,10 @@ class WorkflowNodeImporter(ResourceImporter):
                     )
                     # Remove unresolved EE to allow partial import
                     resolved.pop("execution_environment", None)
+
+            # Sanitize extra_data and non-promptable overrides against template launch config
+            if ujt_type and ujt_source_id and self.input_dir:
+                resolved = self._sanitize_node_extra_data(resolved, ujt_type, ujt_source_id)
 
             # Keep workflow_job_template in data (it's required for POST even though it's in the URL)
             # Just remove the source workflow ID tracking field
@@ -4675,6 +4968,7 @@ class WorkflowImporter(ResourceImporter):
                 client=self.client,
                 state=self.state,
                 performance_config=self.performance_config,
+                input_dir=getattr(self, "input_dir", None),
             )
 
             try:
