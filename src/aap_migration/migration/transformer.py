@@ -2307,6 +2307,54 @@ class ScheduleTransformer(DataTransformer):
 
         return schedule_data
 
+    @staticmethod
+    def _generate_valid_default(question: dict[str, Any]) -> Any:
+        """Generate a value that satisfies AAP 2.6 survey validation constraints."""
+        q_type = question.get("type", "text")
+        default = question.get("default")
+        min_val = question.get("min", 0)
+        choices = question.get("choices", "")
+
+        if isinstance(min_val, str):
+            try:
+                min_val = int(min_val) if min_val else 0
+            except ValueError:
+                min_val = 0
+
+        if q_type == "integer":
+            if isinstance(default, (int, float)) and default >= min_val:
+                return int(default)
+            return int(min_val) if min_val else 0
+
+        if q_type == "float":
+            if isinstance(default, (int, float)) and default >= min_val:
+                return float(default)
+            return float(min_val) if min_val else 0.0
+
+        if q_type == "multiplechoice":
+            choice_list = choices if isinstance(choices, list) else []
+            if default and default in choice_list:
+                return default
+            return choice_list[0] if choice_list else ""
+
+        if q_type == "multiselect":
+            choice_list = choices if isinstance(choices, list) else []
+            if isinstance(default, list):
+                return default if default else (choice_list[:1] if choice_list else [])
+            if isinstance(default, str) and default:
+                return default.split("\n")
+            return choice_list[:1] if choice_list else []
+
+        if q_type == "password" or default == "$encrypted$":
+            return "x" * max(int(min_val), 1)
+
+        if default is None:
+            default = ""
+        val = str(default)
+        if min_val and len(val) < int(min_val):
+            val = val + "x" * (int(min_val) - len(val))
+        return val
+
     def _augment_survey_defaults(
         self,
         schedule_data: dict[str, Any],
@@ -2344,9 +2392,12 @@ class ScheduleTransformer(DataTransformer):
         augmented = []
         password_placeholders = []
 
+        survey_by_var = {q["variable"]: q for q in survey_spec if q.get("variable")}
+
         for key, value in list(extra_data.items()):
             if value == "$encrypted$":
-                extra_data[key] = ""
+                q = survey_by_var.get(key, {})
+                extra_data[key] = self._generate_valid_default(q)
                 password_placeholders.append(key)
 
         for question in survey_spec:
@@ -2358,18 +2409,13 @@ class ScheduleTransformer(DataTransformer):
             if var_name in extra_data:
                 continue
 
-            default = question.get("default")
             q_type = question.get("type", "")
+            default = question.get("default")
 
             if q_type == "password" or default == "$encrypted$":
-                default = ""
                 password_placeholders.append(var_name)
-            elif default is None:
-                default = ""
-            elif q_type == "multiselect" and isinstance(default, str):
-                default = default.split("\n") if default else []
 
-            extra_data[var_name] = default
+            extra_data[var_name] = self._generate_valid_default(question)
             augmented.append(var_name)
 
         if augmented:
