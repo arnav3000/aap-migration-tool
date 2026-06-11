@@ -10,7 +10,10 @@ import {
   TextContent,
   Text,
   Gallery,
+  Grid,
+  GridItem,
   Label,
+  NumberInput,
   Split,
   SplitItem,
   DescriptionList,
@@ -33,6 +36,8 @@ export function Dashboard() {
   const [testing, setTesting] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [clearMsg, setClearMsg] = useState('');
+  const [maxConcurrent, setMaxConcurrent] = useState(15);
+  const [concurrencyMsg, setConcurrencyMsg] = useState('');
 
   const loadConnections = useCallback(async () => {
     try {
@@ -44,6 +49,10 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => { loadConnections(); }, [loadConnections]);
+
+  useEffect(() => {
+    api.getConcurrency().then(r => setMaxConcurrent(r.max_concurrent)).catch(() => {});
+  }, []);
 
   const handleSave = async (conn: Omit<Connection, 'id'>) => {
     setSaveError(null);
@@ -181,7 +190,89 @@ export function Dashboard() {
         <Text>Configure connections and application settings.</Text>
       </TextContent>
 
-      <Title headingLevel="h2" size="xl" style={{ marginTop: 8, marginBottom: 8 }}>Connections</Title>
+      <Grid hasGutter style={{ marginBottom: 24 }}>
+        <GridItem span={6}>
+          <Card isFullHeight>
+            <CardHeader><CardTitle>Migration State</CardTitle></CardHeader>
+            <CardBody>
+              <TextContent style={{ marginBottom: 16 }}>
+                <Text>Clear all stored ID mappings and progress records. This forces the next migration run to re-create all resources instead of skipping previously migrated ones.</Text>
+              </TextContent>
+              <Button
+                variant="warning"
+                onClick={async () => {
+                  setClearMsg('');
+                  try {
+                    const result = await api.clearMigrationState();
+                    setClearMsg(`Cleared ${result.cleared_progress} progress records and ${result.deleted_mappings} ID mappings`);
+                  } catch (err) {
+                    setClearMsg(`Error: ${err instanceof Error ? err.message : String(err)}`);
+                  }
+                }}
+              >
+                Clear Migration State
+              </Button>
+              {clearMsg && (
+                <Alert
+                  variant={clearMsg.startsWith('Error') ? 'danger' : 'success'}
+                  isInline
+                  title={clearMsg}
+                  style={{ marginTop: 12 }}
+                />
+              )}
+            </CardBody>
+          </Card>
+        </GridItem>
+        <GridItem span={6}>
+          <Card isFullHeight>
+            <CardHeader><CardTitle>Concurrency</CardTitle></CardHeader>
+            <CardBody>
+              <TextContent style={{ marginBottom: 16 }}>
+                <Text>Set how many objects to migrate concurrently. Higher values speed up migration but require more resources on both the source and destination systems.</Text>
+              </TextContent>
+              <NumberInput
+                value={maxConcurrent}
+                min={1}
+                max={100}
+                onMinus={() => setMaxConcurrent(prev => Math.max(1, prev - 1))}
+                onPlus={() => setMaxConcurrent(prev => Math.min(100, prev + 1))}
+                onChange={(event: React.FormEvent<HTMLInputElement>) => {
+                  const val = parseInt((event.target as HTMLInputElement).value, 10);
+                  if (!isNaN(val)) setMaxConcurrent(Math.max(1, Math.min(100, val)));
+                }}
+                widthChars={4}
+              />
+              <Button
+                variant="primary"
+                style={{ marginLeft: 16 }}
+                onClick={async () => {
+                  setConcurrencyMsg('');
+                  try {
+                    await api.updateConcurrency(maxConcurrent);
+                    setConcurrencyMsg('Saved');
+                  } catch (err) {
+                    setConcurrencyMsg(`Error: ${err instanceof Error ? err.message : String(err)}`);
+                  }
+                }}
+              >
+                Save
+              </Button>
+              {concurrencyMsg && (
+                <Alert
+                  variant={concurrencyMsg.startsWith('Error') ? 'danger' : 'success'}
+                  isInline
+                  title={concurrencyMsg}
+                  style={{ marginTop: 12 }}
+                />
+              )}
+            </CardBody>
+          </Card>
+        </GridItem>
+      </Grid>
+
+      <Divider style={{ marginBottom: 24 }} />
+
+      <Title headingLevel="h2" size="xl" style={{ marginBottom: 8 }}>Connections</Title>
       <Button variant="primary" onClick={() => { setEditConn(null); setShowForm(true); }} style={{ marginBottom: 16 }}>
         Add Connection
       </Button>
@@ -206,35 +297,6 @@ export function Dashboard() {
             {destinations.map(conn => renderCard(conn))}
           </Gallery>
         </>
-      )}
-
-      <Divider style={{ marginTop: 32, marginBottom: 24 }} />
-
-      <Title headingLevel="h2" size="xl" style={{ marginBottom: 8 }}>Migration State</Title>
-      <TextContent style={{ marginBottom: 16 }}>
-        <Text>Clear all stored ID mappings and progress records. This forces the next migration run to re-create all resources instead of skipping previously migrated ones.</Text>
-      </TextContent>
-      <Button
-        variant="warning"
-        onClick={async () => {
-          setClearMsg('');
-          try {
-            const result = await api.clearMigrationState();
-            setClearMsg(`Cleared ${result.cleared_progress} progress records and ${result.deleted_mappings} ID mappings`);
-          } catch (err) {
-            setClearMsg(`Error: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }}
-      >
-        Clear Migration State
-      </Button>
-      {clearMsg && (
-        <Alert
-          variant={clearMsg.startsWith('Error') ? 'danger' : 'success'}
-          isInline
-          title={clearMsg}
-          style={{ marginTop: 12 }}
-        />
       )}
 
       <ConnectionForm

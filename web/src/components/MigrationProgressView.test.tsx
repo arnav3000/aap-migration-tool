@@ -36,6 +36,18 @@ vi.mock('@patternfly/react-icons/dist/esm/icons/compress-icon', () => ({ default
 vi.mock('@patternfly/react-icons/dist/esm/icons/expand-icon', () => ({ default: () => <span>expand</span> }));
 
 import { MigrationProgressView } from './MigrationProgressView';
+import type { MigrationState } from '../hooks/useJobLogs';
+
+const EMPTY_STATE: MigrationState = {
+  totalPhases: 0,
+  phases: [],
+  totalCreated: 0,
+  totalUpdated: 0,
+  totalSkipped: 0,
+  totalFailed: 0,
+  status: 'running',
+  eventCount: 0,
+};
 
 describe('MigrationProgressView', () => {
   beforeEach(() => {
@@ -43,27 +55,61 @@ describe('MigrationProgressView', () => {
   });
 
   it('renders the appropriate empty state', () => {
-    const { rerender } = render(<MigrationProgressView events={[]} jobStatus="running" />);
+    const { rerender } = render(<MigrationProgressView migration={EMPTY_STATE} jobStatus="running" />);
     expect(screen.getByText('Waiting for migration events...')).toBeInTheDocument();
 
-    rerender(<MigrationProgressView events={[]} jobStatus="completed" />);
+    rerender(<MigrationProgressView migration={EMPTY_STATE} jobStatus="completed" />);
     expect(screen.getByText('No migration progress data available.')).toBeInTheDocument();
   });
 
   it('builds migration state from events and shows error details', () => {
+    const migration: MigrationState = {
+      totalPhases: 2,
+      totalCreated: 1,
+      totalUpdated: 0,
+      totalSkipped: 0,
+      totalFailed: 1,
+      status: 'failed',
+      eventCount: 8,
+      phases: [
+        {
+          num: 1,
+          description: 'Export Organizations',
+          status: 'complete',
+          exported: 4,
+          created: 1,
+          updated: 0,
+          skipped: 0,
+          failed: 0,
+          rate: '1/s',
+          elapsed: '1s',
+          duration: '2s',
+          resources: [
+            { name: 'Default', resourceType: 'organizations', result: 'created', detail: 'created ok' },
+          ],
+        },
+        {
+          num: 2,
+          description: 'Import Credentials',
+          status: 'failed',
+          exported: 0,
+          created: 0,
+          updated: 0,
+          skipped: 0,
+          failed: 0,
+          rate: '--/s',
+          elapsed: '0s',
+          duration: '',
+          resources: [],
+          error: 'credential mismatch',
+        },
+      ],
+    };
+
     render(
       <MigrationProgressView
         jobStatus="running"
-        events={[
-          { _event: 'migration_start', total_phases: 2 },
-          { _event: 'phase_start', phase_num: 1, total_phases: 2, description: 'Export Organizations' },
-          { _event: 'resource_result', phase_num: 1, name: 'Default', resource_type: 'organizations', result: 'created', detail: 'created ok' },
-          { _event: 'phase_progress', phase_num: 1, exported: 4, created: 1, skipped: 0, failed: 0, rate: '1/s', elapsed: '1s' },
-          { _event: 'phase_complete', phase_num: 1, description: 'Export Organizations', created: 1, updated: 0, skipped: 0, failed: 0, exported: 4, duration: '2s', warnings: {} },
-          { _event: 'phase_start', phase_num: 2, total_phases: 2, description: 'Import Credentials' },
-          { _event: 'phase_error', phase_num: 2, error: 'credential mismatch' },
-          { _event: 'migration_complete', total_created: 1, total_updated: 0, total_skipped: 0, total_failed: 1 },
-        ]}
+        migration={migration}
       />
     );
 

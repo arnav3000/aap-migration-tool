@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from aap_migration.api.dependencies import get_db, get_job_service
 from aap_migration.api.schemas import AnalysisRunRequest, JobStartResponse
 from aap_migration.api.services.connection_service import ConnectionService
-from aap_migration.api.services.job_service import Job
+from aap_migration.api.services.job_service import Job, JobStatus
 
 router = APIRouter()
 
@@ -189,7 +189,7 @@ def get_analysis_result(job_id: str) -> dict[str, Any]:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     data = job.to_dict()
-    if job.status == "completed" and job.result:
+    if job.status == JobStatus.COMPLETED and job.result:
         result = job.result
         _fix_migration_phases(result)
         data["data"] = result
@@ -219,7 +219,7 @@ def export_analysis_json(job_id: str) -> Response:
     job = svc.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status != "completed" or job.result is None:
+    if job.status != JobStatus.COMPLETED or job.result is None:
         raise HTTPException(status_code=400, detail="Analysis not yet complete")
 
     content = json.dumps(job.result, indent=2, default=str)
@@ -236,7 +236,7 @@ def export_analysis_html(job_id: str) -> HTMLResponse:
     job = svc.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status != "completed":
+    if job.status != JobStatus.COMPLETED:
         raise HTTPException(status_code=400, detail="Analysis not yet complete")
 
     html = getattr(job, "_html_report", None)

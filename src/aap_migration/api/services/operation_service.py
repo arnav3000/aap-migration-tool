@@ -6,7 +6,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session, sessionmaker
 
 from aap_migration.api.models import Connection, Job  # type: ignore[attr-defined]
-from aap_migration.api.services.job_service import JobService
+from aap_migration.api.services.job_service import JobService, JobStatus
 
 
 class JobLogHandler(logging.Handler):
@@ -40,7 +40,9 @@ class OperationService:
         job_id = str(uuid4())
         db = self.session_factory()
         try:
-            job = Job(id=job_id, type=job_type, connection_id=connection_id, status="running")
+            job = Job(
+                id=job_id, type=job_type, connection_id=connection_id, status=JobStatus.RUNNING
+            )
             db.add(job)
             db.commit()
         finally:
@@ -173,14 +175,14 @@ class OperationService:
                     f"Cleanup complete: deleted={total_deleted} skipped={total_skipped} errors={total_errors}",
                 )
                 self.job_service.mark_completed(job_id)  # type: ignore[attr-defined]
-                self._finish_job(job_id, "completed")
+                self._finish_job(job_id, JobStatus.COMPLETED)
             except asyncio.CancelledError:
                 self.job_service.mark_failed(job_id, "Cancelled")  # type: ignore[attr-defined]
-                self._finish_job(job_id, "cancelled")
+                self._finish_job(job_id, JobStatus.CANCELLED)
             except Exception as e:
                 self.job_service.append_log(job_id, f"Cleanup failed: {e}")  # type: ignore[attr-defined]
                 self.job_service.mark_failed(job_id, str(e))  # type: ignore[attr-defined]
-                self._finish_job(job_id, "failed", str(e))
+                self._finish_job(job_id, JobStatus.FAILED, str(e))
             finally:
                 self._detach_log_handler(handler)
 
@@ -253,14 +255,14 @@ class OperationService:
                     job_id, f"Export complete: {total_exported} resources to {export_dir}"
                 )
                 self.job_service.mark_completed(job_id)  # type: ignore[attr-defined]
-                self._finish_job(job_id, "completed")
+                self._finish_job(job_id, JobStatus.COMPLETED)
             except asyncio.CancelledError:
                 self.job_service.mark_failed(job_id, "Cancelled")  # type: ignore[attr-defined]
-                self._finish_job(job_id, "cancelled")
+                self._finish_job(job_id, JobStatus.CANCELLED)
             except Exception as e:
                 self.job_service.append_log(job_id, f"Export failed: {e}")  # type: ignore[attr-defined]
                 self.job_service.mark_failed(job_id, str(e))  # type: ignore[attr-defined]
-                self._finish_job(job_id, "failed", str(e))
+                self._finish_job(job_id, JobStatus.FAILED, str(e))
             finally:
                 self._detach_log_handler(handler)
 

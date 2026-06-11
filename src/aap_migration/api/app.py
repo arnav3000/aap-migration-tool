@@ -121,6 +121,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
         operations,
         planner,
         resources,
+        settings,
         sizing,
     )
 
@@ -132,6 +133,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
     app.include_router(jobs.router, prefix="/api", tags=["jobs"])
     app.include_router(analysis.router, prefix="/api", tags=["analysis"])
     app.include_router(sizing.router, prefix="/api", tags=["sizing"])
+    app.include_router(settings.router, prefix="/api", tags=["settings"])
     app.include_router(websocket.router)
 
     return app
@@ -143,10 +145,12 @@ def _recover_stale_jobs(session_factory: sessionmaker) -> None:
     try:
         from sqlalchemy import update
 
+        from aap_migration.api.services.job_service import JobStatus
+
         running_stmt = (
             update(JobRecord)
-            .where(JobRecord.status == "running")
-            .values(status="failed", error="Engine restarted — job did not complete")
+            .where(JobRecord.status == JobStatus.RUNNING)
+            .values(status=JobStatus.FAILED, error="Engine restarted — job did not complete")
         )
         session.execute(running_stmt)
 

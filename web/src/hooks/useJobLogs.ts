@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useReducer } from 'react';
 import { createJobLogSocket, api } from '../api/client';
 import type { Job } from '../types/resources';
 
@@ -80,6 +80,214 @@ export interface CredentialPauseEvent extends MigrationEvent {
   }>;
 }
 
+/* ------------------------------------------------------------------ */
+/*  MigrationState — shared with MigrationProgressView                */
+/* ------------------------------------------------------------------ */
+
+export interface ResourceItem {
+  name: string;
+  resourceType: string;
+  result: 'created' | 'updated' | 'skipped' | 'exists' | 'failed';
+  detail: string;
+}
+
+export interface PhaseState {
+  num: number;
+  description: string;
+  status: 'pending' | 'running' | 'complete' | 'failed';
+  exported: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  rate: string;
+  elapsed: string;
+  duration: string;
+  resources: ResourceItem[];
+  error?: string;
+}
+
+export interface MigrationState {
+  totalPhases: number;
+  phases: PhaseState[];
+  totalCreated: number;
+  totalUpdated: number;
+  totalSkipped: number;
+  totalFailed: number;
+  status: 'running' | 'complete' | 'failed';
+  eventCount: number;
+}
+
+const INITIAL_MIGRATION_STATE: MigrationState = {
+  totalPhases: 0,
+  phases: [],
+  totalCreated: 0,
+  totalUpdated: 0,
+  totalSkipped: 0,
+  totalFailed: 0,
+  status: 'running',
+  eventCount: 0,
+};
+
+type MigrationAction =
+  | { type: 'event'; event: MigrationEvent }
+  | { type: 'bulk'; events: MigrationEvent[] }
+  | { type: 'reset' };
+
+function getOrCreatePhase(phases: Map<number, PhaseState>, num: number): PhaseState {
+  let phase = phases.get(num);
+  if (!phase) {
+    phase = {
+      num, description: '', status: 'pending', exported: 0,
+      created: 0, updated: 0, skipped: 0, failed: 0,
+      rate: '--/s', elapsed: '0s', duration: '', resources: [],
+    };
+    phases.set(num, phase);
+  }
+  return phase;
+}
+
+function clonePhase(phaseMap: Map<number, PhaseState>, num: number): PhaseState {
+  const existing = phaseMap.get(num);
+  if (!existing) return getOrCreatePhase(phaseMap, num);
+  const cloned = { ...existing, resources: [...existing.resources] };
+  phaseMap.set(num, cloned);
+  return cloned;
+}
+
+function applyEvent(state: MigrationState, phaseMap: Map<number, PhaseState>, evt: MigrationEvent): void {
+  switch (evt._event) {
+    case 'migration_start':
+      state.totalPhases = evt.total_phases as number;
+      break;
+
+    case 'phase_start': {
+      const e = evt as PhaseStartEvent;
+      if (e.total_phases && e.total_phases > state.totalPhases) {
+        state.totalPhases = e.total_phases;
+      }
+      const phase = clonePhase(phaseMap, e.phase_num);
+      phase.description = e.description;
+      phase.status = 'running';
+      phase.exported = 0;
+      phase.created = 0;
+      phase.updated = 0;
+      phase.skipped = 0;
+      phase.failed = 0;
+      phase.rate = '--/s';
+      phase.elapsed = '0s';
+      phase.duration = '';
+      phase.resources = [];
+      break;
+    }
+
+    case 'phase_progress': {
+      const e = evt as PhaseProgressEvent;
+      if (phaseMap.has(e.phase_num)) {
+        const phase = clonePhase(phaseMap, e.phase_num);
+        phase.exported = e.exported;
+        phase.created = e.created;
+        phase.skipped = e.skipped;
+        phase.failed = e.failed;
+        phase.rate = e.rate;
+        phase.elapsed = e.elapsed;
+      }
+      break;
+    }
+
+    case 'resource_result': {
+      const e = evt as ResourceResultEvent;
+      if (phaseMap.has(e.phase_num)) {
+        const phase = clonePhase(phaseMap, e.phase_num);
+        phase.resources.push({
+          name: e.name,
+          resourceType: e.resource_type,
+          result: e.result,
+          detail: e.detail,
+        });
+        if (phase.resources.length > 200) {
+          phase.resources = phase.resources.slice(-200);
+        }
+      }
+      break;
+    }
+
+    case 'phase_complete': {
+      const e = evt as PhaseCompleteEvent;
+      if (phaseMap.has(e.phase_num)) {
+        const phase = clonePhase(phaseMap, e.phase_num);
+        phase.status = e.failed > 0 ? 'failed' : 'complete';
+        phase.created = e.created;
+        phase.updated = e.updated || 0;
+        phase.skipped = e.skipped;
+        phase.failed = e.failed;
+        phase.exported = e.exported;
+        phase.duration = e.duration;
+      }
+      break;
+    }
+
+    case 'phase_error': {
+      const e = evt as PhaseErrorEvent;
+      if (phaseMap.has(e.phase_num)) {
+        const phase = clonePhase(phaseMap, e.phase_num);
+        phase.status = 'failed';
+        phase.error = e.error;
+      }
+      break;
+    }
+
+    case 'migration_complete': {
+      state.totalCreated = evt.total_created as number;
+      state.totalUpdated = (evt.total_updated as number) || 0;
+      state.totalSkipped = evt.total_skipped as number;
+      state.totalFailed = evt.total_failed as number;
+      state.status = state.totalFailed > 0 ? 'failed' : 'complete';
+      break;
+    }
+  }
+}
+
+function finalize(state: MigrationState, phaseMap: Map<number, PhaseState>, eventCount: number): MigrationState {
+  const phases = Array.from(phaseMap.values()).sort((a, b) => a.num - b.num);
+
+  if (state.status === 'running') {
+    let created = 0, updated = 0, skipped = 0, failed = 0;
+    for (const p of phases) {
+      created += p.created;
+      updated += p.updated;
+      skipped += p.skipped;
+      failed += p.failed;
+    }
+    state.totalCreated = created;
+    state.totalUpdated = updated;
+    state.totalSkipped = skipped;
+    state.totalFailed = failed;
+  }
+
+  return { ...state, phases, eventCount };
+}
+
+function migrationReducer(prev: MigrationState, action: MigrationAction): MigrationState {
+  if (action.type === 'reset') return INITIAL_MIGRATION_STATE;
+
+  const events = action.type === 'bulk' ? action.events : [action.event];
+  if (events.length === 0) return prev;
+
+  const state = { ...prev };
+  const phaseMap = new Map<number, PhaseState>(prev.phases.map(p => [p.num, p]));
+
+  for (const evt of events) {
+    applyEvent(state, phaseMap, evt);
+  }
+
+  return finalize(state, phaseMap, prev.eventCount + events.length);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Hook                                                              */
+/* ------------------------------------------------------------------ */
+
 function isEventMessage(line: string): boolean {
   return line.charAt(0) === EVENT_WS_PREFIX;
 }
@@ -94,9 +302,10 @@ function parseEventMessage(line: string): MigrationEvent | null {
 
 export function useJobLogs(jobId: string) {
   const [textLines, setTextLines] = useState<string[]>([]);
-  const [events, setEvents] = useState<MigrationEvent[]>([]);
+  const [migration, dispatch] = useReducer(migrationReducer, INITIAL_MIGRATION_STATE);
   const [status, setStatus] = useState<string>('connecting');
   const wsReceivedRef = useRef(false);
+  const rawEventsRef = useRef<MigrationEvent[]>([]);
 
   useEffect(() => {
     if (!jobId) {
@@ -105,7 +314,8 @@ export function useJobLogs(jobId: string) {
     }
 
     setTextLines([]);
-    setEvents([]);
+    dispatch({ type: 'reset' });
+    rawEventsRef.current = [];
     setStatus('connecting');
     wsReceivedRef.current = false;
     let closed = false;
@@ -116,7 +326,10 @@ export function useJobLogs(jobId: string) {
         wsReceivedRef.current = true;
         if (isEventMessage(line)) {
           const evt = parseEventMessage(line);
-          if (evt) setEvents(prev => [...prev, evt]);
+          if (evt) {
+            rawEventsRef.current.push(evt);
+            dispatch({ type: 'event', event: evt });
+          }
         } else {
           setTextLines(prev => [...prev, line]);
         }
@@ -146,12 +359,17 @@ export function useJobLogs(jobId: string) {
             }
           }
           setTextLines(text);
-          if (evts.length > 0) setEvents(evts);
+          if (evts.length > 0) {
+            rawEventsRef.current = evts;
+            dispatch({ type: 'bulk', events: evts });
+          }
         }
-        if (events.length === 0) {
+        if (rawEventsRef.current.length === 0) {
           const meta = job.job_metadata;
           if (meta && Array.isArray(meta.events)) {
-            setEvents(meta.events as MigrationEvent[]);
+            const metaEvents = meta.events as MigrationEvent[];
+            rawEventsRef.current = metaEvents;
+            dispatch({ type: 'bulk', events: metaEvents });
           }
         }
         setStatus(job.status || 'empty');
@@ -166,5 +384,5 @@ export function useJobLogs(jobId: string) {
     };
   }, [jobId]);
 
-  return { textLines, events, status };
+  return { textLines, migration, events: rawEventsRef.current, status };
 }

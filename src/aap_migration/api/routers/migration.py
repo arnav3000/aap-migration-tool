@@ -16,7 +16,7 @@ from aap_migration.api.schemas import (
     MigrationRunRequest,
 )
 from aap_migration.api.services.connection_service import ConnectionService
-from aap_migration.api.services.job_service import Job
+from aap_migration.api.services.job_service import Job, JobStatus
 from aap_migration.resources import RESOURCE_REGISTRY, get_exportable_types
 
 router = APIRouter()
@@ -133,7 +133,7 @@ def get_migration_preview(job_id: str) -> dict[str, Any]:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     data = job.to_dict()
-    if job.status == "completed" and job.result:
+    if job.status == JobStatus.COMPLETED and job.result:
         data.update(job.result)
     return data
 
