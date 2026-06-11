@@ -114,6 +114,12 @@ class ClearStateResponse(BaseModel):
     deleted_mappings: int
 
 
+class SelectiveMigrateRequest(BaseModel):
+    source_id: str
+    destination_id: str
+    job_template_ids: list[int] = Field(min_length=1)
+
+
 # --- Migration Planner Schemas ---
 
 

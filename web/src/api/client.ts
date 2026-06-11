@@ -36,6 +36,12 @@ export const api = {
 
   runCleanup: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/cleanup`),
   runExport: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/export`),
+  selectiveMigrate: (sourceId: string, destinationId: string, jobTemplateIds: number[]) =>
+    request<{ job_id: string }>('POST', '/api/selective-migrate', {
+      source_id: sourceId,
+      destination_id: destinationId,
+      job_template_ids: jobTemplateIds,
+    }),
 
   migrationPreview: (sourceId: string, destinationId: string, organizations?: number[]) =>
     request<{ job_id: string }>('POST', '/api/migrate/preview', {
