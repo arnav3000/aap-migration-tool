@@ -48,6 +48,8 @@ class VaultClient:
         self.client = hvac.Client(
             url=self.vault_url,
             namespace=self.namespace,
+            verify=config.verify_ssl,
+            cert=config.client_cert,
         )
 
         # Track token expiration
