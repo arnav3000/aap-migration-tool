@@ -5,7 +5,9 @@ that handle dependency resolution, bulk operations, and conflict handling.
 """
 
 import asyncio
+import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from packaging import version
@@ -33,6 +35,8 @@ ORGANIZATION_SCOPED_RESOURCES = {
     "job_templates",
     "workflow_job_templates",
     "notification_templates",
+    "execution_environments",
+    "labels",
 }
 
 # Resource types that REQUIRE an organization (cannot be global/None)
@@ -793,7 +797,25 @@ class ResourceImporter:
             return None
 
         try:
-            existing = await self.client.find_resource_by_name(resource_type, resource_name)
+            # For organization-scoped resources, filter by organization to find the
+            # correct resource (same name can exist in different organizations)
+            organization_id = None
+            parent_id = None
+            parent_field = None
+
+            if resource_type in ORGANIZATION_SCOPED_RESOURCES:
+                organization_id = data.get("organization")
+            elif resource_type in PARENT_SCOPED_RESOURCES:
+                parent_field = PARENT_SCOPED_RESOURCES[resource_type]
+                parent_id = data.get(parent_field)
+
+            existing = await self.client.find_resource_by_name(
+                resource_type,
+                resource_name,
+                organization_id=organization_id,
+                parent_id=parent_id,
+                parent_field=parent_field,
+            )
 
             if existing:
                 # Compare resources to determine action
@@ -1400,7 +1422,7 @@ class UserImporter(ResourceImporter):
 
         except ConflictError as e:
             # Handle conflict (user already exists)
-            result = await self._handle_conflict(resource_type, source_id, data, e)
+            result = await self._handle_conflict(resource_type, source_id, data)
             if result:
                 self.stats["conflict_count"] += 1
             return result
@@ -2035,6 +2057,13 @@ class InventorySourceImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # Resolve FK fields (source IDs → target IDs)
+                    for fk_field, fk_resource_type in [("inventory", "inventories"), ("execution_environment", "execution_environments")]:
+                        if schedule_to_import.get(fk_field):
+                            target_fk_id = self.state.get_mapped_id(fk_resource_type, schedule_to_import[fk_field])
+                            if target_fk_id:
+                                schedule_to_import[fk_field] = target_fk_id
+
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
                     schedule_to_import["enabled"] = False
@@ -2143,7 +2172,10 @@ class ScheduleImporter(ResourceImporter):
     - inventory_sources
     """
 
-    DEPENDENCIES = {}  # Handled manually in _resolve_dependencies
+    DEPENDENCIES = {
+        "inventory": "inventories",
+        "execution_environment": "execution_environments",
+    }  # unified_job_template handled manually in _resolve_dependencies
 
     async def _resolve_dependencies(
         self, resource_type: str, data: dict[str, Any]
@@ -2208,6 +2240,147 @@ class ScheduleImporter(ResourceImporter):
 
         return resolved
 
+    async def import_resource(
+        self,
+        resource_type: str,
+        source_id: int,
+        data: dict[str, Any],
+        resolve_dependencies: bool = True,
+    ) -> dict[str, Any] | None:
+        """Override to route inventory_source schedules to nested endpoint.
+
+        # NOTE: Inventory source schedules must use nested endpoint - flat /schedules/
+        # endpoint rejects inventory_source UJTs
+        #
+        # The flat POST /api/v2/schedules/ endpoint rejects inventory_source
+        # unified_job_templates, causing 100% failure for inventory_source schedules.
+        # Instead, we route them to POST /inventory_sources/{target_id}/schedules/
+        # which works correctly (same pattern as InventorySourceImporter inline code).
+        #
+        # All other schedule types (job_template, workflow, project) continue to
+        # use the flat endpoint via the base class import_resource.
+        """
+        # Capture _ujt_resource_type before _resolve_dependencies removes it
+        ujt_resource_type = data.get("_ujt_resource_type")
+
+        # Non-inventory_source schedules: use the standard flat endpoint (base class)
+        if ujt_resource_type != "inventory_sources":
+            return await super().import_resource(
+                resource_type, source_id, data, resolve_dependencies
+            )
+
+        # --- Inventory source schedule: use nested endpoint ---
+
+        # Check if already imported
+        if self.state.is_migrated(resource_type, source_id):
+            logger.debug(
+                "resource_already_imported",
+                resource_type=resource_type,
+                source_id=source_id,
+            )
+            self.stats["skipped_count"] += 1
+            return None
+
+        # Mark as in progress
+        self.state.mark_in_progress(
+            resource_type=resource_type,
+            source_id=source_id,
+            source_name=data.get("name", "unknown"),
+            phase="import",
+        )
+
+        try:
+            # Resolve dependencies (this resolves unified_job_template to target ID,
+            # removes _ujt_resource_type, and disables schedule for safety)
+            resolved = await self._resolve_dependencies(resource_type, data)
+
+            # Get the resolved target inventory source ID
+            target_id = resolved.get("unified_job_template")
+            if not target_id:
+                error_msg = (
+                    f"Cannot import inventory_source schedule: "
+                    f"unified_job_template not resolved for source schedule "
+                    f"'{data.get('name', 'unknown')}' (source ID {source_id})"
+                )
+                logger.error(
+                    "inventory_source_schedule_ujt_unresolved",
+                    source_id=source_id,
+                    schedule_name=data.get("name"),
+                    error=error_msg,
+                )
+                self.stats["error_count"] += 1
+                self.state.mark_failed(
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    error_message=error_msg,
+                )
+                return None
+
+            # Remove fields not needed for nested endpoint POST
+            # (same pattern as InventorySourceImporter lines 2052-2056)
+            schedule_to_import = {k: v for k, v in resolved.items() if k not in [
+                "id", "type", "url", "related", "summary_fields",
+                "created", "modified", "last_run", "next_run",
+                "status", "unified_job_template",
+            ]}
+
+            # Remove None values
+            schedule_to_import = {k: v for k, v in schedule_to_import.items() if v is not None}
+
+            # POST to nested endpoint
+            result = await self.client.post(
+                f"inventory_sources/{target_id}/schedules/",
+                json_data=schedule_to_import,
+            )
+
+            # Log success (same pattern as InventorySourceImporter lines 2067-2075)
+            logger.info(
+                "inventory_source_schedule_imported",
+                inventory_source_id=target_id,
+                schedule_name=data.get("name", "unknown"),
+                schedule_id=result.get("id"),
+                source_id=source_id,
+                original_enabled=data.get("enabled", True),
+                imported_as_disabled=True,
+            )
+
+            # Mark as completed and track in database
+            self.state.mark_completed(
+                resource_type=resource_type,
+                source_id=source_id,
+                target_id=result["id"],
+                target_name=result.get("name", data.get("name", "unknown")),
+                source_name=data.get("name", "unknown"),
+            )
+
+            self.stats["imported_count"] += 1
+            return result
+
+        except Exception as e:
+            logger.error(
+                "inventory_source_schedule_import_failed",
+                source_id=source_id,
+                schedule_name=data.get("name", "unknown"),
+                error=str(e),
+            )
+
+            self.stats["error_count"] += 1
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=f"{type(e).__name__}: {str(e)}",
+            )
+
+            self.import_errors.append({
+                "resource_type": resource_type,
+                "source_id": source_id,
+                "name": data.get("name", "unknown"),
+                "error": str(e),
+                "error_type": type(e).__name__,
+            })
+
+            return None
+
     async def import_schedules(
         self,
         schedules: list[dict[str, Any]],
@@ -2247,7 +2420,145 @@ class WorkflowNodeImporter(ResourceImporter):
     DEPENDENCIES = {
         "workflow_job_template": "workflow_job_templates",
         "unified_job_template": "unified_job_templates",
+        "inventory": "inventories",
+        "execution_environment": "execution_environments",
     }
+
+    _FIELD_TO_LAUNCH_FLAG = {
+        "inventory": "ask_inventory_on_launch",
+        "extra_data": "ask_variables_on_launch",
+        "limit": "ask_limit_on_launch",
+        "diff_mode": "ask_diff_mode_on_launch",
+        "job_tags": "ask_tags_on_launch",
+        "skip_tags": "ask_skip_tags_on_launch",
+        "verbosity": "ask_verbosity_on_launch",
+        "job_type": "ask_job_type_on_launch",
+        "scm_branch": "ask_scm_branch_on_launch",
+        "forks": "ask_forks_on_launch",
+        "timeout": "ask_timeout_on_launch",
+        "job_slice_count": "ask_job_slice_count_on_launch",
+    }
+
+    def __init__(self, *args, input_dir: Path | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.input_dir = input_dir
+        self._template_launch_config_cache: dict[tuple[str, int], dict] | None = None
+
+    def _load_template_launch_config(self) -> dict[tuple[str, int], dict]:
+        if self._template_launch_config_cache is not None:
+            return self._template_launch_config_cache
+
+        cache: dict[tuple[str, int], dict] = {}
+        self._template_launch_config_cache = cache
+
+        if not self.input_dir:
+            return cache
+
+        for resource_type in ("job_templates", "workflow_job_templates"):
+            template_dir = self.input_dir / resource_type
+            if not template_dir.exists():
+                continue
+
+            for json_file in sorted(template_dir.glob(f"{resource_type}_*.json")):
+                try:
+                    with open(json_file) as f:
+                        templates = json.load(f)
+
+                    if not isinstance(templates, list):
+                        templates = [templates]
+
+                    for template in templates:
+                        source_id = template.get("_source_id") or template.get("id")
+                        if not source_id:
+                            continue
+
+                        launch_config = {}
+                        for key, value in template.items():
+                            if key.startswith("ask_") and key.endswith("_on_launch"):
+                                launch_config[key] = bool(value)
+
+                        launch_config["survey_enabled"] = bool(template.get("survey_enabled", False))
+
+                        survey_spec = template.get("survey_spec")
+                        if survey_spec and isinstance(survey_spec, dict) and "spec" in survey_spec:
+                            survey_vars = set()
+                            for question in survey_spec["spec"]:
+                                if isinstance(question, dict) and "variable" in question:
+                                    survey_vars.add(question["variable"])
+                            if survey_vars:
+                                launch_config["_survey_vars"] = survey_vars
+                            launch_config["_survey_spec"] = survey_spec["spec"]
+
+                        if launch_config:
+                            cache[(resource_type, int(source_id))] = launch_config
+
+                except Exception as e:
+                    logger.warning(
+                        "workflow_node_launch_config_load_error",
+                        file=str(json_file),
+                        error=str(e),
+                    )
+
+        logger.info(
+            "workflow_node_launch_config_loaded",
+            job_templates=sum(1 for k in cache if k[0] == "job_templates"),
+            workflow_templates=sum(1 for k in cache if k[0] == "workflow_job_templates"),
+            total=len(cache),
+        )
+
+        return cache
+
+    def _get_template_launch_config(self, ujt_type: str, ujt_id: int) -> dict | None:
+        cache = self._load_template_launch_config()
+        return cache.get((ujt_type, int(ujt_id)))
+
+    def _sanitize_node_extra_data(
+        self,
+        node_data: dict[str, Any],
+        ujt_type: str,
+        ujt_source_id: int,
+    ) -> dict[str, Any]:
+        """Log workflow node overrides that may conflict with template launch config.
+
+        Data is preserved as-is and passed through to AAP 2.6. If the target
+        API rejects an override, the failure is captured in the migration report.
+        """
+        if ujt_type not in ("job_templates", "workflow_job_templates"):
+            return node_data
+
+        config = self._get_template_launch_config(ujt_type, ujt_source_id)
+        if config is None:
+            return node_data
+
+        source_id = node_data.get("_source_id") or node_data.get("id")
+
+        for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
+            if field not in node_data:
+                continue
+            value = node_data[field]
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, dict) and not value:
+                continue
+
+            if not config.get(launch_flag, False):
+                logger.info(
+                    f"workflow_node_{field}_override_preserved",
+                    source_id=source_id,
+                    field=field,
+                    launch_flag=launch_flag,
+                    ujt_type=ujt_type,
+                    ujt_id=ujt_source_id,
+                    message=(
+                        f"Preserving '{field}' override as-is — template does not "
+                        f"have '{launch_flag}' enabled. If AAP 2.6 rejects this, "
+                        f"the failure will appear in the migration report."
+                    ),
+                )
+
+        return node_data
 
     async def import_resource(
         self,
@@ -2294,21 +2605,53 @@ class WorkflowNodeImporter(ResourceImporter):
             # Resolve unified_job_template dependency only
             # (workflow_job_template is already the target ID)
             resolved = dict(data)
+            ujt_source_id = None
+            ujt_type = None
             if "unified_job_template" in resolved and resolved["unified_job_template"]:
                 ujt_source_id = resolved["unified_job_template"]
                 # Try to map the unified job template
-                # This could be a job_template, workflow_job_template, or other template type
-                # For now, assume it's a job_template (most common case)
+                # This could be a job_template, workflow_job_template, project, or inventory_source
+                # Try each type in order of likelihood
+                target_id = None
+                ujt_type = None
+
+                # Try job_templates first (most common)
                 target_id = self.state.get_mapped_id("job_templates", ujt_source_id)
                 if target_id:
-                    resolved["unified_job_template"] = target_id
+                    ujt_type = "job_templates"
                 else:
-                    # SECURITY FIX: Fail import if referenced job template is missing
-                    # Creating a node without its job template creates a broken/incomplete workflow
+                    # Try workflow_job_templates (nested workflows)
+                    target_id = self.state.get_mapped_id("workflow_job_templates", ujt_source_id)
+                    if target_id:
+                        ujt_type = "workflow_job_templates"
+                    else:
+                        # Try projects (project sync)
+                        target_id = self.state.get_mapped_id("projects", ujt_source_id)
+                        if target_id:
+                            ujt_type = "projects"
+                        else:
+                            # Try inventory_sources (inventory sync)
+                            target_id = self.state.get_mapped_id("inventory_sources", ujt_source_id)
+                            if target_id:
+                                ujt_type = "inventory_sources"
+
+                if target_id:
+                    resolved["unified_job_template"] = target_id
+                    logger.debug(
+                        "workflow_node_ujt_resolved",
+                        source_id=source_id,
+                        ujt_source_id=ujt_source_id,
+                        ujt_target_id=target_id,
+                        ujt_type=ujt_type,
+                    )
+                else:
+                    # SECURITY FIX: Fail import if referenced template is missing
+                    # Creating a node without its template creates a broken/incomplete workflow
                     error_msg = (
-                        f"Cannot import workflow node: Referenced job template "
+                        f"Cannot import workflow node: Referenced unified_job_template "
                         f"(source_id={ujt_source_id}) was not successfully imported. "
-                        f"Ensure all job templates are imported before importing workflows."
+                        f"Tried job_templates, workflow_job_templates, projects, and inventory_sources. "
+                        f"Ensure all dependencies are imported before importing workflows."
                     )
 
                     logger.error(
@@ -2338,6 +2681,52 @@ class WorkflowNodeImporter(ResourceImporter):
 
                     # Return None to stop processing this broken node
                     return None
+
+            # Resolve inventory FK (optional override on workflow node)
+            if "inventory" in resolved and resolved["inventory"]:
+                inv_source_id = resolved["inventory"]
+                inv_target_id = self.state.get_mapped_id("inventories", inv_source_id)
+                if inv_target_id:
+                    resolved["inventory"] = inv_target_id
+                    logger.debug(
+                        "workflow_node_inventory_resolved",
+                        source_id=source_id,
+                        inv_source_id=inv_source_id,
+                        inv_target_id=inv_target_id,
+                    )
+                else:
+                    logger.warning(
+                        "workflow_node_inventory_unresolved",
+                        source_id=source_id,
+                        inv_source_id=inv_source_id,
+                    )
+                    # Remove unresolved inventory to allow partial import
+                    resolved.pop("inventory", None)
+
+            # Resolve execution_environment FK (optional override on workflow node)
+            if "execution_environment" in resolved and resolved["execution_environment"]:
+                ee_source_id = resolved["execution_environment"]
+                ee_target_id = self.state.get_mapped_id("execution_environments", ee_source_id)
+                if ee_target_id:
+                    resolved["execution_environment"] = ee_target_id
+                    logger.debug(
+                        "workflow_node_ee_resolved",
+                        source_id=source_id,
+                        ee_source_id=ee_source_id,
+                        ee_target_id=ee_target_id,
+                    )
+                else:
+                    logger.warning(
+                        "workflow_node_ee_unresolved",
+                        source_id=source_id,
+                        ee_source_id=ee_source_id,
+                    )
+                    # Remove unresolved EE to allow partial import
+                    resolved.pop("execution_environment", None)
+
+            # Sanitize extra_data and non-promptable overrides against template launch config
+            if ujt_type and ujt_source_id and self.input_dir:
+                resolved = self._sanitize_node_extra_data(resolved, ujt_type, ujt_source_id)
 
             # Keep workflow_job_template in data (it's required for POST even though it's in the URL)
             # Just remove the source workflow ID tracking field
@@ -2871,11 +3260,21 @@ class HostImporter(ResourceImporter):
                 # Mark failed in state
                 for source_id in source_ids:
                     source_name = source_name_by_id.get(source_id, f"host_{source_id}")
-                    if not self.state.has_source_mapping("hosts", source_id):
-                        self.state.create_source_mapping(
-                            "hosts", source_id, source_name=source_name
+                    try:
+                        if not self.state.has_source_mapping("hosts", source_id):
+                            self.state.create_source_mapping(
+                                "hosts", source_id, source_name=source_name
+                            )
+                        self.state.mark_failed(
+                            "hosts", source_id, str(e), source_name=source_name
                         )
-                    self.state.mark_failed("hosts", source_id, str(e))
+                    except Exception as state_error:
+                        logger.error(
+                            "mark_failed_state_error",
+                            resource_type="hosts",
+                            source_id=source_id,
+                            error=str(state_error),
+                        )
 
                 self.stats["error_count"] += len(source_ids)
                 total_failed += len(source_ids)
@@ -3575,6 +3974,13 @@ class ProjectImporter(ResourceImporter):
                         "status", "unified_job_template"
                     ]}
 
+                    # Resolve FK fields (source IDs → target IDs)
+                    for fk_field, fk_resource_type in [("inventory", "inventories"), ("execution_environment", "execution_environments")]:
+                        if schedule_to_import.get(fk_field):
+                            target_fk_id = self.state.get_mapped_id(fk_resource_type, schedule_to_import[fk_field])
+                            if target_fk_id:
+                                schedule_to_import[fk_field] = target_fk_id
+
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
                     schedule_to_import["enabled"] = False
@@ -3926,7 +4332,40 @@ class JobTemplateImporter(ResourceImporter):
             if progress_callback:
                 progress_callback(success_count, failed_count, skipped_count)
 
-        # Import schedules
+        # Import surveys BEFORE schedules — augmented extra_data provides all
+        # required survey defaults so AAP 2.6 can validate schedule creation.
+        if templates_with_surveys:
+            logger.info(
+                "importing_job_template_surveys",
+                total_surveys=len(templates_with_surveys),
+            )
+
+            for survey_data in templates_with_surveys:
+                source_template_id = survey_data["source_template_id"]
+                template_id = survey_data["template_id"]
+                template_name = survey_data["template_name"]
+                survey_spec = survey_data["survey_spec"]
+
+                try:
+                    await self.client.post(
+                        f"job_templates/{template_id}/survey_spec/",
+                        json_data=survey_spec,
+                    )
+                    logger.info(
+                        "job_template_survey_imported",
+                        template_id=template_id,
+                        template_name=template_name,
+                        survey_questions=len(survey_spec.get("spec", [])),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "job_template_survey_import_failed",
+                        template_id=template_id,
+                        template_name=template_name,
+                        error=str(e),
+                    )
+
+        # Import schedules AFTER surveys
         if templates_with_schedules:
             logger.info(
                 "importing_job_template_schedules",
@@ -3950,6 +4389,13 @@ class JobTemplateImporter(ResourceImporter):
                         "created", "modified", "last_run", "next_run",
                         "status", "unified_job_template"
                     ]}
+
+                    # Resolve FK fields (source IDs → target IDs)
+                    for fk_field, fk_resource_type in [("inventory", "inventories"), ("execution_environment", "execution_environments")]:
+                        if schedule_to_import.get(fk_field):
+                            target_fk_id = self.state.get_mapped_id(fk_resource_type, schedule_to_import[fk_field])
+                            if target_fk_id:
+                                schedule_to_import[fk_field] = target_fk_id
 
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)
@@ -4011,38 +4457,6 @@ class JobTemplateImporter(ResourceImporter):
                             schedule_name=schedule_name,
                             error=str(e),
                         )
-
-        # Import surveys
-        if templates_with_surveys:
-            logger.info(
-                "importing_job_template_surveys",
-                total_surveys=len(templates_with_surveys),
-            )
-
-            for survey_data in templates_with_surveys:
-                source_template_id = survey_data["source_template_id"]
-                template_id = survey_data["template_id"]
-                template_name = survey_data["template_name"]
-                survey_spec = survey_data["survey_spec"]
-
-                try:
-                    await self.client.post(
-                        f"job_templates/{template_id}/survey_spec/",
-                        json_data=survey_spec,
-                    )
-                    logger.info(
-                        "job_template_survey_imported",
-                        template_id=template_id,
-                        template_name=template_name,
-                        survey_questions=len(survey_spec.get("spec", [])),
-                    )
-                except Exception as e:
-                    logger.error(
-                        "job_template_survey_import_failed",
-                        template_id=template_id,
-                        template_name=template_name,
-                        error=str(e),
-                    )
 
         # Associate notification templates
         if templates_with_notifications:
@@ -4427,6 +4841,7 @@ class WorkflowImporter(ResourceImporter):
                 client=self.client,
                 state=self.state,
                 performance_config=self.performance_config,
+                input_dir=getattr(self, "input_dir", None),
             )
 
             try:
@@ -4563,7 +4978,8 @@ class WorkflowImporter(ResourceImporter):
                     success_count -= workflows_failed
                     failed_count += workflows_failed
 
-        # Phase 4: Import survey specs
+        # Phase 4: Import surveys BEFORE schedules — augmented extra_data provides
+        # all required survey defaults so AAP 2.6 can validate schedule creation.
         if workflows_with_surveys:
             logger.info(
                 "importing_workflow_surveys",
@@ -4594,7 +5010,7 @@ class WorkflowImporter(ResourceImporter):
                         error=str(e),
                     )
 
-        # Phase 5: Import schedules
+        # Phase 5: Import schedules AFTER surveys
         if workflows_with_schedules:
             logger.info(
                 "importing_workflow_schedules",
@@ -4618,6 +5034,13 @@ class WorkflowImporter(ResourceImporter):
                         "created", "modified", "last_run", "next_run",
                         "status", "unified_job_template"
                     ]}
+
+                    # Resolve FK fields (source IDs → target IDs)
+                    for fk_field, fk_resource_type in [("inventory", "inventories"), ("execution_environment", "execution_environments")]:
+                        if schedule_to_import.get(fk_field):
+                            target_fk_id = self.state.get_mapped_id(fk_resource_type, schedule_to_import[fk_field])
+                            if target_fk_id:
+                                schedule_to_import[fk_field] = target_fk_id
 
                     # SAFETY: Disable schedule by default to prevent automatic execution
                     original_enabled = schedule_to_import.get("enabled", True)

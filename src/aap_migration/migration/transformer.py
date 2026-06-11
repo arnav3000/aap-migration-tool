@@ -1502,8 +1502,9 @@ class ProjectTransformer(DataTransformer):
     DEPENDENCIES = {
         "organization": "organizations",
         "credential": "credentials",
+        "signature_validation_credential": "credentials",  # CRITICAL FIX (Customer B - content signing)
     }
-    # Organization is required; credential (for SCM auth) is optional
+    # Organization is required; credential (for SCM auth) and signature_validation_credential are optional
     REQUIRED_DEPENDENCIES = {"organization"}
 
     def __init__(self, *args: Any, defer_project_sync: bool = True, **kwargs: Any):
@@ -1530,6 +1531,32 @@ class ProjectTransformer(DataTransformer):
             Transformed project data
         """
         source_id = data.get("_source_id") or data.get("id")
+
+        # Clear SCM options for manual projects
+        # AAP 2.6 rejects manual projects with scm_track_submodules=true
+        # and other SCM update flags that don't apply to manual projects
+        scm_type = data.get("scm_type")
+        if not scm_type or scm_type == "":
+            scm_flags = [
+                "scm_track_submodules",
+                "scm_clean",
+                "scm_delete_on_update",
+                "scm_update_on_launch",
+            ]
+
+            cleared_any = False
+            for flag in scm_flags:
+                if data.get(flag):
+                    data[flag] = False
+                    cleared_any = True
+
+            if cleared_any:
+                logger.info(
+                    "cleared_scm_flags_for_manual_project",
+                    source_id=source_id,
+                    source_name=data.get("name"),
+                    message="Cleared SCM update flags for manual project to prevent AAP 2.6 validation error",
+                )
 
         # Ensure scm_update_on_launch is boolean
         if "scm_update_on_launch" in data and not isinstance(data["scm_update_on_launch"], bool):
@@ -1559,10 +1586,12 @@ class ProjectTransformer(DataTransformer):
                     "scm_type": scm_type,
                     "scm_url": data.get("scm_url"),
                     "scm_branch": data.get("scm_branch", ""),
+                    "scm_refspec": data.get("scm_refspec", ""),  # CRITICAL FIX (Customer B)
                     "scm_clean": data.get("scm_clean", False),
                     "scm_delete_on_update": data.get("scm_delete_on_update", False),
                     "scm_update_on_launch": data.get("scm_update_on_launch", False),
                     "scm_update_cache_timeout": data.get("scm_update_cache_timeout", 0),
+                    "scm_track_submodules": data.get("scm_track_submodules", False),  # CRITICAL FIX
                     "credential": data.get("credential"),  # Keep source credential ID
                 }
 
@@ -1572,10 +1601,12 @@ class ProjectTransformer(DataTransformer):
                 # Remove other SCM fields to be clean
                 for field in [
                     "scm_branch",
+                    "scm_refspec",  # CRITICAL FIX: Also remove from main data (Customer B)
                     "scm_clean",
                     "scm_delete_on_update",
                     "scm_update_on_launch",
                     "scm_update_cache_timeout",
+                    "scm_track_submodules",  # CRITICAL FIX: Also remove from main data
                     "credential",
                 ]:
                     data.pop(field, None)
@@ -2075,6 +2106,360 @@ class ScheduleTransformer(DataTransformer):
     }
     REQUIRED_DEPENDENCIES = {"unified_job_template"}
 
+    # Cache for template launch configuration (loaded from exported data)
+    # Maps (resource_type, source_id) -> dict of ask_*_on_launch fields
+    _template_launch_config_cache: dict[tuple[str, int], dict[str, bool]] | None = None
+
+    # Field name to ask_*_on_launch attribute mapping
+    _FIELD_TO_LAUNCH_FLAG = {
+        "inventory": "ask_inventory_on_launch",
+        "extra_data": "ask_variables_on_launch",
+        "limit": "ask_limit_on_launch",
+        "diff_mode": "ask_diff_mode_on_launch",
+        "job_tags": "ask_tags_on_launch",
+        "skip_tags": "ask_skip_tags_on_launch",
+        "verbosity": "ask_verbosity_on_launch",
+        "job_type": "ask_job_type_on_launch",
+        "scm_branch": "ask_scm_branch_on_launch",
+        "forks": "ask_forks_on_launch",
+        "timeout": "ask_timeout_on_launch",
+        "job_slice_count": "ask_job_slice_count_on_launch",
+    }
+
+    def _load_template_launch_config(self) -> dict[tuple[str, int], dict[str, bool]]:
+        """Load ask_*_on_launch fields from exported template data.
+
+        Reads job_templates and workflow_job_templates from the input_dir
+        (raw exports) and builds a lookup cache mapping (resource_type, source_id)
+        to a dict of ask_*_on_launch fields.
+
+        Returns:
+            Cache dict mapping (resource_type, source_id) to launch config dict.
+        """
+        if self._template_launch_config_cache is not None:
+            return self._template_launch_config_cache
+
+        cache: dict[tuple[str, int], dict[str, bool]] = {}
+        self._template_launch_config_cache = cache
+
+        if not self.input_dir:
+            logger.debug(
+                "schedule_launch_config_no_input_dir",
+                message="No input_dir available - cannot load template launch config",
+            )
+            return cache
+
+        # Load from both job_templates and workflow_job_templates
+        for resource_type in ("job_templates", "workflow_job_templates"):
+            template_dir = self.input_dir / resource_type
+            if not template_dir.exists():
+                continue
+
+            for json_file in sorted(template_dir.glob(f"{resource_type}_*.json")):
+                try:
+                    with open(json_file) as f:
+                        templates = json.load(f)
+
+                    if not isinstance(templates, list):
+                        templates = [templates]
+
+                    for template in templates:
+                        source_id = template.get("_source_id") or template.get("id")
+                        if not source_id:
+                            continue
+
+                        # Extract all ask_*_on_launch fields
+                        launch_config = {}
+                        for key, value in template.items():
+                            if key.startswith("ask_") and key.endswith("_on_launch"):
+                                launch_config[key] = bool(value)
+
+                        # CRITICAL FIX: Also capture survey_enabled for schedule extra_data validation
+                        # Schedules with survey-enabled templates must preserve survey variable values
+                        # even when ask_variables_on_launch=False
+                        launch_config["survey_enabled"] = bool(template.get("survey_enabled", False))
+
+                        # Extract survey variable names for granular filtering
+                        # Only preserve extra_data variables that are defined in the survey spec
+                        survey_spec = template.get("survey_spec")
+                        if survey_spec and isinstance(survey_spec, dict) and "spec" in survey_spec:
+                            survey_vars = set()
+                            for question in survey_spec["spec"]:
+                                if isinstance(question, dict) and "variable" in question:
+                                    survey_vars.add(question["variable"])
+                            if survey_vars:
+                                launch_config["_survey_vars"] = survey_vars
+
+                            # Cache full survey spec for default injection
+                            # Required to fill in missing required survey variables
+                            launch_config["_survey_spec"] = survey_spec["spec"]
+
+                        if launch_config:
+                            cache[(resource_type, int(source_id))] = launch_config
+
+                except Exception as e:
+                    logger.warning(
+                        "schedule_launch_config_load_error",
+                        file=str(json_file),
+                        error=str(e),
+                        message="Failed to load template launch config from export file",
+                    )
+
+        logger.debug(
+            "schedule_launch_config_loaded",
+            job_templates=sum(1 for k in cache if k[0] == "job_templates"),
+            workflow_templates=sum(1 for k in cache if k[0] == "workflow_job_templates"),
+            total=len(cache),
+        )
+
+        return cache
+
+    def _get_template_launch_config(
+        self, ujt_type: str, ujt_id: int
+    ) -> dict[str, bool] | None:
+        """Get the launch configuration for a specific template.
+
+        Args:
+            ujt_type: Resource type (e.g., 'job_templates', 'workflow_job_templates')
+            ujt_id: Source template ID
+
+        Returns:
+            Dict of ask_*_on_launch fields, or None if template not found.
+        """
+        cache = self._load_template_launch_config()
+        return cache.get((ujt_type, int(ujt_id)))
+
+    def _check_prompt_on_launch(
+        self, ujt_type: str, ujt_id: int, field: str
+    ) -> bool:
+        """Check if a template allows prompting for a specific field at launch.
+
+        Args:
+            ujt_type: Resource type (e.g., 'job_templates', 'workflow_job_templates')
+            ujt_id: Source template ID
+            field: Schedule field name (e.g., 'inventory', 'extra_data')
+
+        Returns:
+            True if the field can be prompted on launch, False otherwise.
+            Returns True (permissive) if template config cannot be determined.
+        """
+        launch_flag = self._FIELD_TO_LAUNCH_FLAG.get(field)
+        if not launch_flag:
+            # Unknown field mapping - allow it through (don't strip unknown fields)
+            return True
+
+        config = self._get_template_launch_config(ujt_type, ujt_id)
+        if config is None:
+            # Template not found in exports - be permissive, don't strip
+            return True
+
+        return config.get(launch_flag, False)
+
+    def _strip_non_promptable_overrides(
+        self,
+        schedule_data: dict[str, Any],
+        ujt_type: str,
+        ujt_id: int,
+    ) -> dict[str, Any]:
+        """Log schedule overrides that may conflict with template launch config.
+
+        Data is preserved as-is and passed through to AAP 2.6. If the target
+        API rejects an override, the failure is captured in the migration report
+        with the exact validation error for manual remediation.
+        """
+        if ujt_type not in ("job_templates", "workflow_job_templates"):
+            return schedule_data
+
+        config = self._get_template_launch_config(ujt_type, ujt_id)
+        if config is None:
+            return schedule_data
+
+        source_id = schedule_data.get("_source_id") or schedule_data.get("id")
+        source_name = schedule_data.get("name")
+
+        for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
+            if field not in schedule_data:
+                continue
+
+            value = schedule_data[field]
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, dict) and not value:
+                continue
+
+            if not config.get(launch_flag, False):
+                logger.info(
+                    f"schedule_{field}_override_preserved",
+                    source_id=source_id,
+                    source_name=source_name,
+                    ujt_type=ujt_type,
+                    ujt_id=ujt_id,
+                    field=field,
+                    launch_flag=launch_flag,
+                    message=(
+                        f"Preserving '{field}' override as-is — template does not "
+                        f"have '{launch_flag}' enabled. If AAP 2.6 rejects this, "
+                        f"the failure will appear in the migration report."
+                    ),
+                )
+
+        return schedule_data
+
+    @staticmethod
+    def _generate_valid_default(question: dict[str, Any]) -> Any:
+        """Generate a value that satisfies AAP 2.6 survey validation constraints."""
+        q_type = question.get("type", "text")
+        default = question.get("default")
+        min_val = question.get("min", 0)
+        choices = question.get("choices", "")
+
+        if isinstance(min_val, str):
+            try:
+                min_val = int(min_val) if min_val else 0
+            except ValueError:
+                min_val = 0
+
+        if q_type == "integer":
+            if isinstance(default, (int, float)) and default >= min_val:
+                return int(default)
+            return int(min_val) if min_val else 0
+
+        if q_type == "float":
+            if isinstance(default, (int, float)) and default >= min_val:
+                return float(default)
+            return float(min_val) if min_val else 0.0
+
+        if q_type == "multiplechoice":
+            choice_list = choices if isinstance(choices, list) else []
+            if default and default in choice_list:
+                return default
+            return choice_list[0] if choice_list else ""
+
+        if q_type == "multiselect":
+            choice_list = choices if isinstance(choices, list) else []
+            if isinstance(default, list):
+                return default if default else (choice_list[:1] if choice_list else [])
+            if isinstance(default, str) and default:
+                return default.split("\n")
+            return choice_list[:1] if choice_list else []
+
+        if q_type == "password" or default == "$encrypted$":
+            return "x" * max(int(min_val), 1)
+
+        if default is None:
+            default = ""
+        val = str(default)
+        if min_val and len(val) < int(min_val):
+            val = val + "x" * (int(min_val) - len(val))
+        return val
+
+    def _augment_survey_defaults(
+        self,
+        schedule_data: dict[str, Any],
+        ujt_type: str,
+        ujt_id: int,
+    ) -> dict[str, Any]:
+        """Fill in missing required survey variable defaults for AAP 2.6 compatibility.
+
+        AAP 2.4 allowed schedules to carry partial extra_data — missing required
+        survey variables used the survey's default at runtime. AAP 2.6 requires
+        ALL required survey variables in extra_data at schedule creation time.
+
+        This fills in the survey spec's own default values for any required
+        variable not already present in the schedule's extra_data, preserving
+        the effective runtime behavior from AAP 2.4.
+        """
+        config = self._get_template_launch_config(ujt_type, ujt_id)
+        if config is None:
+            return schedule_data
+        if not config.get("survey_enabled", False):
+            return schedule_data
+
+        survey_spec = config.get("_survey_spec")
+        if not survey_spec:
+            return schedule_data
+
+        extra_data = schedule_data.get("extra_data", {})
+        if isinstance(extra_data, str):
+            try:
+                extra_data = json.loads(extra_data) if extra_data else {}
+            except (json.JSONDecodeError, TypeError):
+                extra_data = {}
+
+        source_id = schedule_data.get("_source_id") or schedule_data.get("id")
+        augmented = []
+        password_placeholders = []
+
+        survey_by_var = {q["variable"]: q for q in survey_spec if q.get("variable")}
+
+        for key, value in list(extra_data.items()):
+            if value == "$encrypted$":
+                q = survey_by_var.get(key, {})
+                extra_data[key] = self._generate_valid_default(q)
+                password_placeholders.append(key)
+
+        for question in survey_spec:
+            var_name = question.get("variable")
+            if not var_name:
+                continue
+            if not question.get("required", False):
+                continue
+            if var_name in extra_data:
+                continue
+
+            q_type = question.get("type", "")
+            default = question.get("default")
+
+            if q_type == "password" or default == "$encrypted$":
+                password_placeholders.append(var_name)
+
+            extra_data[var_name] = self._generate_valid_default(question)
+            augmented.append(var_name)
+
+        if augmented:
+            schedule_data["extra_data"] = extra_data
+            logger.info(
+                "schedule_survey_defaults_augmented",
+                source_id=source_id,
+                source_name=schedule_data.get("name"),
+                ujt_type=ujt_type,
+                ujt_id=ujt_id,
+                augmented_vars=augmented,
+                password_placeholders=password_placeholders,
+                count=len(augmented),
+                message=(
+                    f"Augmented extra_data with {len(augmented)} survey default(s) "
+                    f"for AAP 2.6 compatibility: {augmented}"
+                ),
+            )
+
+        if password_placeholders:
+            schedule_data["_password_placeholder_vars"] = password_placeholders
+
+        return schedule_data
+
+    def _apply_specific_transformations(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> dict[str, Any]:
+        """Apply schedule-specific transformations.
+
+        Logs potential launch config conflicts and augments extra_data with
+        missing required survey variable defaults for AAP 2.6 compatibility.
+        """
+        # Get template type and ID (set by _validate_dependencies)
+        ujt_type = data.get("_ujt_resource_type")
+        ujt_id = data.get("unified_job_template")
+
+        if ujt_type and ujt_id:
+            data = self._strip_non_promptable_overrides(data, ujt_type, ujt_id)
+            data = self._augment_survey_defaults(data, ujt_type, ujt_id)
+
+        return data
+
     def _validate_dependencies(
         self,
         data: dict[str, Any],
@@ -2210,6 +2595,244 @@ class ScheduleTransformer(DataTransformer):
         # The importer will need to know which table to look up.
         # We can add a temporary field to data.
         data["_ujt_resource_type"] = ujt_type
+
+        # FIX: Remove inventory field for inventory source schedules
+        # AAP 2.6 rejects the inventory field for inventory source schedules
+        # The inventory relationship is implicit through the inventory source itself
+        if ujt_type == "inventory_sources":
+            if data.pop("inventory", None) is not None:
+                logger.debug(
+                    "removed_inventory_field_for_inv_source_schedule",
+                    source_id=source_id,
+                    source_name=data.get("name"),
+                    message="Removed inventory field - not allowed for inventory source schedules in AAP 2.6",
+                )
+
+
+class WorkflowNodeTransformer(DataTransformer):
+    """Transformer for workflow node resources.
+
+    Workflow nodes can override fields like inventory, extra_data, limit, etc.
+    These overrides must be stripped if the parent template does not allow
+    prompting for those fields (ask_*_on_launch), otherwise AAP 2.6 rejects
+    the node with validation errors like:
+    - 'inventory: Field is not configured to prompt on launch.'
+    - 'extra_data: Variables are not allowed on launch.'
+
+    This mirrors the ScheduleTransformer prompt-on-launch logic.
+    """
+
+    DEPENDENCIES = {
+        "unified_job_template": "unified_job_templates",
+        "inventory": "inventories",
+        "execution_environment": "execution_environments",
+    }
+    # unified_job_template is required (nodes must reference a template)
+    REQUIRED_DEPENDENCIES = set()
+
+    # Cache for template launch configuration (loaded from exported data)
+    # Maps (resource_type, source_id) -> dict of ask_*_on_launch fields
+    _template_launch_config_cache: dict[tuple[str, int], dict[str, bool]] | None = None
+
+    # Field name to ask_*_on_launch attribute mapping
+    _FIELD_TO_LAUNCH_FLAG = {
+        "inventory": "ask_inventory_on_launch",
+        "extra_data": "ask_variables_on_launch",
+        "limit": "ask_limit_on_launch",
+        "diff_mode": "ask_diff_mode_on_launch",
+        "job_tags": "ask_tags_on_launch",
+        "skip_tags": "ask_skip_tags_on_launch",
+        "verbosity": "ask_verbosity_on_launch",
+        "job_type": "ask_job_type_on_launch",
+        "scm_branch": "ask_scm_branch_on_launch",
+        "forks": "ask_forks_on_launch",
+        "timeout": "ask_timeout_on_launch",
+        "job_slice_count": "ask_job_slice_count_on_launch",
+    }
+
+    def _load_template_launch_config(self) -> dict[tuple[str, int], dict[str, bool]]:
+        """Load ask_*_on_launch fields from exported template data.
+
+        Reads job_templates and workflow_job_templates from the input_dir
+        (raw exports) and builds a lookup cache mapping (resource_type, source_id)
+        to a dict of ask_*_on_launch fields.
+
+        Returns:
+            Cache dict mapping (resource_type, source_id) to launch config dict.
+        """
+        if self._template_launch_config_cache is not None:
+            return self._template_launch_config_cache
+
+        cache: dict[tuple[str, int], dict[str, bool]] = {}
+        self._template_launch_config_cache = cache
+
+        if not self.input_dir:
+            logger.debug(
+                "workflow_node_launch_config_no_input_dir",
+                message="No input_dir available - cannot load template launch config",
+            )
+            return cache
+
+        # Load from both job_templates and workflow_job_templates
+        for resource_type in ("job_templates", "workflow_job_templates"):
+            template_dir = self.input_dir / resource_type
+            if not template_dir.exists():
+                continue
+
+            for json_file in sorted(template_dir.glob(f"{resource_type}_*.json")):
+                try:
+                    with open(json_file) as f:
+                        templates = json.load(f)
+
+                    if not isinstance(templates, list):
+                        templates = [templates]
+
+                    for template in templates:
+                        source_id = template.get("_source_id") or template.get("id")
+                        if not source_id:
+                            continue
+
+                        # Extract all ask_*_on_launch fields
+                        launch_config = {}
+                        for key, value in template.items():
+                            if key.startswith("ask_") and key.endswith("_on_launch"):
+                                launch_config[key] = bool(value)
+
+                        # CRITICAL FIX: Also capture survey_enabled for workflow node extra_data validation
+                        # Workflow nodes with survey-enabled templates must preserve survey variable values
+                        # even when ask_variables_on_launch=False
+                        launch_config["survey_enabled"] = bool(template.get("survey_enabled", False))
+
+                        # Extract survey variable names for granular filtering
+                        # Only preserve extra_data variables that are defined in the survey spec
+                        survey_spec = template.get("survey_spec")
+                        if survey_spec and isinstance(survey_spec, dict) and "spec" in survey_spec:
+                            survey_vars = set()
+                            for question in survey_spec["spec"]:
+                                if isinstance(question, dict) and "variable" in question:
+                                    survey_vars.add(question["variable"])
+                            if survey_vars:
+                                launch_config["_survey_vars"] = survey_vars
+                                launch_config["_survey_spec"] = survey_spec["spec"]
+
+                        if launch_config:
+                            cache[(resource_type, int(source_id))] = launch_config
+
+                except Exception as e:
+                    logger.warning(
+                        "workflow_node_launch_config_load_error",
+                        file=str(json_file),
+                        error=str(e),
+                        message="Failed to load template launch config from export file",
+                    )
+
+        logger.debug(
+            "workflow_node_launch_config_loaded",
+            job_templates=sum(1 for k in cache if k[0] == "job_templates"),
+            workflow_templates=sum(1 for k in cache if k[0] == "workflow_job_templates"),
+            total=len(cache),
+        )
+
+        return cache
+
+    def _get_template_launch_config(
+        self, ujt_type: str, ujt_id: int
+    ) -> dict[str, bool] | None:
+        """Get the launch configuration for a specific template.
+
+        Args:
+            ujt_type: Resource type (e.g., 'job_templates', 'workflow_job_templates')
+            ujt_id: Source template ID
+
+        Returns:
+            Dict of ask_*_on_launch fields, or None if template not found.
+        """
+        cache = self._load_template_launch_config()
+        return cache.get((ujt_type, int(ujt_id)))
+
+    def _strip_non_promptable_overrides(
+        self,
+        node_data: dict[str, Any],
+        ujt_type: str,
+        ujt_id: int,
+    ) -> dict[str, Any]:
+        """Log workflow node overrides that may conflict with template launch config.
+
+        Data is preserved as-is and passed through to AAP 2.6. If the target
+        API rejects an override, the failure is captured in the migration report.
+        """
+        if ujt_type not in ("job_templates", "workflow_job_templates"):
+            return node_data
+
+        config = self._get_template_launch_config(ujt_type, ujt_id)
+        if config is None:
+            return node_data
+
+        source_id = node_data.get("_source_id") or node_data.get("id")
+
+        for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
+            if field not in node_data:
+                continue
+
+            value = node_data[field]
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, dict) and not value:
+                continue
+
+            if not config.get(launch_flag, False):
+                logger.info(
+                    f"workflow_node_{field}_override_preserved",
+                    source_id=source_id,
+                    ujt_type=ujt_type,
+                    ujt_id=ujt_id,
+                    field=field,
+                    launch_flag=launch_flag,
+                    message=(
+                        f"Preserving '{field}' override as-is — template does not "
+                        f"have '{launch_flag}' enabled. If AAP 2.6 rejects this, "
+                        f"the failure will appear in the migration report."
+                    ),
+                )
+
+        return node_data
+
+    def _apply_specific_transformations(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> dict[str, Any]:
+        """Apply workflow node-specific transformations.
+
+        Logs potential launch config conflicts but preserves all data as-is.
+        """
+        # Determine the template type and ID
+        # Workflow nodes reference a unified_job_template which could be
+        # a job_template or workflow_job_template
+        ujt_id = data.get("unified_job_template")
+
+        if ujt_id:
+            # Try to determine template type from _ujt_resource_type metadata
+            ujt_type = data.get("_ujt_resource_type")
+
+            if not ujt_type:
+                # Fallback: Try summary_fields to determine type
+                if "summary_fields" in data and "unified_job_template" in data["summary_fields"]:
+                    ujt_summary = data["summary_fields"]["unified_job_template"]
+                    if isinstance(ujt_summary, dict):
+                        api_type = ujt_summary.get("type")
+                        type_map = {
+                            "job_template": "job_templates",
+                            "workflow_job_template": "workflow_job_templates",
+                        }
+                        ujt_type = type_map.get(api_type)
+
+            if ujt_type:
+                data = self._strip_non_promptable_overrides(data, ujt_type, ujt_id)
+
+        return data
 
 
 class SystemJobTemplateTransformer(DataTransformer):
@@ -2524,6 +3147,7 @@ TRANSFORMER_CLASSES: dict[str, type[DataTransformer]] = {
     "projects": ProjectTransformer,
     "job_templates": JobTemplateTransformer,
     "workflow_job_templates": WorkflowTransformer,
+    "workflow_nodes": WorkflowNodeTransformer,
     "schedules": ScheduleTransformer,
     "system_job_templates": SystemJobTemplateTransformer,
     "notification_templates": NotificationTemplateTransformer,

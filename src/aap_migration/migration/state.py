@@ -591,6 +591,20 @@ class MigrationState:
                         )
                         session.add(progress)
                     else:
+                        # Protect completed resources from being overwritten by retries
+                        # If a resource was successfully migrated (completed with target_id),
+                        # don't allow mark_in_progress to corrupt it
+                        if progress.status == "completed" and progress.target_id:
+                            logger.info(
+                                "Skipping mark_in_progress for completed resource",
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=source_name,
+                                target_id=progress.target_id,
+                                message="Resource already successfully migrated, skipping retry",
+                            )
+                            return
+
                         # Update existing record
                         progress.status = "in_progress"
                         progress.phase = phase
@@ -682,6 +696,7 @@ class MigrationState:
                             progress.status = "completed"
                         progress.phase = "import"  # Mark phase as import when target_id is set
                         progress.target_id = target_id
+                        progress.error_message = None  # Clear any previous error (e.g., from a retry)
                         progress.completed_at = datetime.now(UTC)
 
                     # Update or create ID mapping IN THE SAME TRANSACTION
@@ -736,6 +751,7 @@ class MigrationState:
         source_id: int,
         error_message: str,
         increment_retry: bool = True,
+        source_name: str | None = None,
     ) -> None:
         """
         Mark a resource migration as failed.
@@ -745,6 +761,7 @@ class MigrationState:
             source_id: Source system resource ID
             error_message: Error message describing the failure
             increment_retry: Whether to increment retry counter
+            source_name: Optional name in source system (enables auto-create when record missing)
 
         Raises:
             StateError: If operation fails
@@ -759,10 +776,45 @@ class MigrationState:
                     )
 
                     if progress is None:
+                        if source_name:
+                            progress = MigrationProgress(
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=source_name,
+                                status="failed",
+                                phase="import",
+                                error_message=error_message,
+                                started_at=datetime.now(UTC),
+                                completed_at=datetime.now(UTC),
+                            )
+                            session.add(progress)
+                            session.commit()
+                            logger.warning(
+                                "mark_failed_auto_created",
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=source_name,
+                                error_message=error_message,
+                            )
+                            return
                         raise StateError(
                             f"Cannot mark as failed: Resource not found "
                             f"(type={resource_type}, source_id={source_id})"
                         )
+
+                    # Protect completed resources from being overwritten by retries
+                    # If a resource was successfully migrated (completed with target_id),
+                    # don't allow mark_failed to corrupt its status
+                    if progress.status == "completed" and progress.target_id:
+                        logger.info(
+                            "Skipping mark_failed for completed resource",
+                            resource_type=resource_type,
+                            source_id=source_id,
+                            target_id=progress.target_id,
+                            error_message=error_message,
+                            message="Resource already successfully migrated, ignoring failure",
+                        )
+                        return
 
                     # Update progress
                     progress.status = "failed"
@@ -839,8 +891,6 @@ class MigrationState:
                             # Set target_id if provided (duplicate detection case)
                             if target_id is not None:
                                 progress.target_id = target_id
-                            if target_name is not None:
-                                progress.target_name = target_name
                             session.add(progress)
                         else:
                             raise StateError(
@@ -860,10 +910,39 @@ class MigrationState:
                         # Record target_id if duplicate was found (optional)
                         if target_id is not None:
                             progress.target_id = target_id
-                        if target_name is not None:
-                            progress.target_name = target_name
                         if source_name is not None:
                             progress.source_name = source_name
+
+                    # Update or create ID mapping when target_id is provided
+                    # (duplicate detection case - resource exists in target)
+                    # This mirrors mark_completed() to ensure FK resolution works
+                    # for dependent resources referencing skipped parents.
+                    if target_id is not None:
+                        mapping = (
+                            session.query(IDMapping)
+                            .filter_by(resource_type=resource_type, source_id=source_id)
+                            .first()
+                        )
+
+                        if mapping:
+                            # Update existing mapping
+                            mapping.target_id = target_id
+                            if target_name:
+                                mapping.target_name = target_name
+                            if progress.source_name:
+                                mapping.source_name = progress.source_name
+                            mapping.migration_progress_id = progress.id
+                        else:
+                            # Create new mapping
+                            mapping = IDMapping(
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                target_id=target_id,
+                                source_name=progress.source_name,
+                                target_name=target_name,
+                                migration_progress_id=progress.id,
+                            )
+                            session.add(mapping)
 
                     session.commit()
 
@@ -1136,6 +1215,52 @@ class MigrationState:
                     error=str(e),
                 )
                 raise StateError(f"Failed to get mapped ID: {e}") from e
+
+    def get_all_mappings_dict(
+        self,
+        resource_type: str,
+    ) -> dict[int, int]:
+        """
+        Get all source_id -> target_id mappings for a resource type as a dict.
+
+        Used for efficient bulk FK translation (e.g., in batch_precheck_resources).
+        Returns only mappings where target_id is not NULL.
+
+        Args:
+            resource_type: Type of resource (e.g., 'organizations', 'inventories')
+
+        Returns:
+            Dict mapping source_id -> target_id for all mapped resources
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    results = (
+                        session.query(IDMapping.source_id, IDMapping.target_id)
+                        .filter(
+                            IDMapping.resource_type == resource_type,
+                            IDMapping.target_id.isnot(None),
+                        )
+                        .all()
+                    )
+
+                    mapping_dict = {row[0]: row[1] for row in results}
+
+                    logger.debug(
+                        "loaded_all_mappings_dict",
+                        resource_type=resource_type,
+                        count=len(mapping_dict),
+                    )
+
+                    return mapping_dict
+
+            except Exception as e:
+                logger.error(
+                    "Failed to get all mappings dict",
+                    resource_type=resource_type,
+                    error=str(e),
+                )
+                raise StateError(f"Failed to get all mappings dict: {e}") from e
 
     def get_id_mapping(
         self,

@@ -169,10 +169,12 @@ async def patch_project_scm_details(
                         "scm_type": deferred.get("scm_type"),
                         "scm_url": deferred.get("scm_url"),
                         "scm_branch": deferred.get("scm_branch", ""),
+                        "scm_refspec": deferred.get("scm_refspec", ""),  # CRITICAL FIX (Customer B)
                         "scm_clean": deferred.get("scm_clean", False),
                         "scm_delete_on_update": deferred.get("scm_delete_on_update", False),
                         "scm_update_on_launch": deferred.get("scm_update_on_launch", False),
                         "scm_update_cache_timeout": deferred.get("scm_update_cache_timeout", 0),
+                        "scm_track_submodules": deferred.get("scm_track_submodules", False),  # CRITICAL FIX
                     }
 
                     # Resolve credential dependency

@@ -542,6 +542,10 @@ class AAPTargetClient(BaseAPIClient):
     ) -> list[dict[str, Any]]:
         """List resources with optional filters and automatic pagination.
 
+        Uses manual page increment instead of parsing the ``next`` URL to
+        avoid the infinite-loop bug where query parameters were stripped
+        during pagination.
+
         Args:
             resource_type: Resource type (e.g., 'users', 'organizations')
             filters: Query filters (e.g., {"name__in": "user1,user2,user3"})
@@ -560,36 +564,46 @@ class AAPTargetClient(BaseAPIClient):
         # Use get_endpoint to map resource_type to correct API endpoint
         # (e.g., "inventory_groups" -> "groups/")
         endpoint = get_endpoint(resource_type)
-        params = {"page_size": page_size}
+        params: dict[str, Any] = {"page_size": page_size}
 
         if filters:
             params.update(filters)
 
-        all_results = []
+        all_results: list[dict[str, Any]] = []
+        page = 1
+        MAX_PAGES = 500  # Safety limit to prevent infinite loops
 
-        # Handle pagination automatically
-        while endpoint:
+        # Use manual page increment instead of parsing the next URL.
+        # The previous implementation extracted only the path from the next URL
+        # and set params = {}, discarding all query parameters (page number,
+        # page_size, filters).  This caused an infinite loop: every subsequent
+        # request fetched page 1 of ALL resources without any filters.
+        while page <= MAX_PAGES:
+            params["page"] = page
             response = await self.get(endpoint, params=params)
             results = response.get("results", [])
             all_results.extend(results)
 
-            # Get next page URL (already includes params)
-            next_url = response.get("next")
-            if next_url:
-                # Extract path from full URL for next request
-                from urllib.parse import urlparse
+            # Check if there are more pages
+            if not response.get("next"):
+                break
 
-                parsed = urlparse(next_url)
-                # Handle both AAP 2.6 (/api/controller/v2/) and AAP 2.4 (/api/v2/) paths
-                endpoint = parsed.path.replace("/api/controller/v2/", "").replace("/api/v2/", "")
-                params = {}  # Next URL already has query params
-            else:
-                endpoint = None
+            page += 1
+
+        if page > MAX_PAGES:
+            logger.error(
+                "list_resources_pagination_limit_exceeded",
+                resource_type=resource_type,
+                max_pages=MAX_PAGES,
+                results_collected=len(all_results),
+                filters=filters,
+            )
 
         logger.debug(
             "list_resources_completed",
             resource_type=resource_type,
             total_results=len(all_results),
+            total_pages=page,
             filters=filters,
         )
 

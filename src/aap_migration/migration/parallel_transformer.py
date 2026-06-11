@@ -203,6 +203,14 @@ class ParallelTransformCoordinator:
                             reason=str(e),
                         )
                         stats["skipped_from_transformer"] += 1
+
+                        # Record skip in database for reporting
+                        self.migration_state.mark_transform_skipped(
+                            resource_type=resource_type,
+                            source_id=e.source_id,
+                            source_name=resource.get("name", "unknown"),
+                            reason=str(e),
+                        )
                     except Exception as e:
                         logger.warning(
                             "transformation_failed",
