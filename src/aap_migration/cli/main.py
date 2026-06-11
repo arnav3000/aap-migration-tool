@@ -114,6 +114,9 @@ def cli(
 
     # Launch interactive menu if no subcommand provided
     if ctx.invoked_subcommand is None:
+        from aap_migration.banner import print_cli_banner
+
+        print_cli_banner()
         interactive_menu(ctx)
 
 
