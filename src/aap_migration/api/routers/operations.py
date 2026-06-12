@@ -276,6 +276,7 @@ async def selective_migrate(
     dest_cfg = ConnectionService.build_instance_config(dest_conn)
     dest_auth = ConnectionService._auth_scheme(dest_conn)
     jt_ids = body.job_template_ids
+    force_update = body.force_update
     db_url = get_db_url()
 
     svc = get_job_service()
@@ -316,6 +317,45 @@ async def selective_migrate(
             ]
             migration_order.append("job_templates")
             num_phases = len(migration_order)
+
+            if force_update:
+                from sqlalchemy import text as sa_text
+
+                from aap_migration.api.dependencies import get_app_state
+
+                app_state = get_app_state()
+                session = app_state.db_session_factory()
+                try:
+                    all_force_types = list(deps.keys()) + ["job_templates"]
+                    for rt in all_force_types:
+                        source_id_list = (
+                            [jt.get("id") for jt in jt_data if jt.get("id") is not None]
+                            if rt == "job_templates"
+                            else list(deps.get(rt, set()))
+                        )
+                        if not source_id_list:
+                            continue
+                        session.execute(
+                            sa_text(
+                                "DELETE FROM migration_progress "
+                                "WHERE resource_type = :rt AND source_id = ANY(:ids)"
+                            ),
+                            {"rt": rt, "ids": source_id_list},
+                        )
+                        session.execute(
+                            sa_text(
+                                "UPDATE id_mappings SET target_id = NULL, target_name = NULL "
+                                "WHERE resource_type = :rt AND source_id = ANY(:ids)"
+                            ),
+                            {"rt": rt, "ids": source_id_list},
+                        )
+                    session.commit()
+                    log("Force mode: cleared prior state for selected resources")
+                except Exception as exc:
+                    session.rollback()
+                    log(f"Warning: failed to clear prior state: {exc}")
+                finally:
+                    session.close()
 
             emit({"_event": "migration_start", "total_phases": num_phases})
 
@@ -395,9 +435,7 @@ async def selective_migrate(
                             source_id=int(source_id),
                             data=resource,
                         )
-                        res_name = resource.get(
-                            "name", resource.get("username", str(source_id))
-                        )
+                        res_name = resource.get("name", resource.get("username", str(source_id)))
                         if result:
                             created += 1
                             emit(
