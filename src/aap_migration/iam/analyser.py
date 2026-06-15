@@ -1011,15 +1011,38 @@ class IAMAnalyser:
             stats=stats,
         )
 
-    def migrate(self, dry_run: bool = False) -> IAMAuditResult:
-        """Scan source, then apply permissions to target."""
+    def migrate(
+        self,
+        dry_run: bool = False,
+        skip_user_roles: bool = False,
+        users_only: bool = False,
+    ) -> IAMAuditResult:
+        """Scan source, then apply permissions to target.
+
+        Args:
+            dry_run: Show what would be assigned without making changes.
+            skip_user_roles: Migrate team-based permissions only. User
+                permissions and team memberships (user→team) are marked
+                as 'pending' for a later --users-only pass.
+            users_only: Migrate only user-based permissions and team
+                memberships. Skips team-based resource permissions
+                (already done in a prior --skip-user-roles pass).
+        """
         if not self.target_url or not self.target_token:
             raise RuntimeError(
                 "Target URL and token required for migration"
             )
+        if skip_user_roles and users_only:
+            raise ValueError(
+                "--skip-user-roles and --users-only are mutually exclusive"
+            )
 
         mode = "dry_run" if dry_run else "migrate"
         label = "dry-run" if dry_run else "migration"
+        if skip_user_roles:
+            label = f"{label} (teams only)"
+        elif users_only:
+            label = f"{label} (users only)"
         self._progress(f"Starting IAM {label}...")
         self._progress(f"Source: {self.source_url}")
         self._progress(f"Target: {self.target_url}")
@@ -1033,9 +1056,49 @@ class IAMAnalyser:
         stats.system_roles_found = len(system_roles)
         stats.cross_org_shares = len(cross_org_shares)
 
+        user_perms = [p for p in permissions if p.principal_type == "user"]
+        team_perms = [p for p in permissions if p.principal_type == "team"]
+        stats.user_permissions_total = len(user_perms)
+        stats.team_permissions_total = len(team_perms)
+
         self._validate_prerequisites()
-        self._migrate_team_memberships(memberships, stats, dry_run=dry_run)
-        self._migrate_permissions(permissions, stats, dry_run=dry_run)
+
+        if skip_user_roles:
+            for p in user_perms:
+                p.status = "pending"
+                stats.permissions_skipped += 1
+            stats.user_permissions_pending = len(user_perms)
+            self._progress(
+                f"  Skipping {len(user_perms)} user-based permissions "
+                f"(use --users-only later)"
+            )
+            for m in memberships:
+                m.status = "pending"
+            stats.team_memberships_skipped = len(memberships)
+            self._progress(
+                f"  Skipping {len(memberships)} team memberships "
+                f"(use --users-only later)"
+            )
+            self._migrate_permissions(team_perms, stats, dry_run=dry_run)
+
+        elif users_only:
+            for p in team_perms:
+                p.status = "skipped"
+                stats.permissions_skipped += 1
+            self._progress(
+                f"  Skipping {len(team_perms)} team-based permissions "
+                f"(already migrated)"
+            )
+            self._migrate_team_memberships(
+                memberships, stats, dry_run=dry_run
+            )
+            self._migrate_permissions(user_perms, stats, dry_run=dry_run)
+
+        else:
+            self._migrate_team_memberships(
+                memberships, stats, dry_run=dry_run
+            )
+            self._migrate_permissions(permissions, stats, dry_run=dry_run)
 
         org_summaries = self.build_org_summaries(
             permissions, memberships, cross_org_shares

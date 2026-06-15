@@ -157,6 +157,18 @@ def audit(
     show_default=True,
     help="Concurrent workers for role membership scanning.",
 )
+@click.option(
+    "--skip-user-roles",
+    is_flag=True,
+    default=False,
+    help="Migrate team-based permissions only. User permissions are marked pending.",
+)
+@click.option(
+    "--users-only",
+    is_flag=True,
+    default=False,
+    help="Migrate user permissions and team memberships only (run after --skip-user-roles).",
+)
 @click.pass_context
 def migrate(
     ctx: click.Context,
@@ -166,15 +178,32 @@ def migrate(
     dry_run: bool,
     timeout: int,
     workers: int,
+    skip_user_roles: bool,
+    users_only: bool,
 ) -> None:
-    """Full migration: team memberships + resource permissions.
+    """Migrate IAM permissions to target AAP.
 
-    Scans source AAP, then applies permissions to target AAP.
+    \b
+    Two-phase strategy for LDAP environments:
+      Phase 1: aap-bridge iam migrate --skip-user-roles
+               Migrates all team-based permissions (no users needed)
+      Phase 2: aap-bridge iam migrate --users-only
+               Migrates user permissions after users login via LDAP
+
+    \b
+    Or run without flags for full migration (all permissions at once).
 
     Required env vars: SOURCE__URL, SOURCE__TOKEN, TARGET__URL, TARGET__TOKEN
     """
     from aap_migration.iam.analyser import IAMAnalyser
     from aap_migration.iam.report import write_iam_report
+
+    if skip_user_roles and users_only:
+        click.echo(
+            "Error: --skip-user-roles and --users-only are mutually exclusive",
+            err=True,
+        )
+        sys.exit(1)
 
     source_url = os.environ.get("SOURCE__URL", "")
     source_token = os.environ.get("SOURCE__TOKEN", "")
@@ -202,7 +231,14 @@ def migrate(
         state_db = os.environ.get("MIGRATION_STATE_DB_PATH")
 
     label = "DRY-RUN" if dry_run else "MIGRATION"
-    prefix = "iam_dry_run" if dry_run else "iam_migration"
+    if skip_user_roles:
+        label += " (teams only)"
+        prefix = "iam_teams_only"
+    elif users_only:
+        label += " (users only)"
+        prefix = "iam_users_only"
+    else:
+        prefix = "iam_dry_run" if dry_run else "iam_migration"
 
     try:
         with IAMAnalyser(
@@ -216,7 +252,11 @@ def migrate(
             max_workers=workers,
             progress_callback=_echo,
         ) as analyser:
-            result = analyser.migrate(dry_run=dry_run)
+            result = analyser.migrate(
+                dry_run=dry_run,
+                skip_user_roles=skip_user_roles,
+                users_only=users_only,
+            )
 
         json_path, html_path = write_iam_report(
             result,
@@ -232,13 +272,26 @@ def migrate(
         click.echo("=" * 60)
         click.echo(f"  Resources scanned:      {s.resources_scanned}")
         click.echo(f"  Permissions found:      {s.permissions_found}")
+        click.echo(f"    Team-based:           {s.team_permissions_total}")
+        click.echo(f"    User-based:           {s.user_permissions_total}")
         click.echo(f"  Permissions migrated:   {s.permissions_migrated}")
         click.echo(f"  Permissions failed:     {s.permissions_failed}")
-        if s.permissions_found > 0:
-            rate = (s.permissions_migrated / s.permissions_found) * 100
+        click.echo(f"  Permissions skipped:    {s.permissions_skipped}")
+        if s.user_permissions_pending:
+            click.echo(
+                f"  User perms pending:     {s.user_permissions_pending}"
+                f"  (run --users-only later)"
+            )
+        attempted = s.permissions_migrated + s.permissions_failed
+        if attempted > 0:
+            rate = (s.permissions_migrated / attempted) * 100
             click.echo(f"  Success rate:           {rate:.1f}%")
         click.echo(f"  Team members migrated:  {s.team_memberships_migrated}")
         click.echo(f"  Team members failed:    {s.team_memberships_failed}")
+        if s.team_memberships_skipped:
+            click.echo(
+                f"  Team members pending:   {s.team_memberships_skipped}"
+            )
         click.echo("")
         click.echo(f"  JSON report: {json_path}")
         click.echo(f"  HTML report: {html_path}")
