@@ -161,6 +161,9 @@ class MigrationStats:
     permissions_failed: int = 0
     permissions_skipped: int = 0
     permissions_deduplicated: int = 0
+    user_permissions_total: int = 0
+    user_permissions_pending: int = 0
+    team_permissions_total: int = 0
     team_memberships_found: int = 0
     team_memberships_migrated: int = 0
     team_memberships_failed: int = 0
@@ -176,6 +179,9 @@ class MigrationStats:
             "permissions_failed": self.permissions_failed,
             "permissions_skipped": self.permissions_skipped,
             "permissions_deduplicated": self.permissions_deduplicated,
+            "user_permissions_total": self.user_permissions_total,
+            "user_permissions_pending": self.user_permissions_pending,
+            "team_permissions_total": self.team_permissions_total,
             "team_memberships_found": self.team_memberships_found,
             "team_memberships_migrated": self.team_memberships_migrated,
             "team_memberships_failed": self.team_memberships_failed,
