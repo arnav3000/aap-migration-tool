@@ -232,6 +232,63 @@ def migrate(
 
 
 @iam.command()
+@click.option(
+    "--verify-ssl/--no-verify-ssl",
+    default=True,
+    show_default=True,
+    help="Verify TLS certificates on API calls.",
+)
+@click.option(
+    "--sample-size",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Number of role IDs to sample.",
+)
+@click.option(
+    "--workers",
+    type=int,
+    multiple=True,
+    default=None,
+    help="Worker counts to test (repeatable, e.g. --workers 10 --workers 20).",
+)
+def benchmark(verify_ssl: bool, sample_size: int, workers: tuple[int, ...]) -> None:
+    """Benchmark API performance before running a full audit.
+
+    Measures actual response times and concurrency capacity against
+    the source AAP instance. Use the results to choose the right
+    worker count for the audit command.
+
+    Required env vars: SOURCE__URL, SOURCE__TOKEN
+    """
+    from aap_migration.iam.benchmark import run_benchmark
+
+    source_url = os.environ.get("SOURCE__URL", "")
+    source_token = os.environ.get("SOURCE__TOKEN", "")
+
+    if not source_url or not source_token:
+        click.echo(
+            "Error: SOURCE__URL and SOURCE__TOKEN environment variables required",
+            err=True,
+        )
+        sys.exit(1)
+
+    worker_list = list(workers) if workers else [1, 10, 20]
+
+    try:
+        run_benchmark(
+            source_url=source_url,
+            source_token=source_token,
+            verify_ssl=verify_ssl,
+            sample_size=sample_size,
+            worker_counts=worker_list,
+        )
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@iam.command()
 @click.argument("json_path", type=click.Path(exists=True))
 @click.option(
     "--output-dir",
