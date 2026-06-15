@@ -13,7 +13,7 @@ aiofiles==25.1.0
 click==8.4.0
 
 # Logging
-structlog==25.5.0
+structlog==26.1.0
 
 # Retry Logic
 tenacity==8.2.3
