@@ -44,12 +44,20 @@ def iam() -> None:
     show_default=True,
     help="HTTP request timeout in seconds.",
 )
+@click.option(
+    "--workers",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Concurrent workers for role membership scanning. Use 'iam benchmark' to find optimal value.",
+)
 @click.pass_context
 def audit(
     ctx: click.Context,
     output_dir: str,
     verify_ssl: bool,
     timeout: int,
+    workers: int,
 ) -> None:
     """Read-only scan: export permission matrix and generate report.
 
@@ -76,6 +84,7 @@ def audit(
             source_token=source_token,
             verify_ssl=verify_ssl,
             request_timeout=timeout,
+            max_workers=workers,
             progress_callback=_echo,
         ) as analyser:
             result = analyser.audit()
@@ -141,6 +150,13 @@ def audit(
     show_default=True,
     help="HTTP request timeout in seconds.",
 )
+@click.option(
+    "--workers",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Concurrent workers for role membership scanning.",
+)
 @click.pass_context
 def migrate(
     ctx: click.Context,
@@ -149,6 +165,7 @@ def migrate(
     state_db: str | None,
     dry_run: bool,
     timeout: int,
+    workers: int,
 ) -> None:
     """Full migration: team memberships + resource permissions.
 
@@ -196,6 +213,7 @@ def migrate(
             state_db_path=state_db,
             verify_ssl=verify_ssl,
             request_timeout=timeout,
+            max_workers=workers,
             progress_callback=_echo,
         ) as analyser:
             result = analyser.migrate(dry_run=dry_run)

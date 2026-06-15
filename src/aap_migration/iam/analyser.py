@@ -22,8 +22,10 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -96,6 +98,7 @@ class IAMAnalyser:
         verify_ssl: bool = True,
         request_timeout: int = 60,
         rate_limit_delay: float = 0.15,
+        max_workers: int = 1,
         progress_callback: Callable[[str], None] | None = None,
     ):
         self.source_url = _validate_api_url(source_url, "Source URL")
@@ -118,11 +121,13 @@ class IAMAnalyser:
         self.verify_ssl = verify_ssl
         self.request_timeout = request_timeout
         self.rate_limit_delay = rate_limit_delay
+        self.max_workers = max(1, max_workers)
         self._progress = progress_callback or (lambda msg: None)
 
-        self._source_session = self._create_session()
+        pool_size = max(10, self.max_workers + 4)
+        self._source_session = self._create_session(pool_size=pool_size)
         self._target_session = (
-            self._create_session() if self.target_url else None
+            self._create_session(pool_size=pool_size) if self.target_url else None
         )
 
         self._id_mappings: dict[str, dict[int, int]] = {}
@@ -130,6 +135,7 @@ class IAMAnalyser:
             self._load_id_mappings(state_db_path)
 
         self._org_cache: dict[int, str] = {}
+        self._org_cache_lock = threading.Lock()
         self._source_host = urlparse(self.source_url).hostname
         self._target_host = (
             urlparse(self.target_url).hostname if self.target_url else None
@@ -149,7 +155,7 @@ class IAMAnalyser:
     # ── Session / HTTP helpers ────────────────────────────────────────
 
     @staticmethod
-    def _create_session() -> requests.Session:
+    def _create_session(pool_size: int = 10) -> requests.Session:
         session = requests.Session()
         retry = Retry(
             total=3,
@@ -157,7 +163,7 @@ class IAMAnalyser:
             status_forcelist=[502, 503, 504],
             allowed_methods=["GET", "POST"],
         )
-        adapter = HTTPAdapter(max_retries=retry, pool_maxsize=10)
+        adapter = HTTPAdapter(max_retries=retry, pool_maxsize=pool_size)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         session.headers.update(
@@ -394,11 +400,13 @@ class IAMAnalyser:
     def _get_org_name(self, org_id: int | None) -> str:
         if not org_id:
             return "N/A"
-        if org_id in self._org_cache:
-            return self._org_cache[org_id]
+        with self._org_cache_lock:
+            if org_id in self._org_cache:
+                return self._org_cache[org_id]
         data = self._source_get(f"organizations/{org_id}/")
         name = data.get("name", f"org-{org_id}") if data else f"org-{org_id}"
-        self._org_cache[org_id] = name
+        with self._org_cache_lock:
+            self._org_cache[org_id] = name
         return name
 
     @staticmethod
@@ -410,8 +418,80 @@ class IAMAnalyser:
 
     # ── Phase 1: Scan permissions ─────────────────────────────────────
 
+    def _fetch_role_members(
+        self,
+        role_id: int,
+        role_name: str,
+        resource_type: str,
+        res_id: int,
+        res_name: str,
+        res_org: str,
+    ) -> list[PermissionEntry]:
+        """Fetch users and teams for a single role. Thread-safe."""
+        results: list[PermissionEntry] = []
+
+        for user in self._source_paginate(f"roles/{role_id}/users/"):
+            user_org_id = (
+                user.get("summary_fields", {})
+                .get("organization", {})
+                .get("id")
+            )
+            user_org = self._get_org_name(user_org_id)
+            results.append(
+                PermissionEntry(
+                    resource_type=resource_type,
+                    resource_id=res_id,
+                    resource_name=res_name,
+                    resource_org=res_org,
+                    role_name=role_name,
+                    principal_type="user",
+                    principal_id=user["id"],
+                    principal_name=user.get(
+                        "username", f"user-{user['id']}"
+                    ),
+                    principal_org=user_org,
+                    is_cross_org=(
+                        user_org != "N/A"
+                        and res_org != "N/A"
+                        and user_org != res_org
+                    ),
+                )
+            )
+
+        for team in self._source_paginate(f"roles/{role_id}/teams/"):
+            team_org_id = team.get("organization") or (
+                team.get("summary_fields", {})
+                .get("organization", {})
+                .get("id")
+            )
+            team_org = self._get_org_name(team_org_id)
+            results.append(
+                PermissionEntry(
+                    resource_type=resource_type,
+                    resource_id=res_id,
+                    resource_name=res_name,
+                    resource_org=res_org,
+                    role_name=role_name,
+                    principal_type="team",
+                    principal_id=team["id"],
+                    principal_name=team.get(
+                        "name", f"team-{team['id']}"
+                    ),
+                    principal_org=team_org,
+                    is_cross_org=(
+                        team_org != "N/A"
+                        and res_org != "N/A"
+                        and team_org != res_org
+                    ),
+                )
+            )
+
+        return results
+
     def scan_permissions(self) -> tuple[list[PermissionEntry], MigrationStats]:
-        self._progress("Phase 1: Scanning resource permissions...")
+        parallel = self.max_workers > 1
+        mode_label = f"{self.max_workers} workers" if parallel else "sequential"
+        self._progress(f"Phase 1: Scanning resource permissions ({mode_label})...")
         stats = MigrationStats()
         entries: list[PermissionEntry] = []
         seen: set[tuple] = set()
@@ -420,6 +500,8 @@ class IAMAnalyser:
             self._progress(f"  Scanning {resource_type}...")
             resources = self._source_paginate(f"{resource_type}/")
             self._progress(f"  Found {len(resources)} {resource_type}")
+
+            role_work: list[tuple[int, str, str, int, str, str]] = []
 
             for resource in resources:
                 stats.resources_scanned += 1
@@ -440,35 +522,79 @@ class IAMAnalyser:
                 )
 
                 for role in object_roles:
-                    role_id = role["id"]
-                    role_name = role.get("name", "")
+                    role_work.append((
+                        role["id"],
+                        role.get("name", ""),
+                        resource_type,
+                        res_id,
+                        res_name,
+                        res_org,
+                    ))
 
-                    for user in self._source_paginate(
-                        f"roles/{role_id}/users/"
-                    ):
-                        user_org = self._get_org_name(
-                            user.get("summary_fields", {})
-                            .get("organization", {})
-                            .get("id")
+            if not role_work:
+                self._progress(f"  {resource_type}: 0 permission entries")
+                continue
+
+            self._progress(
+                f"  Fetching membership for {len(role_work)} roles..."
+            )
+
+            if parallel:
+                completed = 0
+                completed_lock = threading.Lock()
+
+                def _progress_tick() -> None:
+                    nonlocal completed
+                    with completed_lock:
+                        completed += 1
+                        c = completed
+                    if c % 500 == 0 or c == len(role_work):
+                        self._progress(
+                            f"    {c}/{len(role_work)} roles processed"
                         )
-                        entry = PermissionEntry(
-                            resource_type=resource_type,
-                            resource_id=res_id,
-                            resource_name=res_name,
-                            resource_org=res_org,
-                            role_name=role_name,
-                            principal_type="user",
-                            principal_id=user["id"],
-                            principal_name=user.get(
-                                "username", f"user-{user['id']}"
-                            ),
-                            principal_org=user_org,
-                            is_cross_org=(
-                                user_org != "N/A"
-                                and res_org != "N/A"
-                                and user_org != res_org
-                            ),
+
+                with ThreadPoolExecutor(
+                    max_workers=self.max_workers
+                ) as executor:
+                    futures = {
+                        executor.submit(
+                            self._fetch_role_members, *work_item
+                        ): work_item
+                        for work_item in role_work
+                    }
+
+                    for future in as_completed(futures):
+                        try:
+                            role_entries = future.result()
+                        except Exception:
+                            work = futures[future]
+                            logger.error(
+                                "Role membership fetch failed for role %d",
+                                work[0],
+                            )
+                            _progress_tick()
+                            continue
+
+                        for entry in role_entries:
+                            if entry.dedup_key not in seen:
+                                seen.add(entry.dedup_key)
+                                entries.append(entry)
+                                stats.permissions_found += 1
+                            else:
+                                stats.permissions_deduplicated += 1
+                        _progress_tick()
+            else:
+                for i, work_item in enumerate(role_work):
+                    try:
+                        role_entries = self._fetch_role_members(*work_item)
+                    except Exception:
+                        logger.error(
+                            "Role membership fetch failed for role %d",
+                            work_item[0],
                         )
+                        continue
+
+                    for entry in role_entries:
                         if entry.dedup_key not in seen:
                             seen.add(entry.dedup_key)
                             entries.append(entry)
@@ -476,39 +602,10 @@ class IAMAnalyser:
                         else:
                             stats.permissions_deduplicated += 1
 
-                    for team in self._source_paginate(
-                        f"roles/{role_id}/teams/"
-                    ):
-                        team_org_id = team.get("organization") or (
-                            team.get("summary_fields", {})
-                            .get("organization", {})
-                            .get("id")
+                    if (i + 1) % 500 == 0:
+                        self._progress(
+                            f"    {i + 1}/{len(role_work)} roles processed"
                         )
-                        team_org = self._get_org_name(team_org_id)
-                        entry = PermissionEntry(
-                            resource_type=resource_type,
-                            resource_id=res_id,
-                            resource_name=res_name,
-                            resource_org=res_org,
-                            role_name=role_name,
-                            principal_type="team",
-                            principal_id=team["id"],
-                            principal_name=team.get(
-                                "name", f"team-{team['id']}"
-                            ),
-                            principal_org=team_org,
-                            is_cross_org=(
-                                team_org != "N/A"
-                                and res_org != "N/A"
-                                and team_org != res_org
-                            ),
-                        )
-                        if entry.dedup_key not in seen:
-                            seen.add(entry.dedup_key)
-                            entries.append(entry)
-                            stats.permissions_found += 1
-                        else:
-                            stats.permissions_deduplicated += 1
 
                     time.sleep(self.rate_limit_delay)
 
