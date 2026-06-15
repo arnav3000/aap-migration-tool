@@ -201,14 +201,10 @@ def generate_iam_html_report(result: IAMAuditResult) -> str:
             k: v.to_dict() for k, v in result.org_summaries.items()
         },
         "type_summaries": _build_type_summaries(result.permissions),
+        "permissions": [p.to_dict() for p in result.permissions],
         "cross_org_shares": [c.to_dict() for c in result.cross_org_shares],
         "system_roles": [r.to_dict() for r in result.system_roles],
         "team_summary": _build_team_summary(result.team_memberships),
-        "failures": [
-            p.to_dict()
-            for p in result.permissions
-            if p.status == "failed"
-        ],
         "membership_failures": [
             m.to_dict()
             for m in result.team_memberships
@@ -224,7 +220,7 @@ def generate_iam_html_report(result: IAMAuditResult) -> str:
         if is_migrate
         else ""
     )
-    failures_content = (
+    failures_div = (
         '<div class="content hidden" id="failuresContent"></div>'
         if is_migrate
         else ""
@@ -247,39 +243,63 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 .tab{{padding:15px 25px;cursor:pointer;border:none;background:transparent;font-size:.95em;font-weight:600;color:#6c757d;transition:all .3s;border-bottom:3px solid transparent;margin-bottom:-3px;white-space:nowrap}}
 .tab:hover{{background:#e9ecef;color:#495057}}
 .tab.active{{color:#667eea;border-bottom-color:#667eea;background:#fff}}
-.stats{{padding:20px 30px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:15px}}
-.stat-card{{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:20px;border-radius:8px;text-align:center}}
+.stats{{padding:20px 30px;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}}
+.stat-card{{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:18px;border-radius:8px;text-align:center}}
 .stat-card.success{{background:linear-gradient(135deg,#11998e 0%,#38ef7d 100%)}}
 .stat-card.warning{{background:linear-gradient(135deg,#f7971e 0%,#ffd200 100%);color:#333}}
 .stat-card.danger{{background:linear-gradient(135deg,#f093fb 0%,#f5576c 100%)}}
-.stat-card .value{{font-size:2.2em;font-weight:bold;margin-bottom:5px}}
-.stat-card .label{{font-size:.85em;opacity:.9}}
+.stat-card .value{{font-size:2em;font-weight:bold;margin-bottom:4px}}
+.stat-card .label{{font-size:.82em;opacity:.9}}
 .content{{padding:30px;min-height:300px}}
 .content.hidden{{display:none}}
-table{{width:100%;border-collapse:collapse;margin-top:15px;font-size:.9em}}
-th{{background:#667eea;color:#fff;padding:12px;text-align:left;font-weight:600;position:sticky;top:0}}
-td{{padding:10px 12px;border-bottom:1px solid #e9ecef}}
+table{{width:100%;border-collapse:collapse;margin-top:12px;font-size:.88em}}
+th{{background:#667eea;color:#fff;padding:10px 12px;text-align:left;font-weight:600;position:sticky;top:0;z-index:1}}
+td{{padding:9px 12px;border-bottom:1px solid #e9ecef}}
 tr:hover{{background:#f8f9fa}}
-.badge{{padding:3px 8px;border-radius:4px;font-size:.8em;font-weight:600}}
+tr.clickable{{cursor:pointer}}
+tr.clickable:hover{{background:#e8ecff}}
+.badge{{display:inline-block;padding:3px 8px;border-radius:4px;font-size:.78em;font-weight:600}}
 .badge-audit{{background:#e3f2fd;color:#1565c0}}
 .badge-migrated{{background:#c8e6c9;color:#2e7d32}}
 .badge-failed{{background:#ffcdd2;color:#c62828}}
+.badge-pending{{background:#fff3e0;color:#e65100}}
+.badge-skipped{{background:#eceff1;color:#546e6f}}
 .badge-dry_run{{background:#fff3e0;color:#e65100}}
+.badge-user{{background:#e8eaf6;color:#283593}}
+.badge-team{{background:#e0f2f1;color:#00695c}}
 .success-rate{{font-weight:600;padding:3px 8px;border-radius:4px}}
 .success-rate.high{{background:#d4edda;color:#155724}}
 .success-rate.medium{{background:#fff3cd;color:#856404}}
 .success-rate.low{{background:#f8d7da;color:#721c24}}
-.section-title{{font-size:1.1em;font-weight:600;color:#495057;padding:10px 0;border-bottom:2px solid #e9ecef;margin-bottom:15px;margin-top:25px}}
-.pagination{{display:flex;justify-content:center;align-items:center;gap:10px;padding:20px;margin-top:20px}}
+.section-title{{font-size:1.1em;font-weight:600;color:#495057;padding:10px 0;border-bottom:2px solid #e9ecef;margin-bottom:12px;margin-top:20px}}
+.filters{{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:15px}}
+.filter-select{{padding:8px 12px;border:2px solid #dee2e6;border-radius:6px;font-size:14px;min-width:200px;background:#fff}}
+.filter-select:focus{{outline:none;border-color:#667eea}}
+.search-box{{padding:8px 12px;border:2px solid #dee2e6;border-radius:6px;font-size:14px;min-width:220px}}
+.search-box:focus{{outline:none;border-color:#667eea;box-shadow:0 0 0 3px rgba(102,126,234,.1)}}
+.filter-label{{font-weight:600;color:#495057;font-size:.9em}}
+.res-group{{margin:15px 0;border:1px solid #e9ecef;border-radius:8px;overflow:hidden}}
+.res-group-header{{background:#f8f9fa;padding:12px 16px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;font-weight:600;color:#495057;border-bottom:1px solid #e9ecef}}
+.res-group-header:hover{{background:#e8ecff}}
+.res-group-header .arrow{{transition:transform .2s;font-size:.8em}}
+.res-group-header .arrow.open{{transform:rotate(90deg)}}
+.res-group-body{{display:none}}
+.res-group-body.open{{display:block}}
+.res-item{{border-bottom:1px solid #f0f0f0}}
+.res-item-header{{padding:10px 16px 10px 32px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;font-weight:500}}
+.res-item-header:hover{{background:#f8f9fa}}
+.res-item-roles{{display:none;padding:0 16px 10px 48px}}
+.res-item-roles.open{{display:block}}
+.role-row{{padding:4px 0;font-size:.88em;color:#495057;display:flex;gap:8px;align-items:center}}
+.no-data{{text-align:center;padding:60px 20px;color:#6c757d}}
+.error-cell{{max-width:400px;word-wrap:break-word;font-size:.85em;color:#495057}}
+.pagination{{display:flex;justify-content:center;align-items:center;gap:10px;padding:15px;margin-top:15px}}
 .pagination.hidden{{display:none}}
 .pagination button{{padding:8px 16px;border:2px solid #667eea;background:#fff;color:#667eea;border-radius:6px;cursor:pointer;font-weight:600;transition:all .3s}}
 .pagination button:hover:not(:disabled){{background:#667eea;color:#fff}}
 .pagination button:disabled{{opacity:.3;cursor:not-allowed}}
-.pagination .page-info{{padding:0 15px;font-weight:600;color:#495057}}
-.no-data{{text-align:center;padding:60px 20px;color:#6c757d}}
-.error-cell{{max-width:400px;word-wrap:break-word;font-size:.85em;color:#495057}}
-.search-box{{padding:10px 15px;border:2px solid #dee2e6;border-radius:6px;font-size:14px;min-width:250px;margin-bottom:15px}}
-.search-box:focus{{outline:none;border-color:#667eea;box-shadow:0 0 0 3px rgba(102,126,234,.1)}}
+.pagination .page-info{{padding:0 12px;font-weight:600;color:#495057;font-size:.9em}}
+.count-chip{{background:#e9ecef;color:#495057;padding:2px 8px;border-radius:10px;font-size:.8em;font-weight:600}}
 </style>
 </head>
 <body>
@@ -292,122 +312,334 @@ tr:hover{{background:#f8f9fa}}
 <button class="tab active" data-tab="dashboard">Dashboard</button>
 <button class="tab" data-tab="byOrg">By Organization</button>
 <button class="tab" data-tab="byType">By Resource Type</button>
-<button class="tab" data-tab="crossOrg">Cross-Org Sharing</button>
+<button class="tab" data-tab="matrix">Permission Matrix</button>
 <button class="tab" data-tab="teams">Team Memberships</button>
 <button class="tab" data-tab="sysRoles">System Roles</button>
+<button class="tab" data-tab="crossOrg">Cross-Org Sharing</button>
 {failures_tab}
 </div>
 <div class="stats" id="statsContainer"></div>
 <div class="content" id="dashboardContent"></div>
 <div class="content hidden" id="byOrgContent"></div>
 <div class="content hidden" id="byTypeContent"></div>
-<div class="content hidden" id="crossOrgContent"></div>
+<div class="content hidden" id="matrixContent"></div>
 <div class="content hidden" id="teamsContent"></div>
 <div class="content hidden" id="sysRolesContent"></div>
-{failures_content}
+<div class="content hidden" id="crossOrgContent"></div>
+{failures_div}
 <div class="pagination hidden" id="paginationContainer">
-<button id="prevPage">Previous</button>
-<span class="page-info" id="pageInfo">Page 1 of 1</span>
-<button id="nextPage">Next</button>
+<button id="prevBtn">Previous</button>
+<span class="page-info" id="pageInfo">Page 1</span>
+<button id="nextBtn">Next</button>
 </div>
 </div>
 <script>
 const D={json_block};
-const IS_MIGRATE=D.metadata.mode==='migrate'||D.metadata.mode==='dry_run';
-let curTab='dashboard',curPage=1,filtered=[];
+const P=D.permissions||[];
+const IS_MIG=D.metadata.mode==='migrate'||D.metadata.mode==='dry_run';
 const PER_PAGE=100;
+let curTab='dashboard',mPage=1,mFiltered=[];
+const TYPE_NAMES={{"organizations":"Organizations","teams":"Teams","credentials":"Credentials","projects":"Projects","inventories":"Inventories","job_templates":"Job Templates","workflow_job_templates":"Workflow Templates","notification_templates":"Notifications","instance_groups":"Instance Groups"}};
+function tn(t){{return TYPE_NAMES[t]||t.replace(/_/g,' ').replace(/\\b\\w/g,c=>c.toUpperCase())}}
 function esc(t){{const d=document.createElement('div');d.textContent=t;return d.innerHTML}}
+function badge(s){{return `<span class="badge badge-${{s}}">${{esc(s)}}</span>`}}
+function pbadge(t){{return `<span class="badge badge-${{t}}">${{t}}</span>`}}
 function init(){{
 renderDashboard();
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>switchTab(t.dataset.tab)));
-document.getElementById('prevPage').addEventListener('click',()=>{{if(curPage>1){{curPage--;renderPage()}}}});
-document.getElementById('nextPage').addEventListener('click',()=>{{const tp=Math.ceil(filtered.length/PER_PAGE);if(curPage<tp){{curPage++;renderPage()}}}});
+document.getElementById('prevBtn').addEventListener('click',()=>{{if(mPage>1){{mPage--;renderMatrixPage()}}}});
+document.getElementById('nextBtn').addEventListener('click',()=>{{const tp=Math.ceil(mFiltered.length/PER_PAGE);if(mPage<tp){{mPage++;renderMatrixPage()}}}});
 }}
 function switchTab(tab){{
-curTab=tab;curPage=1;
+curTab=tab;
 document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
 document.querySelectorAll('.content').forEach(c=>c.classList.add('hidden'));
 document.getElementById('paginationContainer').classList.add('hidden');
-if(tab==='dashboard'){{document.getElementById('dashboardContent').classList.remove('hidden');renderDashboard()}}
-else if(tab==='byOrg'){{document.getElementById('byOrgContent').classList.remove('hidden');renderByOrg()}}
-else if(tab==='byType'){{document.getElementById('byTypeContent').classList.remove('hidden');renderByType()}}
-else if(tab==='crossOrg'){{document.getElementById('crossOrgContent').classList.remove('hidden');renderCrossOrg()}}
-else if(tab==='teams'){{document.getElementById('teamsContent').classList.remove('hidden');renderTeams()}}
-else if(tab==='sysRoles'){{document.getElementById('sysRolesContent').classList.remove('hidden');renderSysRoles()}}
-else if(tab==='failures'){{document.getElementById('failuresContent').classList.remove('hidden');renderFailures()}}
+const el=document.getElementById(tab+'Content');
+if(el)el.classList.remove('hidden');
+if(tab==='dashboard')renderDashboard();
+else if(tab==='byOrg')renderByOrg();
+else if(tab==='byType')renderByType();
+else if(tab==='matrix')renderMatrix();
+else if(tab==='teams')renderTeams();
+else if(tab==='sysRoles')renderSysRoles();
+else if(tab==='crossOrg')renderCrossOrg();
+else if(tab==='failures')renderFailures();
+}}
+function drillOrg(name){{
+switchTab('byOrg');
+setTimeout(()=>{{
+const sel=document.getElementById('orgDrillSelect');
+if(sel){{sel.value=name;sel.dispatchEvent(new Event('change'))}}
+}},50);
 }}
 function renderDashboard(){{
 const s=D.stats;
-const uniqueUsers=new Set();const uniqueTeams=new Set();
-D.stats._raw_not_available=true;
+const userCount=P.filter(p=>p.principal_type==='user').length;
+const teamCount=P.filter(p=>p.principal_type==='team').length;
 let cards=`
 <div class="stat-card"><div class="value">${{s.resources_scanned}}</div><div class="label">Resources Scanned</div></div>
-<div class="stat-card"><div class="value">${{s.permissions_found}}</div><div class="label">Permissions Found</div></div>
+<div class="stat-card"><div class="value">${{s.permissions_found}}</div><div class="label">Total Permissions</div></div>
+<div class="stat-card"><div class="value">${{teamCount}}</div><div class="label">Team Permissions</div></div>
+<div class="stat-card"><div class="value">${{userCount}}</div><div class="label">User Permissions</div></div>
 <div class="stat-card"><div class="value">${{s.team_memberships_found}}</div><div class="label">Team Memberships</div></div>
-<div class="stat-card"><div class="value">${{s.system_roles_found}}</div><div class="label">System Roles</div></div>
-<div class="stat-card warning"><div class="value">${{s.cross_org_shares}}</div><div class="label">Cross-Org Shares</div></div>`;
-if(s.permissions_deduplicated){{cards+=`<div class="stat-card"><div class="value">${{s.permissions_deduplicated}}</div><div class="label">Deduplicated</div></div>`}}
-if(IS_MIGRATE){{
-const rate=s.permissions_found>0?Math.round((s.permissions_migrated/s.permissions_found)*100):0;
+<div class="stat-card"><div class="value">${{s.system_roles_found}}</div><div class="label">System Roles</div></div>`;
+if(s.cross_org_shares)cards+=`<div class="stat-card warning"><div class="value">${{s.cross_org_shares}}</div><div class="label">Cross-Org Shares</div></div>`;
+if(IS_MIG){{
+const attempted=s.permissions_migrated+s.permissions_failed;
+const rate=attempted>0?Math.round((s.permissions_migrated/attempted)*100):0;
 cards+=`
 <div class="stat-card success"><div class="value">${{s.permissions_migrated}}</div><div class="label">Migrated</div></div>
-<div class="stat-card danger"><div class="value">${{s.permissions_failed}}</div><div class="label">Failed</div></div>
-<div class="stat-card"><div class="value">${{rate}}%</div><div class="label">Success Rate</div></div>`;
+<div class="stat-card danger"><div class="value">${{s.permissions_failed}}</div><div class="label">Failed</div></div>`;
+if(s.permissions_skipped)cards+=`<div class="stat-card warning"><div class="value">${{s.permissions_skipped}}</div><div class="label">Pending/Skipped</div></div>`;
+cards+=`<div class="stat-card"><div class="value">${{rate}}%</div><div class="label">Success Rate</div></div>`;
 }}
 document.getElementById('statsContainer').innerHTML=cards;
 const orgs=Object.entries(D.org_summaries).sort((a,b)=>b[1].permissions_total-a[1].permissions_total);
-let h='<div class="section-title">Top Organizations by Permission Count</div>';
-h+='<table><thead><tr><th>Organization</th><th>Resources</th><th>Permissions</th><th>Team Members</th><th>Cross-Org</th>';
-if(IS_MIGRATE)h+='<th>Success Rate</th>';
+let h='<div class="section-title">Organizations</div>';
+h+='<table><thead><tr><th>Organization</th><th>Resources</th><th>Permissions</th><th>Team-based</th><th>User-based</th><th>Team Members</th>';
+if(IS_MIG)h+='<th>Status</th>';
 h+='</tr></thead><tbody>';
-orgs.slice(0,20).forEach(([name,s])=>{{
-let rateHtml='';
-if(IS_MIGRATE){{
+orgs.forEach(([name,s])=>{{
+const orgPerms=P.filter(p=>p.resource_org===name);
+const tPerms=orgPerms.filter(p=>p.principal_type==='team').length;
+const uPerms=orgPerms.filter(p=>p.principal_type==='user').length;
+let statusHtml='';
+if(IS_MIG){{
 const r=s.success_rate||0;const cls=r>=80?'high':r>=50?'medium':'low';
-rateHtml=`<td><span class="success-rate ${{cls}}">${{r}}%</span></td>`;
+statusHtml=`<td><span class="success-rate ${{cls}}">${{r}}%</span></td>`;
 }}
-h+=`<tr><td><strong>${{esc(name)}}</strong></td><td>${{s.resources_scanned}}</td><td>${{s.permissions_total}}</td><td>${{s.team_memberships_total}}</td><td>${{s.cross_org_shares}}</td>${{rateHtml}}</tr>`;
+h+=`<tr class="clickable" onclick="drillOrg('${{esc(name.replace(/'/g,"\\\\'"))}}')"><td><strong>${{esc(name)}}</strong></td><td>${{s.resources_scanned}}</td><td>${{s.permissions_total}}</td><td>${{tPerms}}</td><td>${{uPerms}}</td><td>${{s.team_memberships_total}}</td>${{statusHtml}}</tr>`;
 }});
 h+='</tbody></table>';
-if(orgs.length>20)h+=`<p style="color:#6c757d;margin-top:10px">Showing top 20 of ${{orgs.length}} organizations. See By Organization tab for full list.</p>`;
+h+='<p style="color:#6c757d;margin-top:10px;font-size:.85em">Click any organization to view detailed role assignments.</p>';
 document.getElementById('dashboardContent').innerHTML=h;
 }}
 function renderByOrg(){{
-const orgs=Object.entries(D.org_summaries).sort((a,b)=>b[1].permissions_total-a[1].permissions_total);
 document.getElementById('statsContainer').innerHTML='';
-let h='<input class="search-box" id="orgSearch" placeholder="Search organizations..." oninput="filterOrgs()">';
-h+='<table><thead><tr><th>Organization</th><th>Resources</th><th>Permissions</th><th>By Type</th><th>By Role</th><th>Team Members</th><th>Cross-Org</th>';
-if(IS_MIGRATE)h+='<th>Success Rate</th>';
-h+='</tr></thead><tbody id="orgTableBody">';
-orgs.forEach(([name,s])=>{{
-const types=Object.entries(s.permissions_by_type||{{}}).map(([t,c])=>`${{t}}:${{c}}`).join(', ');
-const roles=Object.entries(s.permissions_by_role||{{}}).map(([r,c])=>`${{r}}:${{c}}`).join(', ');
-let rateHtml='';
-if(IS_MIGRATE){{
-const r=s.success_rate||0;const cls=r>=80?'high':r>=50?'medium':'low';
-rateHtml=`<td><span class="success-rate ${{cls}}">${{r}}%</span></td>`;
-}}
-h+=`<tr data-org="${{esc(name.toLowerCase())}}"><td><strong>${{esc(name)}}</strong></td><td>${{s.resources_scanned}}</td><td>${{s.permissions_total}}</td><td style="font-size:.8em">${{esc(types)}}</td><td style="font-size:.8em">${{esc(roles)}}</td><td>${{s.team_memberships_total}}</td><td>${{s.cross_org_shares}}</td>${{rateHtml}}</tr>`;
-}});
-h+='</tbody></table>';
+const orgs=Object.keys(D.org_summaries).sort();
+let h='<div class="filters">';
+h+='<span class="filter-label">Organization:</span>';
+h+='<select class="filter-select" id="orgDrillSelect"><option value="">-- Select Organization --</option>';
+orgs.forEach(o=>{{h+=`<option value="${{esc(o)}}">${{esc(o)}}</option>`}});
+h+='</select>';
+h+='<span class="filter-label">Type:</span>';
+h+='<select class="filter-select" id="orgTypeFilter"><option value="">All Types</option></select>';
+h+='<input class="search-box" id="orgDrillSearch" placeholder="Search resources...">';
+h+='</div>';
+h+='<div id="orgDrillBody"><div class="no-data"><p>Select an organization to view its role assignments.</p></div></div>';
 document.getElementById('byOrgContent').innerHTML=h;
+document.getElementById('orgDrillSelect').addEventListener('change',renderOrgDrill);
+document.getElementById('orgTypeFilter').addEventListener('change',renderOrgDrill);
+document.getElementById('orgDrillSearch').addEventListener('input',renderOrgDrill);
 }}
-function filterOrgs(){{
-const q=document.getElementById('orgSearch').value.toLowerCase();
-document.querySelectorAll('#orgTableBody tr').forEach(r=>{{
-r.style.display=r.dataset.org.includes(q)?'':'none';
+function renderOrgDrill(){{
+const org=document.getElementById('orgDrillSelect').value;
+const typeFilter=document.getElementById('orgTypeFilter').value;
+const search=document.getElementById('orgDrillSearch').value.toLowerCase();
+const body=document.getElementById('orgDrillBody');
+if(!org){{body.innerHTML='<div class="no-data"><p>Select an organization to view its role assignments.</p></div>';return}}
+let perms=P.filter(p=>p.resource_org===org);
+const types=[...new Set(perms.map(p=>p.resource_type))].sort();
+const typeSel=document.getElementById('orgTypeFilter');
+const curType=typeSel.value;
+let opts='<option value="">All Types</option>';
+types.forEach(t=>{{opts+=`<option value="${{t}}" ${{t===curType?'selected':''}}>${{tn(t)}}</option>`}});
+typeSel.innerHTML=opts;
+if(typeFilter)perms=perms.filter(p=>p.resource_type===typeFilter);
+if(search)perms=perms.filter(p=>p.resource_name.toLowerCase().includes(search)||p.principal_name.toLowerCase().includes(search)||p.role_name.toLowerCase().includes(search));
+if(!perms.length){{body.innerHTML='<div class="no-data"><p>No permissions found for this selection.</p></div>';return}}
+const s=D.org_summaries[org]||{{}};
+const teamPerms=perms.filter(p=>p.principal_type==='team').length;
+const userPerms=perms.filter(p=>p.principal_type==='user').length;
+let h=`<div style="display:flex;gap:15px;flex-wrap:wrap;margin-bottom:15px">`;
+h+=`<div class="stat-card" style="padding:12px 18px;flex:1;min-width:120px"><div class="value" style="font-size:1.5em">${{perms.length}}</div><div class="label">Permissions</div></div>`;
+h+=`<div class="stat-card" style="padding:12px 18px;flex:1;min-width:120px;background:linear-gradient(135deg,#e0f2f1,#b2dfdb)"><div class="value" style="font-size:1.5em;color:#00695c">${{teamPerms}}</div><div class="label" style="color:#00695c">Team-based</div></div>`;
+h+=`<div class="stat-card" style="padding:12px 18px;flex:1;min-width:120px;background:linear-gradient(135deg,#e8eaf6,#c5cae9)"><div class="value" style="font-size:1.5em;color:#283593">${{userPerms}}</div><div class="label" style="color:#283593">User-based</div></div>`;
+h+=`</div>`;
+const byType={{}};
+perms.forEach(p=>{{
+if(!byType[p.resource_type])byType[p.resource_type]={{}};
+const key=p.resource_id+'_'+p.resource_name;
+if(!byType[p.resource_type][key])byType[p.resource_type][key]={{name:p.resource_name,id:p.resource_id,roles:[]}};
+byType[p.resource_type][key].roles.push(p);
 }});
+Object.entries(byType).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([rtype,resources])=>{{
+const resArr=Object.values(resources).sort((a,b)=>a.name.localeCompare(b.name));
+const totalPerms=resArr.reduce((s,r)=>s+r.roles.length,0);
+const gid='g_'+rtype.replace(/\\W/g,'');
+h+=`<div class="res-group">`;
+h+=`<div class="res-group-header" onclick="toggleGroup('${{gid}}')"><span><span class="arrow open" id="arr_${{gid}}">&#9654;</span> ${{esc(tn(rtype))}} <span class="count-chip">${{resArr.length}} resources, ${{totalPerms}} permissions</span></span></div>`;
+h+=`<div class="res-group-body open" id="body_${{gid}}">`;
+resArr.forEach((res,ri)=>{{
+const rid=gid+'_r'+ri;
+h+=`<div class="res-item">`;
+h+=`<div class="res-item-header" onclick="toggleItem('${{rid}}')"><span><span class="arrow" id="arr_${{rid}}">&#9654;</span> ${{esc(res.name)}}</span><span class="count-chip">${{res.roles.length}} roles</span></div>`;
+h+=`<div class="res-item-roles" id="body_${{rid}}">`;
+res.roles.sort((a,b)=>a.role_name.localeCompare(b.role_name)).forEach(r=>{{
+h+=`<div class="role-row"><strong>${{esc(r.role_name)}}</strong> &rarr; ${{pbadge(r.principal_type)}} <strong>${{esc(r.principal_name)}}</strong>`;
+if(IS_MIG)h+=` ${{badge(r.status)}}`;
+h+=`</div>`;
+}});
+h+=`</div></div>`;
+}});
+h+=`</div></div>`;
+}});
+body.innerHTML=h;
+}}
+function toggleGroup(id){{
+const b=document.getElementById('body_'+id);
+const a=document.getElementById('arr_'+id);
+if(b){{b.classList.toggle('open');if(a)a.classList.toggle('open')}}
+}}
+function toggleItem(id){{
+const b=document.getElementById('body_'+id);
+const a=document.getElementById('arr_'+id);
+if(b){{b.classList.toggle('open');if(a)a.classList.toggle('open')}}
 }}
 function renderByType(){{
 document.getElementById('statsContainer').innerHTML='';
 const types=Object.entries(D.type_summaries).sort((a,b)=>b[1].permission_count-a[1].permission_count);
-let h='<table><thead><tr><th>Resource Type</th><th>Resources</th><th>Permissions</th><th>Role Distribution</th></tr></thead><tbody>';
+let h='';
 types.forEach(([key,t])=>{{
-const roles=Object.entries(t.roles||{{}}).sort((a,b)=>b[1]-a[1]).map(([r,c])=>`${{r}}: ${{c}}`).join(', ');
-h+=`<tr><td><strong>${{esc(t.display||key)}}</strong></td><td>${{t.resource_count}}</td><td>${{t.permission_count}}</td><td style="font-size:.85em">${{esc(roles)}}</td></tr>`;
+const perms=P.filter(p=>p.resource_type===key);
+const resources={{}};
+perms.forEach(p=>{{
+const k=p.resource_id+'_'+p.resource_name;
+if(!resources[k])resources[k]={{name:p.resource_name,org:p.resource_org,roles:[]}};
+resources[k].roles.push(p);
+}});
+const resArr=Object.values(resources).sort((a,b)=>a.name.localeCompare(b.name));
+const gid='t_'+key.replace(/\\W/g,'');
+h+=`<div class="res-group">`;
+h+=`<div class="res-group-header" onclick="toggleGroup('${{gid}}')"><span><span class="arrow open" id="arr_${{gid}}">&#9654;</span> ${{esc(t.display||key)}} <span class="count-chip">${{t.resource_count}} resources, ${{t.permission_count}} permissions</span></span></div>`;
+h+=`<div class="res-group-body open" id="body_${{gid}}">`;
+h+=`<table><thead><tr><th>Resource</th><th>Organization</th><th>Role</th><th>Assigned To</th><th>Type</th>`;
+if(IS_MIG)h+=`<th>Status</th>`;
+h+=`</tr></thead><tbody>`;
+resArr.forEach(res=>{{
+res.roles.sort((a,b)=>a.role_name.localeCompare(b.role_name)).forEach((r,i)=>{{
+h+=`<tr><td>${{i===0?'<strong>'+esc(res.name)+'</strong>':''}}</td><td>${{i===0?esc(res.org):''}}</td><td>${{esc(r.role_name)}}</td><td>${{esc(r.principal_name)}}</td><td>${{pbadge(r.principal_type)}}</td>`;
+if(IS_MIG)h+=`<td>${{badge(r.status)}}</td>`;
+h+=`</tr>`;
+}});
+}});
+h+=`</tbody></table></div></div>`;
+}});
+document.getElementById('byTypeContent').innerHTML=h;
+}}
+function renderMatrix(){{
+document.getElementById('statsContainer').innerHTML='';
+const orgs=[...new Set(P.map(p=>p.resource_org))].sort();
+const types=[...new Set(P.map(p=>p.resource_type))].sort();
+const roles=[...new Set(P.map(p=>p.role_name))].sort();
+let h='<div class="filters">';
+h+='<span class="filter-label">Org:</span><select class="filter-select" id="mOrg" style="min-width:160px"><option value="">All</option>';
+orgs.forEach(o=>{{h+=`<option value="${{esc(o)}}">${{esc(o)}}</option>`}});
+h+='</select>';
+h+='<span class="filter-label">Type:</span><select class="filter-select" id="mType" style="min-width:160px"><option value="">All</option>';
+types.forEach(t=>{{h+=`<option value="${{t}}">${{tn(t)}}</option>`}});
+h+='</select>';
+h+='<span class="filter-label">Role:</span><select class="filter-select" id="mRole" style="min-width:120px"><option value="">All</option>';
+roles.forEach(r=>{{h+=`<option value="${{esc(r)}}">${{esc(r)}}</option>`}});
+h+='</select>';
+h+='<span class="filter-label">Principal:</span><select class="filter-select" id="mPrincipal" style="min-width:100px"><option value="">All</option><option value="user">Users</option><option value="team">Teams</option></select>';
+h+='<input class="search-box" id="mSearch" placeholder="Search name...">';
+h+='</div>';
+h+='<div id="matrixInfo" style="color:#6c757d;font-size:.85em;margin-bottom:8px"></div>';
+h+='<div id="matrixTable"></div>';
+document.getElementById('matrixContent').innerHTML=h;
+['mOrg','mType','mRole','mPrincipal'].forEach(id=>document.getElementById(id).addEventListener('change',applyMatrixFilter));
+document.getElementById('mSearch').addEventListener('input',applyMatrixFilter);
+applyMatrixFilter();
+}}
+function applyMatrixFilter(){{
+const org=document.getElementById('mOrg').value;
+const type=document.getElementById('mType').value;
+const role=document.getElementById('mRole').value;
+const principal=document.getElementById('mPrincipal').value;
+const search=document.getElementById('mSearch').value.toLowerCase();
+mFiltered=P.filter(p=>{{
+if(org&&p.resource_org!==org)return false;
+if(type&&p.resource_type!==type)return false;
+if(role&&p.role_name!==role)return false;
+if(principal&&p.principal_type!==principal)return false;
+if(search&&!p.resource_name.toLowerCase().includes(search)&&!p.principal_name.toLowerCase().includes(search))return false;
+return true;
+}});
+mPage=1;
+document.getElementById('matrixInfo').textContent=`Showing ${{mFiltered.length}} of ${{P.length}} permissions`;
+renderMatrixPage();
+}}
+function renderMatrixPage(){{
+const start=(mPage-1)*PER_PAGE;const end=start+PER_PAGE;
+const page=mFiltered.slice(start,end);
+let h='<table><thead><tr><th>Organization</th><th>Resource Type</th><th>Resource Name</th><th>Role</th><th>Principal</th><th>Type</th>';
+if(IS_MIG)h+='<th>Status</th>';
+h+='</tr></thead><tbody>';
+if(!page.length)h+='<tr><td colspan="7" style="text-align:center;padding:30px;color:#6c757d">No permissions match the current filters.</td></tr>';
+page.forEach(p=>{{
+h+=`<tr><td>${{esc(p.resource_org)}}</td><td>${{esc(tn(p.resource_type))}}</td><td><strong>${{esc(p.resource_name)}}</strong></td><td>${{esc(p.role_name)}}</td><td>${{esc(p.principal_name)}}</td><td>${{pbadge(p.principal_type)}}</td>`;
+if(IS_MIG)h+=`<td>${{badge(p.status)}}</td>`;
+h+='</tr>';
 }});
 h+='</tbody></table>';
-document.getElementById('byTypeContent').innerHTML=h;
+document.getElementById('matrixTable').innerHTML=h;
+const totalPages=Math.ceil(mFiltered.length/PER_PAGE);
+const pg=document.getElementById('paginationContainer');
+if(totalPages>1&&curTab==='matrix'){{
+pg.classList.remove('hidden');
+document.getElementById('pageInfo').textContent=`Page ${{mPage}} of ${{totalPages}} (${{start+1}}-${{Math.min(end,mFiltered.length)}} of ${{mFiltered.length}})`;
+document.getElementById('prevBtn').disabled=mPage===1;
+document.getElementById('nextBtn').disabled=mPage===totalPages;
+}}else{{pg.classList.add('hidden')}}
+}}
+function renderTeams(){{
+document.getElementById('statsContainer').innerHTML='';
+const teams=Object.entries(D.team_summary).sort((a,b)=>b[1].members.length-a[1].members.length);
+if(!teams.length){{document.getElementById('teamsContent').innerHTML='<div class="no-data"><p>No team memberships found.</p></div>';return}}
+const byOrg={{}};
+teams.forEach(([key,t])=>{{
+if(!byOrg[t.org])byOrg[t.org]=[];
+byOrg[t.org].push(t);
+}});
+let h='<input class="search-box" id="teamSearch" placeholder="Search teams or users..." oninput="filterTeamRows()">';
+Object.entries(byOrg).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([org,orgTeams])=>{{
+h+=`<div class="section-title">${{esc(org)}}</div>`;
+h+='<table><thead><tr><th>Team</th><th>Members</th><th>Member List</th>';
+if(IS_MIG)h+='<th>Migrated</th><th>Failed</th>';
+h+='</tr></thead><tbody class="teamFilterable">';
+orgTeams.sort((a,b)=>a.team_name.localeCompare(b.team_name)).forEach(t=>{{
+const memberHtml=t.members.map(m=>{{
+let s=esc(m.username);
+if(IS_MIG)s+=` ${{badge(m.status)}}`;
+return s;
+}}).join(', ');
+let extra='';
+if(IS_MIG)extra=`<td>${{t.migrated}}</td><td>${{t.failed}}</td>`;
+h+=`<tr data-search="${{esc((t.team_name+' '+t.members.map(m=>m.username).join(' ')).toLowerCase())}}"><td><strong>${{esc(t.team_name)}}</strong></td><td>${{t.members.length}}</td><td style="font-size:.85em">${{memberHtml}}</td>${{extra}}</tr>`;
+}});
+h+='</tbody></table>';
+}});
+document.getElementById('teamsContent').innerHTML=h;
+}}
+function filterTeamRows(){{
+const q=document.getElementById('teamSearch').value.toLowerCase();
+document.querySelectorAll('.teamFilterable tr').forEach(r=>{{
+r.style.display=(r.dataset.search||'').includes(q)?'':'none';
+}});
+}}
+function renderSysRoles(){{
+document.getElementById('statsContainer').innerHTML='';
+const roles=D.system_roles;
+if(!roles.length){{document.getElementById('sysRolesContent').innerHTML='<div class="no-data"><p>No system-level roles detected.</p></div>';return}}
+let h='<table><thead><tr><th>Username</th><th>User ID</th><th>Role</th></tr></thead><tbody>';
+roles.forEach(r=>{{
+const label=r.flag==='is_superuser'?'System Administrator':'System Auditor';
+h+=`<tr><td><strong>${{esc(r.username)}}</strong></td><td>${{r.user_id}}</td><td>${{badge('audit')}} ${{esc(label)}}</td></tr>`;
+}});
+h+='</tbody></table>';
+document.getElementById('sysRolesContent').innerHTML=h;
 }}
 function renderCrossOrg(){{
 document.getElementById('statsContainer').innerHTML='';
@@ -420,48 +652,12 @@ h+=`<tr><td><strong>${{esc(s.resource_name)}}</strong></td><td>${{esc(s.resource
 h+='</tbody></table>';
 document.getElementById('crossOrgContent').innerHTML=h;
 }}
-function renderTeams(){{
-document.getElementById('statsContainer').innerHTML='';
-const teams=Object.entries(D.team_summary).sort((a,b)=>b[1].members.length-a[1].members.length);
-if(!teams.length){{document.getElementById('teamsContent').innerHTML='<div class="no-data"><p>No team memberships found.</p></div>';return}}
-let h='<input class="search-box" id="teamSearch" placeholder="Search teams..." oninput="filterTeams()">';
-h+='<table><thead><tr><th>Team</th><th>Organization</th><th>Members</th><th>Member List</th>';
-if(IS_MIGRATE)h+='<th>Migrated</th><th>Failed</th>';
-h+='</tr></thead><tbody id="teamTableBody">';
-teams.forEach(([key,t])=>{{
-const memberNames=t.members.map(m=>m.username).join(', ');
-let extra='';
-if(IS_MIGRATE)extra=`<td>${{t.migrated}}</td><td>${{t.failed}}</td>`;
-h+=`<tr data-team="${{esc(key.toLowerCase())}}"><td><strong>${{esc(t.team_name)}}</strong></td><td>${{esc(t.org)}}</td><td>${{t.members.length}}</td><td style="font-size:.85em">${{esc(memberNames)}}</td>${{extra}}</tr>`;
-}});
-h+='</tbody></table>';
-document.getElementById('teamsContent').innerHTML=h;
-}}
-function filterTeams(){{
-const q=document.getElementById('teamSearch').value.toLowerCase();
-document.querySelectorAll('#teamTableBody tr').forEach(r=>{{
-r.style.display=r.dataset.team.includes(q)?'':'none';
-}});
-}}
-function renderSysRoles(){{
-document.getElementById('statsContainer').innerHTML='';
-const roles=D.system_roles;
-if(!roles.length){{document.getElementById('sysRolesContent').innerHTML='<div class="no-data"><p>No system-level roles detected.</p></div>';return}}
-let h='<table><thead><tr><th>Username</th><th>Role</th></tr></thead><tbody>';
-roles.forEach(r=>{{
-const label=r.flag==='is_superuser'?'System Administrator':'System Auditor';
-h+=`<tr><td><strong>${{esc(r.username)}}</strong></td><td><span class="badge badge-audit">${{esc(label)}}</span></td></tr>`;
-}});
-h+='</tbody></table>';
-document.getElementById('sysRolesContent').innerHTML=h;
-}}
 function renderFailures(){{
-const perms=D.failures||[];
+const perms=P.filter(p=>p.status==='failed');
 const mems=D.membership_failures||[];
 const total=perms.length+mems.length;
 document.getElementById('statsContainer').innerHTML=`<div class="stat-card danger"><div class="value">${{total}}</div><div class="label">Total Failures</div></div>`;
 if(!total){{document.getElementById('failuresContent').innerHTML='<div class="no-data"><p>No failures recorded.</p></div>';return}}
-filtered=perms;curPage=1;
 let h='';
 if(mems.length){{
 h+='<div class="section-title">Team Membership Failures</div>';
@@ -471,31 +667,13 @@ h+='</tbody></table>';
 }}
 if(perms.length){{
 h+='<div class="section-title">Permission Failures</div>';
-h+='<div id="failureTableContainer"></div>';
-}}
-document.getElementById('failuresContent').innerHTML=h;
-if(perms.length)renderPage();
-}}
-function renderPage(){{
-const start=(curPage-1)*PER_PAGE;const end=start+PER_PAGE;
-const page=filtered.slice(start,end);
-if(!page.length)return;
-let h='<table><thead><tr><th>Resource</th><th>Type</th><th>Role</th><th>Principal</th><th>Error</th></tr></thead><tbody>';
-page.forEach(p=>{{
-h+=`<tr><td>${{esc(p.resource_name)}}</td><td>${{esc(p.resource_type)}}</td><td>${{esc(p.role_name)}}</td><td>${{esc(p.principal_name)}} (${{esc(p.principal_type)}})</td><td class="error-cell">${{esc(p.error)}}</td></tr>`;
+h+='<table><thead><tr><th>Organization</th><th>Resource</th><th>Type</th><th>Role</th><th>Principal</th><th>Error</th></tr></thead><tbody>';
+perms.forEach(p=>{{
+h+=`<tr><td>${{esc(p.resource_org)}}</td><td><strong>${{esc(p.resource_name)}}</strong></td><td>${{esc(tn(p.resource_type))}}</td><td>${{esc(p.role_name)}}</td><td>${{esc(p.principal_name)}} (${{esc(p.principal_type)}})</td><td class="error-cell">${{esc(p.error)}}</td></tr>`;
 }});
 h+='</tbody></table>';
-const container=document.getElementById('failureTableContainer');
-if(container)container.innerHTML=h;
-const totalPages=Math.ceil(filtered.length/PER_PAGE);
-if(totalPages>1){{
-document.getElementById('paginationContainer').classList.remove('hidden');
-document.getElementById('pageInfo').textContent=`Page ${{curPage}} of ${{totalPages}} (${{start+1}}-${{Math.min(end,filtered.length)}} of ${{filtered.length}})`;
-document.getElementById('prevPage').disabled=curPage===1;
-document.getElementById('nextPage').disabled=curPage===totalPages;
-}}else{{
-document.getElementById('paginationContainer').classList.add('hidden');
 }}
+document.getElementById('failuresContent').innerHTML=h;
 }}
 init();
 </script>
