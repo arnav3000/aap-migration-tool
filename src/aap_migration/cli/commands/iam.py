@@ -12,9 +12,6 @@ import os
 import sys
 
 import click
-from dotenv import load_dotenv
-
-load_dotenv()
 
 
 def _echo(msg: str) -> None:
