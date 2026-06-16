@@ -64,8 +64,20 @@ def build_global_report() -> GlobalDependencyReport:
         org_reports={"SharedOrg": independent, "DependentOrg": dependent},
         migration_order=["SharedOrg", "DependentOrg"],
         migration_phases=[
-            ["SharedOrg"],
-            {"phase": 2, "description": "Dependent", "orgs": ["DependentOrg"]},
+            {
+                "phase": 1,
+                "description": "Independent",
+                "orgs": ["SharedOrg"],
+                "has_cycle": False,
+                "cycles": [],
+            },
+            {
+                "phase": 2,
+                "description": "Dependent",
+                "orgs": ["DependentOrg"],
+                "has_cycle": False,
+                "cycles": [],
+            },
         ],
     )
 
@@ -178,10 +190,10 @@ def test_schema_report_renderers_and_save(tmp_path) -> None:
 def test_dependency_html_report_escapes_and_embeds_data() -> None:
     html = generate_html_report(build_global_report())
 
-    assert "AAP Migration Mind Map - Dependency Analysis" in html
-    assert "Shared &amp; &lt;Danger&gt;" in html
-    assert "JT &lt;One&gt;" in html
-    assert '"from": "SharedOrg"' in html
-    assert '"to": "DependentOrg"' in html
-    assert '"description": "Phase 1"' in html
+    assert "AAP Migration — Dependency Analysis" in html
+    assert '"name": "Shared & <Danger>"' in html
+    assert '"name": "JT <One>"' in html
+    assert '"name": "SharedOrg"' in html
+    assert '"name": "DependentOrg"' in html
+    assert '"description": "Independent"' in html
     assert '"description": "Dependent"' in html

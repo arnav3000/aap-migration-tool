@@ -366,11 +366,10 @@ async def test_analysis_service_platform_adapter_and_engine_adapter(monkeypatch)
     monkeypatch.setattr("aap_migration.api.crypto.decrypt_token", lambda token: f"dec:{token}")
 
     class FakeAnalyzer:
-        def __init__(self, client, progress_callback):
-            self.progress_callback = progress_callback
+        def __init__(self, client):
+            self.client = client
 
         async def analyze_all_organizations(self):
-            self.progress_callback(1, 2, "halfway")
             return make_global_report()
 
     class FakeSourceClient:
@@ -411,7 +410,6 @@ async def test_analysis_service_platform_adapter_and_engine_adapter(monkeypatch)
     assert stored_job.job_metadata["total_organizations"] == 2
     assert stored_job.job_metadata["quality_summary"]["average_quality_score"] == 91.5
     assert stored_job.job_metadata["circular_dependencies"] == [["OrgA", "OrgB"]]
-    assert any("[1/2] halfway" in msg for _, msg in job_service.logs)
 
     adapter_responses = []
 

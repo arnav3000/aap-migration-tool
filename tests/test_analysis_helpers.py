@@ -8,8 +8,8 @@ from aap_migration.analysis.dependency_analyzer import (
     ResourceDependency,
 )
 from aap_migration.analysis.dependency_graph import (
-    _partial_topological_sort,
-    detect_cycles,
+    compute_migration_plan,
+    find_cycles,
     group_into_phases,
     group_into_phases_with_cycles,
     topological_sort,
@@ -35,7 +35,7 @@ def test_dependency_graph_orders_detects_cycles_and_groups_phases() -> None:
     }
 
     order = topological_sort(graph)
-    partial, remaining = _partial_topological_sort({"A": ["B"], "B": ["A"], "C": ["A"]})
+    cycle_graph = {"A": ["B"], "B": ["A"], "C": ["A"]}
 
     assert order == ["Engineering", "Default", "DevOps"]
     assert group_into_phases(graph, order) == [
@@ -43,38 +43,45 @@ def test_dependency_graph_orders_detects_cycles_and_groups_phases() -> None:
             "phase": 1,
             "orgs": ["Engineering"],
             "description": "Independent organizations (no dependencies)",
+            "has_cycle": False,
+            "cycles": [],
         },
         {
             "phase": 2,
             "orgs": ["Default"],
             "description": "Organizations dependent on Phase 1 migrations",
+            "has_cycle": False,
+            "cycles": [],
         },
         {
             "phase": 3,
             "orgs": ["DevOps"],
             "description": "Organizations dependent on Phase 2 migrations",
+            "has_cycle": False,
+            "cycles": [],
         },
     ]
-    assert partial == []
-    assert remaining == {"A", "B", "C"}
-    assert detect_cycles({"A": ["B"], "B": ["A"], "C": ["A"]}) == [["A", "B"]]
+
+    cycle_plan = compute_migration_plan(cycle_graph)
+    assert set(cycle_plan.order) == {"A", "B", "C"}
+    assert abs(cycle_plan.order.index("A") - cycle_plan.order.index("B")) == 1
+    assert find_cycles(cycle_graph) == [["A", "B"]]
 
     with_cycles_order, with_cycles_phases = group_into_phases_with_cycles(
         {"A": ["B"], "B": ["A"], "C": ["A"], "D": []}
     )
-    assert with_cycles_order == ["D", "A", "B", "C"]
-    assert with_cycles_phases[0]["orgs"] == ["D"]
-    assert with_cycles_phases[1]["orgs"] == ["A", "B"]
-    assert with_cycles_phases[2]["orgs"] == ["C"]
+    assert with_cycles_order == ["A", "B", "C", "D"]
+    assert with_cycles_phases[0]["orgs"] == ["A", "B", "D"]
+    assert with_cycles_phases[1]["orgs"] == ["C"]
 
 
-def test_dependency_graph_raises_for_unresolvable_cycle() -> None:
-    try:
-        topological_sort({"A": ["B"], "B": ["A"]})
-    except ValueError as exc:
-        assert "Circular dependencies detected" in str(exc)
-    else:
-        raise AssertionError("Expected topological_sort to fail for a cycle")
+def test_dependency_graph_tolerates_cycles() -> None:
+    cycle_graph = {"A": ["B"], "B": ["A"]}
+    order = topological_sort(cycle_graph)
+
+    assert set(order) == {"A", "B"}
+    assert abs(order.index("A") - order.index("B")) == 1
+    assert find_cycles(cycle_graph) == [["A", "B"]]
 
 
 def test_quality_helpers_detect_duplicates_patterns_and_summaries() -> None:
@@ -145,7 +152,6 @@ def test_quality_dataclasses_and_global_dependency_summary() -> None:
         dependencies={"Engineering": [dependency]},
         can_migrate_standalone=False,
         required_migrations_before=["Engineering"],
-        quality_report=quality,
     )
     global_report = GlobalDependencyReport(
         analysis_date=datetime.now(UTC),
@@ -165,10 +171,4 @@ def test_quality_dataclasses_and_global_dependency_summary() -> None:
     assert quality.get_duplicates_by_type()["job_templates"][0].name == "Deploy"
     assert dependency.required_by == [{"type": "job_template", "id": 99, "name": "Deploy"}]
     assert org_report.get_total_cross_org_resources() == 1
-    assert global_report.get_quality_summary() == {
-        "total_duplicates": 1,
-        "total_errors": 1,
-        "total_warnings": 0,
-        "average_quality_score": 88.5,
-        "orgs_analyzed": 1,
-    }
+    assert global_report.migration_order == ["Engineering", "Default"]

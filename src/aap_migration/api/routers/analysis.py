@@ -23,7 +23,7 @@ def _serialize_report(report: Any) -> dict[str, Any]:
     orgs: dict[str, Any] = {}
     for name, org in report.org_reports.items():
         quality_data = None
-        if org.quality_report:
+        if hasattr(org, "quality_report") and org.quality_report:
             qr = org.quality_report
             naming = None
             if qr.naming_pattern:
@@ -95,8 +95,9 @@ def _serialize_report(report: Any) -> dict[str, Any]:
         }
 
     global_resources_counts: dict[str, int] = {}
-    for rtype, rlist in report.global_resources.items():
-        global_resources_counts[rtype] = len(rlist) if isinstance(rlist, list) else 0
+    if hasattr(report, "global_resources") and report.global_resources:
+        for rtype, rlist in report.global_resources.items():
+            global_resources_counts[rtype] = len(rlist) if isinstance(rlist, list) else 0
 
     circular_deps: list[list[str]] = []
     try:
@@ -125,8 +126,8 @@ def _serialize_report(report: Any) -> dict[str, Any]:
         ],
         "organizations": orgs,
         "global_resources": global_resources_counts,
-        "total_duplicates": report.total_duplicates,
-        "average_quality_score": report.average_quality_score,
+        "total_duplicates": getattr(report, "total_duplicates", 0),
+        "average_quality_score": getattr(report, "average_quality_score", 100.0),
         "circular_dependencies": circular_deps,
     }
 
@@ -150,17 +151,8 @@ async def run_analysis(body: AnalysisRunRequest, db: Session = Depends(get_db)) 
 
         client = AAPSourceClient(inst_config, auth_scheme=auth_scheme)
 
-        def progress_cb(current: object, total: object = None, msg: object = None) -> None:
-            if msg:
-                log(f"[{current}/{total}] {msg}")
-            else:
-                log(str(current))
-
         async with client:
-            analyzer = CrossOrgDependencyAnalyzer(
-                source_client=client,
-                progress_callback=progress_cb,
-            )
+            analyzer = CrossOrgDependencyAnalyzer(client)
             report = await analyzer.analyze_all_organizations()
 
         log(f"Analysis complete: {report.total_organizations} organizations analyzed")

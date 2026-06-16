@@ -227,16 +227,15 @@ def test_analysis_service_serialization_and_background_run(monkeypatch) -> None:
     )
 
     class GoodAnalyzer:
-        def __init__(self, client, progress_callback=None):
-            self.progress_callback = progress_callback
+        def __init__(self, client):
+            self.client = client
 
         async def analyze_all_organizations(self):
-            self.progress_callback(1, 2, "starting")
             return _build_report()
 
     class BadAnalyzer:
-        def __init__(self, client, progress_callback=None):
-            pass
+        def __init__(self, client):
+            self.client = client
 
         async def analyze_all_organizations(self):
             raise RuntimeError("analysis boom")
@@ -265,7 +264,6 @@ def test_analysis_service_serialization_and_background_run(monkeypatch) -> None:
     assert job_id in jobs
     assert jobs[job_id].status == "completed"
     assert jobs[job_id].job_metadata["total_organizations"] == 2
-    assert "[1/2] starting" in jobs[job_id].output[0]
 
     monkeypatch.setattr(
         "aap_migration.analysis.dependency_analyzer.CrossOrgDependencyAnalyzer", BadAnalyzer

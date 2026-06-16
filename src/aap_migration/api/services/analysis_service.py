@@ -110,13 +110,7 @@ class AnalysisService:
                 )
                 client = AAPSourceClient(config=config)
 
-                def progress_cb(current: int, total: int, message: str) -> None:
-                    self._update_progress(job_id, current, total, message)
-
-                analyzer = CrossOrgDependencyAnalyzer(
-                    client,
-                    progress_callback=progress_cb,
-                )
+                analyzer = CrossOrgDependencyAnalyzer(client)
                 report = await analyzer.analyze_all_organizations()
 
                 result = _serialize_report(report)

@@ -13,8 +13,9 @@ explicitly in `MigrationPlan.cycles` for the caller to handle.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
 
 @dataclass
@@ -285,3 +286,24 @@ def find_cycles(graph: dict[str, list[str]]) -> list[list[str]]:
         List of cycles, each a list of org names (alphabetically sorted).
     """
     return compute_migration_plan(graph).cycles
+
+
+def group_into_phases_with_cycles(
+    graph: dict[str, list[str]],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Return migration order and phases, tolerating cyclic dependencies.
+
+    Backward-compatible wrapper around `compute_migration_plan`.
+
+    Args:
+        graph: Mapping of org_name -> list of dependency org_names.
+
+    Returns:
+        Tuple of (migration order, phase list).
+    """
+    plan = compute_migration_plan(graph)
+    return plan.order, plan.phases
+
+
+# Alias retained for callers predating the find_cycles rename.
+detect_cycles = find_cycles
