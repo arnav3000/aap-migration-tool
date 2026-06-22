@@ -6682,6 +6682,34 @@ class SettingsImporter(ResourceImporter):
         return [result] if result else []
 
 
+IMPORTER_REGISTRY: dict[str, type[ResourceImporter]] = {
+    "organizations": OrganizationImporter,
+    "labels": LabelImporter,
+    "instances": InstanceImporter,
+    "instance_groups": InstanceGroupImporter,
+    "users": UserImporter,
+    "teams": TeamImporter,
+    "credential_types": CredentialTypeImporter,
+    "credentials": CredentialImporter,
+    "credential_input_sources": CredentialInputSourceImporter,
+    "projects": ProjectImporter,
+    "execution_environments": ExecutionEnvironmentImporter,
+    "inventories": InventoryImporter,
+    "inventory_sources": InventorySourceImporter,
+    "inventory_groups": InventoryGroupImporter,
+    "hosts": HostImporter,
+    "host_inventory_memberships": HostInventoryMembershipImporter,
+    "job_templates": JobTemplateImporter,
+    "workflow_job_templates": WorkflowImporter,
+    "schedules": ScheduleImporter,
+    "notification_templates": NotificationTemplateImporter,
+    "rbac": RBACImporter,
+    "system_job_templates": SystemJobTemplateImporter,
+    "applications": ApplicationImporter,
+    "settings": SettingsImporter,
+}
+
+
 def create_importer(
     resource_type: str,
     client: AAPTargetClient,
@@ -6689,63 +6717,12 @@ def create_importer(
     performance_config: PerformanceConfig,
     resource_mappings: dict[str, dict[str, str]] | None = None,
 ) -> ResourceImporter:
-    """Create appropriate importer for resource type.
-
-    Args:
-        resource_type: Type of resource to import
-        client: AAP target client instance
-        state: Migration state manager
-        performance_config: Performance configuration
-        resource_mappings: Optional resource name mappings from config/mappings.yaml
-
-    Returns:
-        Appropriate ResourceImporter subclass instance
-
-    Raises:
-        ValueError: If resource_type is not supported
-    """
-    importers = {
-        # Foundation resources
-        "organizations": OrganizationImporter,
-        "labels": LabelImporter,
-        "instances": InstanceImporter,
-        "instance_groups": InstanceGroupImporter,
-        # Identity and access
-        "users": UserImporter,
-        "teams": TeamImporter,
-        # Credentials
-        "credential_types": CredentialTypeImporter,
-        "credentials": CredentialImporter,
-        "credential_input_sources": CredentialInputSourceImporter,
-        # Projects and execution
-        "projects": ProjectImporter,
-        "execution_environments": ExecutionEnvironmentImporter,
-        # Inventory resources
-        "inventories": InventoryImporter,
-        "inventory_sources": InventorySourceImporter,
-        "inventory_groups": InventoryGroupImporter,
-        "hosts": HostImporter,
-        "host_inventory_memberships": HostInventoryMembershipImporter,
-        # Job templates and workflows
-        "job_templates": JobTemplateImporter,
-        "workflow_job_templates": WorkflowImporter,
-        "schedules": ScheduleImporter,
-        # Notifications
-        "notification_templates": NotificationTemplateImporter,
-        # RBAC
-        "rbac": RBACImporter,
-        # System
-        "system_job_templates": SystemJobTemplateImporter,
-        # OAuth and Configuration
-        "applications": ApplicationImporter,
-        "settings": SettingsImporter,
-    }
-
-    importer_class = importers.get(resource_type)
+    """Create appropriate importer for resource type."""
+    importer_class = IMPORTER_REGISTRY.get(resource_type)
     if not importer_class:
         raise NotImplementedError(
             f"No importer implemented for resource type: {resource_type}. "
-            f"Available importers: {', '.join(sorted(importers.keys()))}"
+            f"Available importers: {', '.join(sorted(IMPORTER_REGISTRY.keys()))}"
         )
 
     return importer_class(client, state, performance_config, resource_mappings)

@@ -66,6 +66,8 @@ export const api = {
     request<{ id: number; name: string; description: string }[]>('GET', `/api/connections/${connId}/organizations`),
 
   clearMigrationState: () => request<{ cleared_progress: number; deleted_mappings: number }>('POST', '/api/migrate/clear-state'),
+  getConcurrency: () => request<{ max_concurrent: number }>('GET', '/api/settings/concurrency'),
+  updateConcurrency: (maxConcurrent: number) => request<{ max_concurrent: number }>('PUT', '/api/settings/concurrency', { max_concurrent: maxConcurrent }),
   getExclusions: () => request<unknown>('GET', '/api/exclusions'),
 
   listJobs: () => request<unknown[]>('GET', '/api/jobs'),

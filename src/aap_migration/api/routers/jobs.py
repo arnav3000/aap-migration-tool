@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from aap_migration.api.dependencies import get_job_service
+from aap_migration.api.services.job_service import JobStatus
 
 router = APIRouter()
 
@@ -51,7 +52,7 @@ async def resume_job(job_id: str) -> dict[str, Any]:
     job = svc.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status != "waiting_for_input":
+    if job.status != JobStatus.WAITING_FOR_INPUT:
         raise HTTPException(
             status_code=400,
             detail=f"Job is not waiting for input (status: {job.status})",
@@ -78,7 +79,7 @@ async def resume_job(job_id: str) -> dict[str, Any]:
     try:
         record = session.get(JobRecord, job_id)
         if record:
-            record.status = "resumed"
+            record.status = JobStatus.RESUMED
             record.error = None
             session.commit()
     finally:

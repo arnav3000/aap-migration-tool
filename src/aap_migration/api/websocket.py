@@ -3,6 +3,7 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from aap_migration.api.dependencies import get_job_service
+from aap_migration.api.services.job_service import JobStatus
 
 router = APIRouter()
 
@@ -20,7 +21,7 @@ async def job_log_stream(websocket: WebSocket, job_id: str) -> None:
     for line in job.log_lines:
         await websocket.send_text(line)
 
-    if job.status in ("completed", "failed", "cancelled"):
+    if job.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
         await websocket.close(reason=job.status)
         return
 

@@ -323,11 +323,10 @@ async def test_analysis_router_run_and_exports(monkeypatch: pytest.MonkeyPatch) 
     fake_analyzer_module = ModuleType("aap_migration.analysis.dependency_analyzer")
 
     class FakeAnalyzer:
-        def __init__(self, source_client, progress_callback):
-            self.progress_callback = progress_callback
+        def __init__(self, source_client):
+            self.source_client = source_client
 
         async def analyze_all_organizations(self):
-            self.progress_callback(1, 2, "Scanning")
             return SimpleNamespace(
                 analysis_date=datetime(2026, 5, 18, tzinfo=UTC),
                 source_url="https://source.example.com",

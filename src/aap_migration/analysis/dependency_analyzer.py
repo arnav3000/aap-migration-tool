@@ -130,11 +130,13 @@ class ResourceDependency:
 
     def add_usage(self, resource_type: str, resource_id: int, resource_name: str):
         """Add a resource that requires this dependency."""
-        self.required_by.append({
-            "type": resource_type,
-            "id": resource_id,
-            "name": resource_name,
-        })
+        self.required_by.append(
+            {
+                "type": resource_type,
+                "id": resource_id,
+                "name": resource_name,
+            }
+        )
 
 
 @dataclass
@@ -247,12 +249,8 @@ class CrossOrgDependencyAnalyzer:
             report = await self.analyze_organization(org_name)
             org_reports[org_name] = report
 
-        independent = sorted(
-            [name for name, r in org_reports.items() if not r.has_cross_org_deps]
-        )
-        dependent = sorted(
-            [name for name, r in org_reports.items() if r.has_cross_org_deps]
-        )
+        independent = sorted([name for name, r in org_reports.items() if not r.has_cross_org_deps])
+        dependent = sorted([name for name, r in org_reports.items() if r.has_cross_org_deps])
 
         from aap_migration.analysis.dependency_graph import (
             find_cycles,
@@ -260,10 +258,7 @@ class CrossOrgDependencyAnalyzer:
             topological_sort,
         )
 
-        graph = {
-            org: report.required_migrations_before
-            for org, report in org_reports.items()
-        }
+        graph = {org: report.required_migrations_before for org, report in org_reports.items()}
 
         cycles = find_cycles(graph)
         migration_order = topological_sort(graph)
@@ -307,9 +302,7 @@ class CrossOrgDependencyAnalyzer:
 
     async def _get_organization(self, org_name: str) -> dict:
         """Fetch organization by name."""
-        orgs = await self.client.get_paginated(
-            "organizations/", params={"name": org_name}
-        )
+        orgs = await self.client.get_paginated("organizations/", params={"name": org_name})
         if not orgs:
             raise ValueError(f"Organization not found: {org_name}")
         return orgs[0]
@@ -339,9 +332,7 @@ class CrossOrgDependencyAnalyzer:
         for rtype in resource_types:
             try:
                 endpoint = f"{rtype}/"
-                items = await self.client.get_paginated(
-                    endpoint, params={"organization": org_id}
-                )
+                items = await self.client.get_paginated(endpoint, params={"organization": org_id})
                 resources[rtype] = items
                 logger.debug(
                     "dependency_analysis_resource_fetch",

@@ -114,6 +114,14 @@ class ClearStateResponse(BaseModel):
     deleted_mappings: int
 
 
+class ConcurrencySettingResponse(BaseModel):
+    max_concurrent: int = Field(default=15, ge=1, le=100)
+
+
+class ConcurrencySettingUpdate(BaseModel):
+    max_concurrent: int = Field(ge=1, le=100)
+
+
 # --- Migration Planner Schemas ---
 
 

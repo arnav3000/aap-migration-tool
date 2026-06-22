@@ -31,6 +31,15 @@ vi.mock('@patternfly/react-core', () => ({
   DescriptionListDescription: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   Alert: ({ title }: { title: string }) => <div>{title}</div>,
   Divider: () => <hr />,
+  Grid: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  GridItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  NumberInput: ({ value, onMinus, onPlus, onChange }: { value: number; onMinus?: () => void; onPlus?: () => void; onChange?: (e: unknown) => void }) => (
+    <div>
+      <button onClick={onMinus}>-</button>
+      <input type="number" value={value} onChange={onChange} aria-label="concurrency" />
+      <button onClick={onPlus}>+</button>
+    </div>
+  ),
 }));
 
 vi.mock('@patternfly/react-core/deprecated', () => ({
@@ -95,6 +104,8 @@ vi.mock('../api/client', () => ({
     deleteConnection: vi.fn(),
     testConnection: vi.fn(),
     clearMigrationState: vi.fn(),
+    getConcurrency: vi.fn(),
+    updateConcurrency: vi.fn(),
   },
 }));
 
@@ -104,6 +115,7 @@ import { Dashboard } from './Dashboard';
 describe('Dashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.getConcurrency).mockResolvedValue({ max_concurrent: 15 });
   });
 
   it('loads connections and handles testing, deleting, editing, and clearing state', async () => {

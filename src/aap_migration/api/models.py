@@ -140,3 +140,12 @@ class MigrationPlanPhaseResourceType(Base):
         String(36), ForeignKey("api_migration_plan_phases.id", ondelete="CASCADE"), nullable=False
     )
     resource_type: Mapped[str] = mapped_column(String(50), nullable=False)
+
+
+class AppSetting(Base):
+    """Key-value store for application settings."""
+
+    __tablename__ = "api_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)

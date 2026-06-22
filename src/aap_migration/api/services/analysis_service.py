@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aap_migration.analysis.dependency_analyzer import GlobalDependencyReport
 from aap_migration.api.models import Connection, Job  # type: ignore[attr-defined]
-from aap_migration.api.services.job_service import JobService
+from aap_migration.api.services.job_service import JobService, JobStatus
 
 
 class AnalysisService:
@@ -28,7 +28,9 @@ class AnalysisService:
         job_id = str(uuid4())
         db = self.session_factory()
         try:
-            job = Job(id=job_id, type="analysis", connection_id=connection_id, status="running")
+            job = Job(
+                id=job_id, type="analysis", connection_id=connection_id, status=JobStatus.RUNNING
+            )
             db.add(job)
             db.commit()
         finally:
@@ -108,20 +110,14 @@ class AnalysisService:
                 )
                 client = AAPSourceClient(config=config)
 
-                def progress_cb(current: int, total: int, message: str) -> None:
-                    self._update_progress(job_id, current, total, message)
-
-                analyzer = CrossOrgDependencyAnalyzer(
-                    client,
-                    progress_callback=progress_cb,
-                )
+                analyzer = CrossOrgDependencyAnalyzer(client)
                 report = await analyzer.analyze_all_organizations()
 
                 result = _serialize_report(report)
-                self._finish_job(job_id, "completed", metadata=result)
+                self._finish_job(job_id, JobStatus.COMPLETED, metadata=result)
 
             except Exception as e:
-                self._finish_job(job_id, "failed", error=str(e))
+                self._finish_job(job_id, JobStatus.FAILED, error=str(e))
             finally:
                 root.removeHandler(capture)
 

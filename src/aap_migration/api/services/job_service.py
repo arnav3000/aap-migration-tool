@@ -8,9 +8,29 @@ import traceback
 import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy.orm import Session
+
+
+class JobStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    WAITING_FOR_INPUT = "waiting_for_input"
+    COMPLETED_WITH_ERRORS = "completed_with_errors"
+    RESUMED = "resumed"
+
+
+class PhaseStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    COMPLETED_WITH_ERRORS = "completed_with_errors"
+    FAILED = "failed"
 
 
 class Job:
@@ -39,7 +59,7 @@ class Job:
         self.seq_id: int | None = None
         self.name = name
         self.type = job_type
-        self.status = "pending"
+        self.status: JobStatus = JobStatus.PENDING
         self.log_lines: list[str] = []
         self.result: dict[str, Any] | None = None
         self.error: str | None = None
@@ -50,6 +70,11 @@ class Job:
         self._subscribers: list[asyncio.Queue] = []
         self._html_report: str | None = None
         self._resume_event: asyncio.Event = asyncio.Event()
+
+    async def wait_for_resume(self) -> None:
+        """Block until resume_job() is called, then reset the event."""
+        await self._resume_event.wait()
+        self._resume_event.clear()
 
     def to_summary(self) -> dict[str, Any]:
         """Lightweight dict for job listing (no output/result)."""
@@ -81,7 +106,7 @@ class JobService:
         self._jobs: dict[str, Job] = {}
         self._db_session_factory = db_session_factory
 
-    def _persist_job(self, job: Job) -> None:
+    def persist_job(self, job: Job) -> None:
         """Write job state to DB (called on completion/failure/cancel)."""
         if self._db_session_factory is None:
             return
@@ -160,7 +185,7 @@ class JobService:
     ) -> str:
         job_id = str(uuid.uuid4())
         job = Job(job_id, name, job_type)
-        job.status = "running"
+        job.status = JobStatus.RUNNING
         job.started_at = datetime.now(UTC)
         self._jobs[job_id] = job
         self._persist_job_initial(job)
@@ -169,20 +194,21 @@ class JobService:
             try:
                 result = await coro_factory(job, lambda line: self.add_log(job_id, line))
                 job.result = result if isinstance(result, dict) else None
-                job.status = "completed"
+                job.status = JobStatus.COMPLETED
             except asyncio.CancelledError:
-                job.status = "cancelled"
+                job.status = JobStatus.CANCELLED
                 job.error = "Job was cancelled"
             except Exception as exc:
-                job.status = "failed"
+                job.status = JobStatus.FAILED
                 job.error = f"{type(exc).__name__}: {exc}"
                 self.add_log(job_id, f"ERROR: {exc}")
                 self.add_log(job_id, traceback.format_exc())
             finally:
                 job.completed_at = datetime.now(UTC)
-                self._persist_job(job)
+                self.persist_job(job)
                 for q in job._subscribers:
                     await q.put(None)
+                job._subscribers.clear()
 
         target_loop = loop or asyncio.get_event_loop()
         job._task = target_loop.create_task(_run())
@@ -292,7 +318,7 @@ class JobService:
         job = self._jobs.get(job_id)
         if job is None or job._task is None:
             return False
-        if job.status == "running":
+        if job.status == JobStatus.RUNNING:
             job._task.cancel()
             return True
         return False
@@ -302,11 +328,11 @@ class JobService:
         job = self._jobs.get(job_id)
         if job is None:
             return False
-        if job.status != "waiting_for_input":
+        if job.status != JobStatus.WAITING_FOR_INPUT:
             return False
-        job.status = "running"
+        job.status = JobStatus.RUNNING
         job._resume_event.set()
-        self._persist_job(job)
+        self.persist_job(job)
         return True
 
     def get_logs_since(self, job_id: str, offset: int = 0) -> list[str]:

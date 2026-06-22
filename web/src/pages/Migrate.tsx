@@ -454,7 +454,7 @@ export function Migrate() {
                 <Tab eventKey="output" title={<TabTitleText>Output</TabTitleText>} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                   <div style={{ padding: '16px 0', flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                     <MigrationProgressView
-                      events={jobLogs.events}
+                      migration={jobLogs.migration}
                       jobStatus={jobLogs.status}
                     />
                   </div>

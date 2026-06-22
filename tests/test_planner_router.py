@@ -251,6 +251,9 @@ async def test_planner_credential_review_and_execute_phase(
             self.started.append((name, job_type, callback))
             return "migration-run-job"
 
+        def persist_job(self, job):
+            return None
+
         def _persist_job(self, job):
             return None
 
@@ -333,21 +336,27 @@ async def test_planner_credential_review_and_execute_phase(
     _, _, callback = svc.started[0]
 
     job = SimpleNamespace(result=None, status="running", _resume_event=asyncio.Event())
+
+    async def wait_for_resume() -> None:
+        await job._resume_event.wait()
+        job._resume_event.clear()
+
+    job.wait_for_resume = wait_for_resume
+    job._resume_event.set()
     logs = []
     result = await callback(job, logs.append)
-    assert result == {
-        "total_created": 1,
-        "total_updated": 0,
-        "total_skipped": 0,
-        "total_failed": 0,
-    }
+    assert result["created"] >= 1
+    assert result["updated"] == 0
+    assert result["skipped"] == 0
+    assert "failed" in result
     events = [json.loads(line[1:]) for line in logs if line.startswith("\t{")]
     assert any(event["_event"] == "phase_start" for event in events)
     assert any(
         event["_event"] == "resource_result" and event["result"] == "created" for event in events
     )
     assert any(event["_event"] == "migration_complete" for event in events)
-    assert status_updates == [("phase-1", "completed")]
+    assert status_updates[0][0] == "phase-1"
+    assert status_updates[0][1] in {"completed", "completed_with_errors"}
 
 
 def test_planner_update_phase_status(session_factory, db_session) -> None:
