@@ -61,8 +61,6 @@ curl -k https://your-target-aap/api/controller/v2/ping/
 **Option 2: Set Up Test Instances**
 
 - Follow [AAP Installation Guide](https://access.redhat.com/documentation/en-us/red_hat_ansible_automation_platform)
-- Minimum requirements: 8GB RAM per instance
-- Recommended ports: 8443 (source), 10443 (target)
 
 **Option 3: Red Hat Demo Environment**
 
@@ -71,7 +69,7 @@ curl -k https://your-target-aap/api/controller/v2/ping/
 ## Features
 
 - **🎯 Interactive TUI**: User-friendly Text User Interface with guided workflows, real-time progress tracking, and step-by-step control
-- **🔐 Credential-First Migration**: Ensures credentials are checked, compared, and migrated BEFORE all other resources
+- **🔐 Credential-First Migration**: Ensures credentials are checked, compared, and migrated after organizations and credential types are migrated, but BEFORE all other resources
 - **Bulk Operations**: Leverages AAP bulk APIs for high-performance migrations
 - **State Management**: SQLite or PostgreSQL-backed state tracking with checkpoint/resume capability
 - **Idempotency**: Safely resume interrupted migrations without creating duplicates
@@ -124,18 +122,42 @@ The tool is organized into several key components:
 Production-ready containerized deployment with zero Python setup required:
 
 ```bash
-# 1. Build the container
-podman build -f container/Containerfile -t aap-bridge:latest .
+# 1. Transfer the relevant aap-bridge container to a RHEL 9 VM (or run locally).
 
-# 2. Run the container with volume mounts
-podman run -d --name aap-bridge --network host \
-  -v $(pwd)/database:/app/aap-bridge/database:Z \
-  -v $(pwd)/.env:/app/aap-bridge/.env:Z \
-  aap-bridge:latest
+2. Create a non-privileged user to run aap-bridge as.
+$ sudo useradd aap-bridge
 
-# 3. Enter container and run migration
-podman exec -it aap-bridge bash
-aap-bridge --help
+3. Create a directory in which we will run the migration and set permissions for that directory to 700, protecting what is inside.
+$ mkdir aap-bridge-devcluster
+$ chmod 700 aap-bridge-devcluster
+
+4. Go into the aap-bridge directory
+$ cd aap-bridge-devcluster
+
+5. Create directories in which migration files will be kept
+$ for item in exports logs database reports xformed imports; do mkdir $item; done
+
+6. Still inside of the aap-bridge directory - Set permissions so that the container can read and write content into the directories
+$ for item in exports logs database reports xformed credential_decrypt; do chmod a+rwx $item -R; done
+
+7. Copy the .env file from this repository into the aap-bridge directory and set permissions for the file
+$ chmod a+rw .env
+
+8. Configure the .env file with your source and target cluster and token informations:
+# Example commands for setting environment variables (replace placeholders):
+export AAP_SOURCE_URL="https://my-24-aap-cluster.example.com"
+export AAP_SOURCE_TOKEN="<AAP_2.4_API_TOKEN>"
+
+export AAP_TARGET_URL="https://my-26-aap-cluster.example.com"
+export AAP_TARGET_TOKEN="<AAP_2.6_API_TOKEN>"
+
+9. Start the container with directories and files mounted into the container (adjust <VERSION> to what version of the container you built)
+$ podman run -v $(pwd)/imports:/app/aap-bridge/imports:z -v $(pwd)/logs:/app/aap-bridge/logs:z -v $(pwd)/exports:/app/aap-bridge/exports:z -v $(pwd)/xformed:/app/aap-bridge/xformed:z -v $(pwd)/database:/app/aap-bridge/database:z -v $(pwd)/.env:/app/aap-bridge/.env:z -v $(pwd)/credential_decrypt:/app/aap-bridge/credential_decrypt:z -v $(pwd)/reports:/app/aap-bridge/reports:z -it localhost/aap-bridge:<VERSION> /bin/bash
+
+10. Check if the installation is intact and that we have a working connection to both source and target AAP clusters.
+[appuser@96804b66c787 aap-bridge]$ aap-bridge --version
+[appuser@96804b66c787 aap-bridge]$ aap-bridge --help
+[appuser@96804b66c787 aap-bridge]$ aap-bridge credentials compare
 ```
 
 📖 **For detailed container setup and deployment options**, see the [Container Deployment Guide](https://github.com/arnav3000/aap-migration-tool/blob/main/container/README.md)
@@ -200,7 +222,7 @@ The tool uses a database to track migration state (ID mappings, checkpoints, pro
 | **Capacity** | Large migrations | Very large migrations |
 | **Location** | Local file | Local or remote |
 | **Backup** | Copy single file | Database dump |
-| **Best For** | Most migrations | Enterprise scale |
+| **Best For** | Most migrations | Extreme scale |
 
 ##### Option A: SQLite (Default - Zero Configuration) ⭐ Recommended
 
