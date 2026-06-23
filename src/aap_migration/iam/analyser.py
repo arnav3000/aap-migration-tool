@@ -354,6 +354,9 @@ class IAMAnalyser:
     # ── ID resolution ─────────────────────────────────────────────────
 
     def _load_id_mappings(self, db_path: str) -> None:
+        if db_path.startswith("sqlite:///"):
+            db_path = db_path[len("sqlite:///"):]
+
         if not os.path.exists(db_path):
             logger.info(
                 "State DB not found at %s — using name-based resolution",
