@@ -251,6 +251,35 @@ def _identify_missing_resources(
     return missing
 
 
+def _determine_transform_drop_reason(
+    export_resource: dict,
+    db_transform_records: dict[int, str],
+) -> str:
+    """Determine why a resource was dropped during the export→transform phase.
+
+    Checks DB phase='transform' records first (authoritative for transformer-specific
+    skips), then falls back to export data field checks for filter-based drops.
+    """
+    source_id = export_resource.get("_source_id") or export_resource.get("id")
+
+    if source_id in db_transform_records and db_transform_records[source_id]:
+        return db_transform_records[source_id]
+
+    if export_resource.get("pending_deletion"):
+        return "Pending deletion in source AAP"
+
+    if export_resource.get("managed"):
+        summary_fields = export_resource.get("summary_fields", {})
+        related = export_resource.get("related", {})
+        if "created_by" in summary_fields or "created_by" in related:
+            return "Custom managed credential type (not built-in)"
+
+    if export_resource.get("has_inventory_sources"):
+        return "Dynamic host (managed by inventory source)"
+
+    return "Filtered during transform (check transform logs)"
+
+
 def _format_workflow_nodes_failures(failed_resources: list[dict], migration_state) -> list[str]:
     """Format workflow node failures grouped by parent workflow.
 
@@ -369,6 +398,7 @@ def _analyze_resource_type(
         "failed_count": 0,
         "in_progress_count": 0,
         "pending_count": 0,
+        "pending_resources": [],
         "skipped_count": 0,
         "failed_resources": [],
         "skipped_resources": [],
@@ -446,6 +476,53 @@ def _analyze_resource_type(
 
     stats["transformed_count"] = len(transformed_data)
 
+    # Compute export→transform diff to find ALL dropped resources.
+    # This is a set difference — guaranteed to catch every drop regardless of
+    # which filter removed it (pending_deletion, transformer skip, etc.).
+    export_ids_map: dict[int, dict] = {}
+    for r in exported_data:
+        sid = r.get("_source_id") or r.get("id")
+        if sid is not None:
+            export_ids_map[sid] = r
+
+    xform_id_set: set[int] = set()
+    for r in transformed_data:
+        sid = r.get("_source_id") or r.get("id")
+        if sid is not None:
+            xform_id_set.add(sid)
+
+    transform_dropped_ids = set(export_ids_map.keys()) - xform_id_set
+
+    if transform_dropped_ids:
+        db_transform_records: dict[int, str] = {}
+        try:
+            with get_session(database_url) as session:
+                records = (
+                    session.query(
+                        MigrationProgress.source_id,
+                        MigrationProgress.error_message,
+                    )
+                    .filter_by(resource_type=resource_type, phase="transform")
+                    .all()
+                )
+                db_transform_records = {
+                    rec.source_id: rec.error_message for rec in records
+                }
+        except Exception as e:
+            logger.warning(f"Failed to query transform records for {resource_type}: {e}")
+
+        for sid in sorted(transform_dropped_ids):
+            export_resource = export_ids_map[sid]
+            reason = _determine_transform_drop_reason(
+                export_resource, db_transform_records
+            )
+            stats["transform_skipped"].append({
+                "source_id": sid,
+                "source_name": export_resource.get("name"),
+                "reason": reason,
+                "phase": "transform",
+            })
+
     if resource_type == "schedules":
         pwd_placeholders = []
         for sched in transformed_data:
@@ -501,6 +578,12 @@ def _analyze_resource_type(
                     stats["in_progress_count"] += 1
                 elif record.status == "pending":
                     stats["pending_count"] += 1
+                    stats["pending_resources"].append({
+                        "source_id": record.source_id,
+                        "source_name": record.source_name,
+                        "phase": record.phase,
+                        "error": record.error_message,
+                    })
                 elif record.status == "skipped":
                     stats["skipped_count"] += 1
                     skip_info = {
@@ -511,10 +594,9 @@ def _analyze_resource_type(
                     }
                     stats["skipped_resources"].append(skip_info)
 
-                    # Separate by phase for detailed reporting
-                    if record.phase == "transform":
-                        stats["transform_skipped"].append(skip_info)
-                    elif record.phase == "import":
+                    # Route import-phase skips for detailed reporting.
+                    # Transform-phase skips are handled by the file diff above.
+                    if record.phase == "import":
                         stats["import_skipped"].append(skip_info)
                         stats["import_skipped_count"] += 1
 
@@ -754,7 +836,7 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
 
     # Detailed sections for failures, skipped, and discrepancies
     for stats in report_data:
-        if stats["failed_count"] > 0 or stats["skipped_count"] > 0 or stats["discrepancy"] != 0:
+        if stats["failed_count"] > 0 or stats["skipped_count"] > 0 or stats["pending_count"] > 0 or stats["discrepancy"] != 0:
             lines.append(f"## {stats['resource_type']} - Issues")
             lines.append("")
 
@@ -903,6 +985,30 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
                     lines.append("- Bug affects credentials with same name but different organizations")
                     lines.append("- Fix: Query by composite key (name, organization, credential_type)")
                     lines.append("")
+
+            if stats["pending_count"] > 0:
+                lines.append(f"### Pending Resources ({stats['pending_count']})")
+                lines.append("")
+                lines.append("These resources have database records but have not completed processing:")
+                lines.append("")
+                lines.append("| Source ID | Name | Phase |")
+                lines.append("|-----------|------|-------|")
+
+                display_limit = 20
+                for pending in stats["pending_resources"][:display_limit]:
+                    source_id = pending["source_id"]
+                    name = pending["source_name"] or "N/A"
+                    phase = pending["phase"] or "N/A"
+                    lines.append(f"| {source_id} | {name} | {phase} |")
+
+                if stats["pending_count"] > display_limit:
+                    lines.append(f"| ... | *({stats['pending_count'] - display_limit} more)* | |")
+
+                lines.append("")
+                lines.append("**Note:**")
+                lines.append("- Pending resources may be from a previous migration run or require re-processing")
+                lines.append("- Re-run import for the affected resource type to process these resources")
+                lines.append("")
 
             if stats["discrepancy"] > 0:
                 lines.append(f"### Missing Resources (Discrepancy: {stats['discrepancy']})")
