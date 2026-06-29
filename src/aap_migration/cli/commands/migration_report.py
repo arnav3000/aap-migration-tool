@@ -1416,9 +1416,67 @@ def _generate_organization_report(
 
             echo_info(f"Found {len(all_resources)} total resources")
 
+            # Build export metadata lookup from export files
+            # Fields extracted per resource type:
+            #   all types: modified
+            #   job_templates, workflow_job_templates, projects, inventory_sources: last_job_run, last_job_failed, next_job_run
+            #   projects, inventory_sources: status, last_update_failed
+            export_meta_lookup: dict[tuple[str, int], dict] = {}
+            export_meta_fields = {
+                "created", "modified", "last_job_run", "last_job_failed",
+                "next_job_run", "last_update_failed",
+            }
+            resource_types_in_db = {r["resource_type"] for r in all_resources}
+
+            for rtype in resource_types_in_db:
+                export_files = []
+                export_subdir = export_dir / rtype
+                if export_subdir.exists() and export_subdir.is_dir():
+                    export_files = sorted(export_subdir.glob(f"{rtype}_*.json"))
+                else:
+                    flat_file = export_dir / f"{rtype}.json"
+                    if flat_file.exists():
+                        export_files = [flat_file]
+
+                for batch_file in export_files:
+                    try:
+                        with open(batch_file) as f:
+                            batch_data = json.load(f)
+                        if not isinstance(batch_data, list):
+                            batch_data = [batch_data]
+                        for res in batch_data:
+                            sid = res.get("_source_id") or res.get("id")
+                            if sid is not None:
+                                meta = {k: res[k] for k in export_meta_fields if res.get(k) is not None}
+                                # Rename export "status" to "sync_status" to avoid collision with migration status
+                                if res.get("status") is not None:
+                                    meta["sync_status"] = res["status"]
+                                if meta:
+                                    export_meta_lookup[(rtype, sid)] = meta
+                    except Exception as e:
+                        logger.warning(f"Failed to read export file for metadata: {batch_file}: {e}")
+
+            if export_meta_lookup:
+                echo_info(f"Loaded export metadata for {len(export_meta_lookup)} resources")
+
+            # Merge export metadata into resource records
+            for resource in all_resources:
+                key = (resource["resource_type"], resource["source_id"])
+                if key in export_meta_lookup:
+                    resource.update(export_meta_lookup[key])
+                # Truncate long error messages for HTML report size
+                err = resource.get("error_message")
+                if err and len(err) > 500:
+                    resource["error_message"] = err[:500] + "..."
+
             # Build organization summary with ALL resources
             echo_info("Mapping resources to organizations...")
             org_summary = org_mapper.build_org_summary(all_resources)
+
+            # Stamp org_name on each resource for global search
+            for org_name_key, summary in org_summary.items():
+                for resource in summary["resources"]:
+                    resource["org_name"] = org_name_key
 
             # Generate HTML with complete data
             report_content = _format_org_report_html(org_summary, migration_state)
@@ -1647,11 +1705,13 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
         completed = sum(1 for r in summary["resources"] if r["status"] == "completed")
         failed = sum(1 for r in summary["resources"] if r["status"] == "failed")
         skipped = sum(1 for r in summary["resources"] if r["status"] == "skipped")
+        pending = sum(1 for r in summary["resources"] if r["status"] == "pending")
 
         json_data["organizations"][org_name] = {
             "completed": completed,
             "failed": failed,
             "skipped": skipped,
+            "pending": pending,
             "total": summary["total"],
             "resource_types": sorted(list(summary["resource_types"])),
             "resources": summary["resources"]
@@ -1769,24 +1829,61 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
         .stat-card .label {{ font-size: 0.9em; opacity: 0.9; }}
         .content {{ padding: 30px; min-height: 400px; }}
         .content.hidden {{ display: none; }}
+        .resource-type-section {{ overflow-x: auto; }}
         table {{
             width: 100%;
             border-collapse: collapse;
             margin-top: 20px;
             font-size: 0.9em;
         }}
+        .resource-type-section table {{ table-layout: fixed; }}
         th {{
             background: #667eea;
             color: white;
-            padding: 12px;
+            padding: 12px 8px;
             text-align: left;
             font-weight: 600;
             position: sticky;
             top: 0;
+            white-space: nowrap;
         }}
         td {{
-            padding: 10px 12px;
+            padding: 10px 8px;
             border-bottom: 1px solid #e9ecef;
+        }}
+        .resource-type-section td {{
+            word-break: break-word;
+            font-size: 0.85em;
+        }}
+        .resource-type-section th:nth-child(1) {{ width: 70px; }}
+        .resource-type-section th:nth-child(2) {{ width: 20%; }}
+        .resource-type-section th:nth-child(3) {{ width: 11%; }}
+        .resource-type-section th:nth-child(4) {{ width: 65px; }}
+        .resource-type-section th:nth-child(5) {{ width: 110px; }}
+        .resource-type-section th:nth-child(6) {{ width: 80px; }}
+        .resource-type-section th:nth-child(7), .resource-type-section th:nth-child(8), .resource-type-section th:nth-child(9) {{ width: 95px; }}
+        .resource-type-section th:last-child {{ width: auto; }}
+        .resource-type-section th {{
+            position: relative;
+        }}
+        .col-resize-handle {{
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 5px;
+            cursor: col-resize;
+            background: transparent;
+        }}
+        .col-resize-handle:hover, .col-resize-handle.active {{
+            background: rgba(255,255,255,0.4);
+        }}
+        body.col-resizing {{
+            cursor: col-resize !important;
+            user-select: none;
+        }}
+        body.col-resizing * {{
+            cursor: col-resize !important;
         }}
         tr:hover {{ background: #f8f9fa; }}
         tr.clickable {{ cursor: pointer; }}
@@ -1863,17 +1960,84 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
             border-bottom: 2px solid #e9ecef;
             margin-bottom: 15px;
         }}
+        .name-cell {{
+            word-break: break-word;
+        }}
         .error-cell {{
             max-width: 400px;
             word-wrap: break-word;
             font-size: 0.85em;
             color: #495057;
         }}
+        .last-run-cell {{
+            font-size: 0.85em;
+            white-space: nowrap;
+        }}
+        .last-run-dot {{
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+            vertical-align: middle;
+        }}
+        .last-run-dot.success {{ background: #38ef7d; }}
+        .last-run-dot.failed {{ background: #f5576c; }}
+        .last-run-dot.unknown {{ background: #dee2e6; }}
+        .summary-search {{
+            padding: 15px 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+        }}
+        .summary-search input {{
+            padding: 10px 15px;
+            border: 2px solid #dee2e6;
+            border-radius: 6px;
+            font-size: 14px;
+            width: 100%;
+            max-width: 400px;
+            transition: all 0.3s;
+        }}
+        .summary-search input:focus {{
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }}
         .no-data {{
             text-align: center;
             padding: 60px 20px;
             color: #6c757d;
         }}
+        .status-pending {{
+            background: #007bff;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }}
+        .stat-card.pending {{ background: linear-gradient(135deg, #667eea 0%, #4a6cf7 100%); }}
+        .btn-toggle {{
+            padding: 8px 14px;
+            border: 2px solid #667eea;
+            background: white;
+            color: #667eea;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 13px;
+            transition: all 0.3s;
+            white-space: nowrap;
+        }}
+        .btn-toggle:hover {{ background: #667eea; color: white; }}
+        .btn-toggle.active {{ background: #667eea; color: white; }}
+        th.sortable {{ cursor: pointer; user-select: none; }}
+        th.sortable:hover {{ background: #5a6fd6; }}
+        th .sort-arrow {{ margin-left: 4px; font-size: 0.8em; }}
+        .group-row {{ cursor: pointer; }}
+        .group-row:hover {{ background: #e9ecef !important; }}
+        .group-row td {{ font-weight: 600; }}
+        .group-count {{ background: #667eea; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.85em; }}
     </style>
 </head>
 <body>
@@ -1888,14 +2052,15 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
     <div class="tabs">
         <button class="tab active" data-tab="summary">📊 Summary</button>
         <button class="tab" data-tab="failures">❌ Failures</button>
+        <button class="tab" data-tab="pending">⏳ Pending</button>
         <button class="tab" data-tab="successful">✅ Successful</button>
         <button class="tab" data-tab="complete">📋 Complete</button>
     </div>
     <div class="controls hidden" id="controls">
         <div class="control-group">
-            <label for="orgSelect">Select Organization</label>
+            <label for="orgSelect">Organization</label>
             <select id="orgSelect">
-                <option value="">-- Select Organization --</option>
+                <option value="">All Organizations</option>
             </select>
         </div>
         <div class="control-group">
@@ -1906,12 +2071,23 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
         </div>
         <div class="control-group">
             <label for="searchInput">Search</label>
-            <input type="text" id="searchInput" placeholder="Search by name or ID...">
+            <input type="text" id="searchInput" placeholder="Search by name, ID, org, or error...">
+        </div>
+        <div class="control-group" style="justify-content:flex-end;">
+            <label>&nbsp;</label>
+            <div style="display:flex;gap:8px;">
+                <button id="groupToggle" class="btn-toggle" title="Group failures by error pattern">Group Errors</button>
+                <button id="csvDownload" class="btn-toggle" title="Download filtered results as CSV">⬇ CSV</button>
+            </div>
         </div>
     </div>
     <div class="stats" id="statsContainer"></div>
+    <div class="summary-search hidden" id="summarySearch">
+        <input type="text" id="summarySearchInput" placeholder="Search organizations...">
+    </div>
     <div class="content" id="summaryContent"></div>
     <div class="content hidden" id="failuresContent"></div>
+    <div class="content hidden" id="pendingContent"></div>
     <div class="content hidden" id="successfulContent"></div>
     <div class="content hidden" id="completeContent"></div>
     <div class="pagination hidden" id="paginationContainer">
@@ -1921,12 +2097,159 @@ def _format_org_report_html(org_summary: dict, migration_state) -> str:
     </div>
 </div>
 <script>
-const DATA = {json.dumps(json_data, indent=2)};
+const DATA = {json.dumps(json_data, separators=(',', ':'))};
 let currentTab = 'summary';
-let currentOrg = null;
+let currentOrg = '';
 let currentPage = 1;
 const itemsPerPage = 100;
 let filteredData = [];
+let _allResourcesCache = null;
+let _searchDebounceTimer = null;
+let viewMode = 'flat';
+let currentSort = {{ column: '', direction: 'asc' }};
+
+function getAllResources() {{
+    if (!_allResourcesCache) {{
+        _allResourcesCache = [];
+        Object.values(DATA.organizations).forEach(org => {{
+            org.resources.forEach(r => _allResourcesCache.push(r));
+        }});
+    }}
+    return _allResourcesCache;
+}}
+
+function getAllResourceTypes() {{
+    const types = new Set();
+    Object.values(DATA.organizations).forEach(org => {{
+        org.resource_types.forEach(t => types.add(t));
+    }});
+    return Array.from(types).sort();
+}}
+
+function formatTs(ts) {{
+    if (!ts) return '<span style="color:#adb5bd;">—</span>';
+    return new Date(ts).toISOString().replace('T', ' ').substring(0, 16);
+}}
+
+function formatLastRun(resource) {{
+    const ts = resource.last_job_run;
+    if (!ts) return '<span class="last-run-cell" style="color:#adb5bd;">—</span>';
+    const dateStr = formatTs(ts);
+    const failed = resource.last_job_failed;
+    let dotClass = 'unknown';
+    if (failed === true) dotClass = 'failed';
+    else if (failed === false) dotClass = 'success';
+    return `<span class="last-run-cell"><span class="last-run-dot ${{dotClass}}"></span>${{dateStr}}</span>`;
+}}
+
+function formatSyncStatus(resource) {{
+    const st = resource.sync_status;
+    if (!st && resource.last_update_failed === undefined) return '<span style="color:#adb5bd;">—</span>';
+    let color = '#adb5bd';
+    if (st === 'successful') color = '#28a745';
+    else if (st === 'failed' || st === 'error') color = '#dc3545';
+    else if (st === 'never updated') color = '#6c757d';
+    else if (st === 'running') color = '#007bff';
+    else if (st === 'canceled') color = '#ffc107';
+    const label = st || (resource.last_update_failed ? 'failed' : 'ok');
+    return `<span style="color:${{color}};font-weight:600;">${{label}}</span>`;
+}}
+
+function getErrorPattern(msg) {{
+    if (!msg) return '(no message)';
+    return msg.replace(/'[^']*'/g, "'...'").replace(/\\b\\d{{4,}}\\b/g, 'NNN').substring(0, 100);
+}}
+
+function applySortToFiltered() {{
+    if (!currentSort.column) return;
+    const col = currentSort.column;
+    const dir = currentSort.direction === 'asc' ? 1 : -1;
+    filteredData.sort((a, b) => {{
+        let va = a[col], vb = b[col];
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        if (typeof va === 'string') va = va.toLowerCase();
+        if (typeof vb === 'string') vb = vb.toLowerCase();
+        if (va < vb) return -dir;
+        if (va > vb) return dir;
+        return 0;
+    }});
+}}
+
+function sortData(column) {{
+    if (currentSort.column === column) {{
+        currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+    }} else {{
+        currentSort.column = column;
+        currentSort.direction = 'asc';
+    }}
+    applySortToFiltered();
+    currentPage = 1;
+    renderPage();
+}}
+
+function downloadCSV() {{
+    if (!filteredData.length) return;
+    const cols = ['source_id','source_name','org_name','resource_type','status','last_job_run','last_job_failed','sync_status','modified','created','next_job_run','error_message'];
+    const headers = ['Source ID','Name','Organization','Resource Type','Status','Last Run','Last Run Failed','Sync Status','Modified','Created','Next Run','Error/Reason'];
+    let csv = headers.join(',') + '\\n';
+    filteredData.forEach(r => {{
+        csv += cols.map(c => {{
+            let v = r[c] != null ? String(r[c]) : '';
+            if (v.includes(',') || v.includes('"') || v.includes('\\n')) v = '"' + v.replace(/"/g, '""') + '"';
+            return v;
+        }}).join(',') + '\\n';
+    }});
+    const blob = new Blob([csv], {{type: 'text/csv'}});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `migration-report-${{currentTab}}-${{new Date().toISOString().substring(0,10)}}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+}}
+
+function renderGroupedView() {{
+    const contentId = `${{currentTab}}Content`;
+    if (!filteredData.length) {{
+        document.getElementById(contentId).innerHTML = '<div class="no-data"><p>No resources match the current filters</p></div>';
+        document.getElementById('paginationContainer').classList.add('hidden');
+        return;
+    }}
+    const groups = {{}};
+    filteredData.forEach(r => {{
+        const pattern = getErrorPattern(r.error_message);
+        if (!groups[pattern]) groups[pattern] = {{ count: 0, types: new Set(), orgs: new Set(), sample: r.error_message }};
+        groups[pattern].count++;
+        groups[pattern].types.add(r.resource_type);
+        if (r.org_name) groups[pattern].orgs.add(r.org_name);
+    }});
+    const sorted = Object.entries(groups).sort((a, b) => b[1].count - a[1].count);
+    let html = `<div class="resource-type-section"><h3>Error Patterns (${{sorted.length}} patterns, ${{filteredData.length}} resources)</h3>`;
+    html += '<table><thead><tr><th>Error Pattern</th><th>Count</th><th>Resource Types</th><th>Orgs Affected</th></tr></thead><tbody>';
+    sorted.forEach(([pattern, data]) => {{
+        const sample = data.sample || '';
+        const searchVal = sample.substring(0, 60).replace(/"/g, '&quot;');
+        html += `<tr class="group-row" onclick="applyPatternFilter('${{searchVal.replace(/'/g, "\\\\'")}}')">
+            <td class="error-cell" style="max-width:500px;">${{escapeHtml(pattern)}}</td>
+            <td><span class="group-count">${{data.count}}</span></td>
+            <td style="font-size:0.85em;">${{Array.from(data.types).sort().join(', ')}}</td>
+            <td style="font-size:0.85em;">${{data.orgs.size}} org${{data.orgs.size !== 1 ? 's' : ''}}</td>
+        </tr>`;
+    }});
+    html += '</tbody></table></div>';
+    document.getElementById(contentId).innerHTML = html;
+    document.getElementById('paginationContainer').classList.add('hidden');
+}}
+
+function applyPatternFilter(text) {{
+    viewMode = 'flat';
+    document.getElementById('groupToggle').classList.remove('active');
+    document.getElementById('searchInput').value = text;
+    currentPage = 1;
+    renderDetailTab();
+}}
 
 function init() {{
     populateOrgDropdown();
@@ -1955,29 +2278,32 @@ function switchTab(tabName) {{
     }});
     document.querySelectorAll('.content').forEach(content => content.classList.add('hidden'));
     const controls = document.getElementById('controls');
+    const summarySearch = document.getElementById('summarySearch');
     if (tabName === 'summary') {{
         controls.classList.add('hidden');
+        summarySearch.classList.remove('hidden');
         document.getElementById('summaryContent').classList.remove('hidden');
         renderSummaryTab();
     }} else {{
         controls.classList.remove('hidden');
+        summarySearch.classList.add('hidden');
         document.getElementById(`${{tabName}}Content`).classList.remove('hidden');
-        if (!currentOrg && Object.keys(DATA.organizations).length > 0) {{
-            const firstOrg = Object.keys(DATA.organizations).sort((a, b) => DATA.organizations[b].total - DATA.organizations[a].total)[0];
-            document.getElementById('orgSelect').value = firstOrg;
-            currentOrg = firstOrg;
-            populateResourceTypeFilter();
-        }}
+        populateResourceTypeFilter();
         renderDetailTab();
     }}
 }}
 
 function renderSummaryTab() {{
-    const orgs = Object.entries(DATA.organizations);
+    const searchTerm = (document.getElementById('summarySearchInput').value || '').toLowerCase();
+    const orgs = Object.entries(DATA.organizations).filter(([name]) => {{
+        if (!searchTerm) return true;
+        return name.toLowerCase().includes(searchTerm);
+    }});
     const totalOrgs = orgs.length;
     const totalCompleted = orgs.reduce((sum, [_, data]) => sum + data.completed, 0);
     const totalFailed = orgs.reduce((sum, [_, data]) => sum + data.failed, 0);
     const totalSkipped = orgs.reduce((sum, [_, data]) => sum + data.skipped, 0);
+    const totalPending = orgs.reduce((sum, [_, data]) => sum + (data.pending || 0), 0);
     const totalAll = orgs.reduce((sum, [_, data]) => sum + data.total, 0);
     const overallSuccessRate = totalAll > 0 ? Math.round((totalCompleted / totalAll) * 100) : 0;
     document.getElementById('statsContainer').innerHTML = `
@@ -1997,13 +2323,14 @@ function renderSummaryTab() {{
             <div class="value">${{totalSkipped}}</div>
             <div class="label">Skipped</div>
         </div>
+        ${{totalPending > 0 ? `<div class="stat-card pending"><div class="value">${{totalPending}}</div><div class="label">Pending</div></div>` : ''}}
         <div class="stat-card">
             <div class="value">${{overallSuccessRate}}%</div>
             <div class="label">Success Rate</div>
         </div>
     `;
     const sortedOrgs = orgs.sort((a, b) => b[1].total - a[1].total);
-    let tableHtml = '<table><thead><tr><th>Organization</th><th>Total</th><th>Successful</th><th>Failed</th><th>Skipped</th><th>Success Rate</th><th>Resource Types</th></tr></thead><tbody>';
+    let tableHtml = '<table><thead><tr><th>Organization</th><th>Total</th><th>Successful</th><th>Failed</th><th>Skipped</th><th>Pending</th><th>Success Rate</th><th>Resource Types</th></tr></thead><tbody>';
     sortedOrgs.forEach(([orgName, stats]) => {{
         const successRate = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0;
         let rateClass = successRate < 50 ? 'low' : (successRate < 80 ? 'medium' : 'high');
@@ -2013,6 +2340,7 @@ function renderSummaryTab() {{
             <td><span class="status-completed">${{stats.completed}}</span></td>
             <td><span class="status-failed">${{stats.failed}}</span></td>
             <td><span class="status-skipped">${{stats.skipped}}</span></td>
+            <td>${{(stats.pending || 0) > 0 ? '<span class="status-pending">' + (stats.pending || 0) + '</span>' : '0'}}</td>
             <td><span class="success-rate ${{rateClass}}">${{successRate}}%</span></td>
             <td style="font-size: 0.85em;">${{stats.resource_types.join(', ')}}</td>
         </tr>`;
@@ -2030,56 +2358,75 @@ function goToOrg(orgName) {{
 }}
 
 function populateResourceTypeFilter() {{
-    if (!currentOrg) return;
-    const orgData = DATA.organizations[currentOrg];
     const resourceTypeSelect = document.getElementById('resourceTypeFilter');
+    const currentValue = resourceTypeSelect.value;
     resourceTypeSelect.innerHTML = '<option value="">All Types</option>';
-    orgData.resource_types.forEach(type => {{
+    let types;
+    if (currentOrg) {{
+        types = DATA.organizations[currentOrg].resource_types;
+    }} else {{
+        types = getAllResourceTypes();
+    }}
+    types.forEach(type => {{
         const option = document.createElement('option');
         option.value = type;
         option.textContent = type;
         resourceTypeSelect.appendChild(option);
     }});
+    if (currentValue && types.includes(currentValue)) {{
+        resourceTypeSelect.value = currentValue;
+    }}
 }}
 
 function renderDetailTab() {{
-    if (!currentOrg) {{
-        const contentId = `${{currentTab}}Content`;
-        document.getElementById(contentId).innerHTML = '<div class="no-data"><h3>Please select an organization from the dropdown above</h3></div>';
-        document.getElementById('statsContainer').innerHTML = '';
-        document.getElementById('paginationContainer').classList.add('hidden');
-        return;
+    let resources;
+    if (currentOrg) {{
+        resources = DATA.organizations[currentOrg].resources;
+    }} else {{
+        resources = getAllResources();
     }}
-    const orgData = DATA.organizations[currentOrg];
     const resourceTypeFilter = document.getElementById('resourceTypeFilter').value;
     const searchTerm = document.getElementById('searchInput').value.toLowerCase();
     let statusFilter = [];
     if (currentTab === 'failures') statusFilter = ['failed', 'skipped'];
+    else if (currentTab === 'pending') statusFilter = ['pending'];
     else if (currentTab === 'successful') statusFilter = ['completed'];
-    else statusFilter = ['completed', 'failed', 'skipped'];
-    filteredData = orgData.resources.filter(resource => {{
+    else statusFilter = ['completed', 'failed', 'skipped', 'pending'];
+    filteredData = resources.filter(resource => {{
         if (!statusFilter.includes(resource.status)) return false;
         if (resourceTypeFilter && resource.resource_type !== resourceTypeFilter) return false;
         if (searchTerm) {{
             const matchName = resource.source_name && resource.source_name.toLowerCase().includes(searchTerm);
             const matchId = resource.source_id && resource.source_id.toString().includes(searchTerm);
             const matchError = resource.error_message && resource.error_message.toLowerCase().includes(searchTerm);
-            if (!matchName && !matchId && !matchError) return false;
+            const matchOrg = resource.org_name && resource.org_name.toLowerCase().includes(searchTerm);
+            const matchLastRun = resource.last_job_run && resource.last_job_run.toLowerCase().includes(searchTerm);
+            const matchSync = resource.sync_status && resource.sync_status.toLowerCase().includes(searchTerm);
+            const matchModified = resource.modified && resource.modified.toLowerCase().includes(searchTerm);
+            if (!matchName && !matchId && !matchError && !matchOrg && !matchLastRun && !matchSync && !matchModified) return false;
         }}
         return true;
     }});
     const completed = filteredData.filter(r => r.status === 'completed').length;
     const failed = filteredData.filter(r => r.status === 'failed').length;
     const skipped = filteredData.filter(r => r.status === 'skipped').length;
+    const pending = filteredData.filter(r => r.status === 'pending').length;
     const successRate = filteredData.length > 0 ? Math.round((completed / filteredData.length) * 100) : 0;
+    const orgLabel = currentOrg ? escapeHtml(currentOrg) : 'All Organizations';
     document.getElementById('statsContainer').innerHTML = `
-        <div class="stat-card"><div class="value" style="font-size: 1.8em;">${{escapeHtml(currentOrg)}}</div><div class="label">Selected Organization</div></div>
+        <div class="stat-card"><div class="value" style="font-size: 1.8em;">${{orgLabel}}</div><div class="label">${{currentOrg ? 'Selected Organization' : filteredData.length + ' matching resources'}}</div></div>
         <div class="stat-card success"><div class="value">${{completed}}</div><div class="label">Successful</div></div>
         <div class="stat-card failed"><div class="value">${{failed}}</div><div class="label">Failed</div></div>
         <div class="stat-card skipped"><div class="value">${{skipped}}</div><div class="label">Skipped</div></div>
+        ${{pending > 0 ? `<div class="stat-card pending"><div class="value">${{pending}}</div><div class="label">Pending</div></div>` : ''}}
         <div class="stat-card"><div class="value">${{successRate}}%</div><div class="label">Success Rate</div></div>
     `;
-    renderPage();
+    applySortToFiltered();
+    if (viewMode === 'grouped' && (currentTab === 'failures' || currentTab === 'complete')) {{
+        renderGroupedView();
+    }} else {{
+        renderPage();
+    }}
 }}
 
 function renderPage() {{
@@ -2092,6 +2439,7 @@ function renderPage() {{
         document.getElementById('paginationContainer').classList.add('hidden');
         return;
     }}
+    const showError = currentTab !== 'successful';
     const byType = {{}};
     pageData.forEach(resource => {{
         if (!byType[resource.resource_type]) byType[resource.resource_type] = [];
@@ -2100,13 +2448,30 @@ function renderPage() {{
     let html = '';
     Object.keys(byType).sort().forEach(resourceType => {{
         const resources = byType[resourceType];
-        html += `<div class="resource-type-section"><h3>${{resourceType}} (${{resources.length}})</h3><table><thead><tr><th>Source ID</th><th>Name</th><th>Status</th>${{currentTab !== 'successful' ? '<th>Error/Reason</th>' : ''}}</tr></thead><tbody>`;
+        const sa = (col) => currentSort.column === col ? (currentSort.direction === 'asc' ? ' ▲' : ' ▼') : '';
+        html += `<div class="resource-type-section"><h3>${{resourceType}} (${{resources.length}})</h3><table><thead><tr>
+            <th class="sortable" onclick="sortData('source_id')">Source ID${{sa('source_id')}}</th>
+            <th class="sortable" onclick="sortData('source_name')">Name${{sa('source_name')}}</th>
+            <th class="sortable" onclick="sortData('org_name')">Organization${{sa('org_name')}}</th>
+            <th class="sortable" onclick="sortData('status')">Status${{sa('status')}}</th>
+            <th class="sortable" onclick="sortData('last_job_run')">Last Run${{sa('last_job_run')}}</th>
+            <th class="sortable" onclick="sortData('sync_status')">Sync Status${{sa('sync_status')}}</th>
+            <th class="sortable" onclick="sortData('modified')">Modified${{sa('modified')}}</th>
+            <th class="sortable" onclick="sortData('created')">Created${{sa('created')}}</th>
+            <th class="sortable" onclick="sortData('next_job_run')">Next Run${{sa('next_job_run')}}</th>
+            ${{showError ? '<th class="sortable" onclick="sortData(\\'error_message\\')">Error/Reason' + sa('error_message') + '</th>' : ''}}
+        </tr></thead><tbody>`;
         resources.forEach(resource => {{
-            const statusMap = {{'completed': 'status-completed', 'failed': 'status-failed', 'skipped': 'status-skipped'}};
-            const statusClass = statusMap[resource.status];
+            const statusMap = {{'completed': 'status-completed', 'failed': 'status-failed', 'skipped': 'status-skipped', 'pending': 'status-pending'}};
+            const statusClass = statusMap[resource.status] || '';
             const error = resource.error_message || (resource.status === 'completed' ? 'Success' : 'No message');
             const truncatedError = error.length > 150 ? error.substring(0, 150) + '...' : error;
-            html += `<tr title="${{escapeHtml(error)}}"><td>${{resource.source_id}}</td><td>${{escapeHtml(resource.source_name || 'N/A')}}</td><td><span class="${{statusClass}}">${{resource.status}}</span></td>${{currentTab !== 'successful' ? `<td class="error-cell">${{escapeHtml(truncatedError)}}</td>` : ''}}</tr>`;
+            const lastRun = formatLastRun(resource);
+            const syncStatus = formatSyncStatus(resource);
+            const modified = formatTs(resource.modified);
+            const created = formatTs(resource.created);
+            const nextRun = formatTs(resource.next_job_run);
+            html += `<tr title="${{escapeHtml(error)}}"><td>${{resource.source_id}}</td><td class="name-cell">${{escapeHtml(resource.source_name || 'N/A')}}</td><td class="name-cell">${{escapeHtml(resource.org_name || 'N/A')}}</td><td><span class="${{statusClass}}">${{resource.status}}</span></td><td>${{lastRun}}</td><td>${{syncStatus}}</td><td>${{modified}}</td><td>${{created}}</td><td>${{nextRun}}</td>${{showError ? `<td class="error-cell">${{escapeHtml(truncatedError)}}</td>` : ''}}</tr>`;
         }});
         html += '</tbody></table></div>';
     }});
@@ -2120,6 +2485,38 @@ function renderPage() {{
     }} else {{
         document.getElementById('paginationContainer').classList.add('hidden');
     }}
+    initColumnResize();
+}}
+
+function initColumnResize() {{
+    document.querySelectorAll('.resource-type-section th').forEach(th => {{
+        if (th.querySelector('.col-resize-handle')) return;
+        const handle = document.createElement('div');
+        handle.className = 'col-resize-handle';
+        th.appendChild(handle);
+        let startX, startW;
+        handle.addEventListener('mousedown', (e) => {{
+            e.preventDefault();
+            e.stopPropagation();
+            startX = e.pageX;
+            startW = th.offsetWidth;
+            handle.classList.add('active');
+            document.body.classList.add('col-resizing');
+            const onMove = (ev) => {{
+                const diff = ev.pageX - startX;
+                const newW = Math.max(40, startW + diff);
+                th.style.width = newW + 'px';
+            }};
+            const onUp = () => {{
+                handle.classList.remove('active');
+                document.body.classList.remove('col-resizing');
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            }};
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        }});
+    }});
 }}
 
 function attachEventListeners() {{
@@ -2129,23 +2526,30 @@ function attachEventListeners() {{
     document.getElementById('orgSelect').addEventListener('change', () => {{
         currentOrg = document.getElementById('orgSelect').value;
         currentPage = 1;
-        if (currentOrg) {{
-            populateResourceTypeFilter();
-            renderDetailTab();
-        }} else {{
-            const contentId = `${{currentTab}}Content`;
-            document.getElementById(contentId).innerHTML = '<div class="no-data"><h3>Please select an organization</h3></div>';
-            document.getElementById('statsContainer').innerHTML = '';
-            document.getElementById('paginationContainer').classList.add('hidden');
-        }}
+        populateResourceTypeFilter();
+        renderDetailTab();
     }});
     document.getElementById('resourceTypeFilter').addEventListener('change', () => {{ currentPage = 1; renderDetailTab(); }});
-    document.getElementById('searchInput').addEventListener('input', () => {{ currentPage = 1; renderDetailTab(); }});
+    document.getElementById('searchInput').addEventListener('input', () => {{
+        clearTimeout(_searchDebounceTimer);
+        _searchDebounceTimer = setTimeout(() => {{ currentPage = 1; renderDetailTab(); }}, 200);
+    }});
+    document.getElementById('summarySearchInput').addEventListener('input', () => {{
+        clearTimeout(_searchDebounceTimer);
+        _searchDebounceTimer = setTimeout(() => {{ renderSummaryTab(); }}, 200);
+    }});
     document.getElementById('prevPage').addEventListener('click', () => {{ if (currentPage > 1) {{ currentPage--; renderPage(); }} }});
     document.getElementById('nextPage').addEventListener('click', () => {{
         const totalPages = Math.ceil(filteredData.length / itemsPerPage);
         if (currentPage < totalPages) {{ currentPage++; renderPage(); }}
     }});
+    document.getElementById('groupToggle').addEventListener('click', () => {{
+        viewMode = viewMode === 'flat' ? 'grouped' : 'flat';
+        document.getElementById('groupToggle').classList.toggle('active', viewMode === 'grouped');
+        currentPage = 1;
+        renderDetailTab();
+    }});
+    document.getElementById('csvDownload').addEventListener('click', downloadCSV);
 }}
 
 function escapeHtml(text) {{
