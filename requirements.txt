@@ -10,17 +10,17 @@ requests>=2.33.0
 aiofiles==25.1.0
 
 # CLI Framework
-click==8.4.0
+click==8.4.2
 
 # Logging
-structlog==25.5.0
+structlog==26.1.0
 
 # Retry Logic
 tenacity==8.2.3
 
 # Configuration Management
 pydantic==2.13.4
-pydantic-settings==2.1.0
+pydantic-settings==2.14.2
 PyYAML==6.0.3
 python-dotenv>=1.2.2
 
@@ -31,8 +31,8 @@ tqdm>=4.66.3
 hvac==2.1.0
 
 # Database
-sqlalchemy==2.0.49
-alembic==1.18.4
+sqlalchemy==2.0.51
+alembic==1.18.5
 
 # Version Parsing
 packaging>=24.0
