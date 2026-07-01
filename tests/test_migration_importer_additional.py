@@ -233,6 +233,44 @@ async def test_inventory_group_inventory_source_and_schedule_importers(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_import_parallel_inventory_sources_resolves_inventory_with_source_id():
+    state = FakeState(mapped_ids={("inventories", 10): 100, ("projects", 5): 50})
+    client = FakeTargetClient()
+    importer = InventorySourceImporter(client, state, PerformanceConfig())
+
+    results = await importer._import_parallel(
+        "inventory_sources",
+        [
+            {
+                "_source_id": 20,
+                "name": "scm-src",
+                "inventory": 10,
+                "source_project": 5,
+            }
+        ],
+    )
+
+    assert results == [{"id": 500, "name": "created"}]
+    created = client.create_calls[0][1]
+    assert created["inventory"] == 100
+    assert created["source_project"] == 50
+
+
+@pytest.mark.asyncio
+async def test_import_parallel_inventory_sources_without_source_id_uses_none_state_key():
+    state = FakeState(mapped_ids={("inventories", 10): 100})
+    client = FakeTargetClient()
+    importer = InventorySourceImporter(client, state, PerformanceConfig())
+
+    await importer._import_parallel(
+        "inventory_sources",
+        [{"name": "scm-src", "inventory": 10}],
+    )
+
+    assert ("inventory_sources", None) in state.migrated
+
+
+@pytest.mark.asyncio
 async def test_membership_rbac_system_templates_and_applications():
     performance = PerformanceConfig()
 
