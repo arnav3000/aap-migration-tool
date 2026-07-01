@@ -333,13 +333,10 @@ async def _resolve_jt_dependencies(
             src_id = src.get("id")
             if src_id is not None:
                 _add("inventory_sources", src_id)
-            _add("inventories", _fk_id(src, "inventory") or src.get("inventory"))
-            _add("projects", _fk_id(src, "source_project") or src.get("source_project"))
-            _add("credentials", _fk_id(src, "credential") or src.get("credential"))
-            _add(
-                "execution_environments",
-                _fk_id(src, "execution_environment") or src.get("execution_environment"),
-            )
+            _add("inventories", _fk_id(src, "inventory"))
+            _add("projects", _fk_id(src, "source_project"))
+            _add("credentials", _fk_id(src, "credential"))
+            _add("execution_environments", _fk_id(src, "execution_environment"))
             _add("organizations", _fk_id(src, "organization"))
 
     cred_ids = list(deps.get("credentials", set()))
@@ -548,6 +545,16 @@ async def selective_migrate(
                                 f"  Skipping {rtype}/{source_id} ({res_name}): "
                                 "already exists on target"
                             )
+                            emit(
+                                {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
+                                    "name": res_name,
+                                    "resource_type": rtype,
+                                    "result": "skipped",
+                                    "detail": "Already migrated",
+                                }
+                            )
                             continue
 
                         schedules = resource.get("schedules")
@@ -568,8 +575,20 @@ async def selective_migrate(
                             skipped += 1
                             res_name = resource.get("name", str(source_id))
                             log(f"  Skipping {rtype}/{source_id} ({res_name}): {exc}")
-                        except Exception:
+                        except Exception as exc:
                             failed += 1
+                            res_name = resource.get("name", str(source_id))
+                            log(f"  Transform failed {rtype}/{source_id} ({res_name}): {exc}")
+                            emit(
+                                {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
+                                    "name": res_name,
+                                    "resource_type": rtype,
+                                    "result": "failed",
+                                    "detail": str(exc)[:200],
+                                }
+                            )
 
                     if batch:
                         inv_src_importer = cast(
@@ -688,8 +707,22 @@ async def selective_migrate(
                             )
                             log(f"  Skipping {rtype}/{source_id} ({res_name}): {exc}")
                             continue
-                        except Exception:
+                        except Exception as exc:
                             failed += 1
+                            res_name = resource.get(
+                                "name", resource.get("username", str(source_id))
+                            )
+                            log(f"  Transform failed {rtype}/{source_id} ({res_name}): {exc}")
+                            emit(
+                                {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
+                                    "name": res_name,
+                                    "resource_type": rtype,
+                                    "result": "failed",
+                                    "detail": str(exc)[:200],
+                                }
+                            )
                             continue
                     elif not state.has_source_mapping(rtype, int(source_id)):
                         # Types without a transformer (orgs, credential_types, etc.)
