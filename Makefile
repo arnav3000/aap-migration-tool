@@ -1,7 +1,7 @@
 .PHONY: help install install-dev clean format lint typecheck test test-unit test-integration \
        test-performance test-cov test-watch check pre-commit docs docs-serve run-example \
        init-env setup version venv install-editable all \
-       build build-api build-ui build-test prepare-pgdata up up-dev down shell shell-engine logs \
+       build build-api build-ui build-test prepare-pgdata prepare-volumes up up-dev down down-images destroy shell shell-engine logs \
        c-test c-test-backend c-test-frontend c-test-smoke c-test-all c-ci-full c-lint c-format c-typecheck c-check \
        web-install web-dev web-build serve
 
@@ -35,6 +35,9 @@ help: ## Show this help message
 	@echo "  Container deployment:"
 	@echo "    make build && make up              # Build and start all containers"
 	@echo "    make up                            # Start db + engine + ui"
+	@echo "    make down                          # Stop containers (keeps data volumes)"
+	@echo "    make down-images                   # Stop and remove images (keeps data volumes)"
+	@echo "    make destroy                       # Stop, remove images, DELETE all data volumes"
 	@echo "    make up-dev                        # Start db + bridge (CLI dev)"
 	@echo "    make c-check                       # Run checks inside container"
 	@echo ""
@@ -132,14 +135,14 @@ all: check docs ## Run all checks and build docs
 #  Container deployment (requires podman)
 # ===========================================================================
 
-COMPOSE          := podman compose -f container/docker-compose.yml
+COMPOSE          := podman compose -f container/docker-compose.yml --project-name aap-bridge
 BRIDGE_SVC       := bridge
 BRIDGE_IMAGE     := localhost/aap-bridge:latest
 BRIDGE_API_IMAGE := localhost/aap-bridge-api:latest
 TEST_IMAGE       := localhost/aap-bridge-test:latest
 UI_IMAGE         := localhost/aap-bridge-ui:latest
-PROJECT_NAME     := $(notdir $(CURDIR))
-PGDATA_VOLUME    := $(PROJECT_NAME)_postgres-data
+# Must match the pinned postgres-data volume name in container/docker-compose.yml
+PGDATA_VOLUME    := container_postgres-data
 
 define run-bridge
 	$(COMPOSE) exec $(BRIDGE_SVC)
@@ -163,7 +166,10 @@ build-ui: ## Build UI container image only
 build-test: ## Build dedicated test container image
 	podman build -t $(TEST_IMAGE) -f container/Containerfile.test .
 
-prepare-pgdata: ## Prepare PostgreSQL volume ownership for rootless Podman
+prepare-volumes: ## Create host bind-mount directories for exports/logs/etc.
+	@mkdir -p container/volumes/{database,logs,exports,xformed,config,auth}
+
+prepare-pgdata: prepare-volumes ## Prepare PostgreSQL volume ownership for rootless Podman
 	@podman volume inspect $(PGDATA_VOLUME) >/dev/null 2>&1 || podman volume create $(PGDATA_VOLUME) >/dev/null
 	@podman unshare chown -R 26:26 "$$(podman volume inspect $(PGDATA_VOLUME) --format '{{.Mountpoint}}')"
 
@@ -173,8 +179,15 @@ up: prepare-pgdata ## Start db + engine + ui (web interface)
 up-dev: prepare-pgdata ## Start db + bridge (CLI dev container)
 	$(COMPOSE) up -d db bridge
 
-down: ## Stop all containers
+down: ## Stop containers (keeps volumes and images — migration state is preserved)
 	$(COMPOSE) down
+
+down-images: ## Stop containers and remove compose-built images (keeps volumes)
+	$(COMPOSE) down --rmi local
+
+destroy: ## Stop containers, remove images, and DELETE persisted volumes (data loss)
+	@echo "WARNING: This removes container_postgres-data and wipes migration state."
+	$(COMPOSE) down --rmi local -v
 
 shell: ## Shell into bridge container
 	$(COMPOSE) exec $(BRIDGE_SVC) /bin/bash
