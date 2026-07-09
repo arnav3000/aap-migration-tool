@@ -288,6 +288,7 @@ sync_inventory_sources.py
 test_*.py
 test_*.sh
 test/
+aap-resources-script/
 
 # Credential toolkit and related files
 credential-toolkit.tar.gz

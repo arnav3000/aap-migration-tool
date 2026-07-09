@@ -1505,6 +1505,11 @@ def import_cmd(
 
             endpoint = get_endpoint(resource_type)
 
+            # Applications in AAP 2.6 are managed via Platform Gateway, not Controller
+            if resource_type == "applications":
+                gateway_url = client.base_url.replace("/api/controller/v2", "/api/gateway/v1")
+                endpoint = f"{gateway_url}/applications/"
+
             while page <= MAX_PAGES:
                 params = {"page": page, "page_size": 200}
 

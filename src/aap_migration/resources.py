@@ -429,6 +429,7 @@ ORGANIZATION_SCOPED_RESOURCES = {
     "notification_templates",
     "execution_environments",
     "labels",
+    "applications",
 }
 
 # Parent-scoped resources: unique within parent resource
