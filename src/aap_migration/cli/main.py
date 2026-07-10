@@ -13,13 +13,14 @@ from dotenv import load_dotenv
 
 from aap_migration import __version__
 from aap_migration.cli.commands import analyze_dependencies as analyze_dependencies_commands
-from aap_migration.cli.commands import iam as iam_commands
 from aap_migration.cli.commands import cleanup as cleanup_commands
 from aap_migration.cli.commands import config as config_commands
 from aap_migration.cli.commands import credentials as credentials_commands
 from aap_migration.cli.commands import export_import
 from aap_migration.cli.commands import migrate as migrate_commands
 from aap_migration.cli.commands import migration_report as migration_report_commands
+# New command for enhanced report
+from aap_migration.cli.commands import migration_report_v2 as migration_report_v2_commands
 from aap_migration.cli.commands import patch_projects as patch_projects_commands
 from aap_migration.cli.commands import prep as prep_commands
 from aap_migration.cli.commands import project_failures as project_failures_commands
@@ -138,7 +139,7 @@ cli.add_command(export_import.import_cmd, name="import")
 cli.add_command(patch_projects_commands.patch_projects)
 cli.add_command(project_failures_commands.analyze_project_failures)
 cli.add_command(migration_report_commands.generate_migration_report)
-cli.add_command(iam_commands.iam)
+cli.add_command(migration_report_v2_commands.generate_enhanced_report)
 
 
 def main() -> int:
