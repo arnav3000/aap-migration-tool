@@ -1,6 +1,29 @@
 """IAM analyser exceptions."""
 
 
+class AuthenticationError(RuntimeError):
+    """Raised when a target API call receives 401/403, aborting the migration."""
+
+    def __init__(
+        self,
+        endpoint: str,
+        status_code: int,
+        *,
+        entries_succeeded: int = 0,
+        entries_remaining: int = 0,
+    ):
+        self.endpoint = endpoint
+        self.status_code = status_code
+        self.entries_succeeded = entries_succeeded
+        self.entries_remaining = entries_remaining
+        super().__init__(
+            f"Target returned HTTP {status_code} on '{endpoint}' — "
+            f"aborting migration. "
+            f"{entries_succeeded} entries succeeded before failure, "
+            f"{entries_remaining} remaining (will be idempotent no-ops on re-run)."
+        )
+
+
 class PaginationError(RuntimeError):
     """Raised when API pagination fails mid-stream or returns inconsistent counts."""
 

@@ -22,8 +22,10 @@ import json
 import logging
 import os
 import sqlite3
+import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
@@ -33,10 +35,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from aap_migration.iam.exceptions import PaginationError
+from aap_migration.iam.exceptions import AuthenticationError, PaginationError
 from aap_migration.iam.models import (
     CrossOrgShare,
     IAMAuditResult,
+    IAMCheckpoint,
     MigrationStats,
     OrgSummary,
     PermissionEntry,
@@ -57,6 +60,18 @@ RESOURCE_TYPES = [
     "notification_templates",
     "instance_groups",
 ]
+
+SINGULAR_TO_PLURAL: dict[str, str] = {
+    "credential": "credentials",
+    "project": "projects",
+    "inventory": "inventories",
+    "job_template": "job_templates",
+    "workflow_job_template": "workflow_job_templates",
+    "notification_template": "notification_templates",
+    "instance_group": "instance_groups",
+    "organization": "organizations",
+    "team": "teams",
+}
 
 ROLE_NAME_MAP: dict[str, str] = {}
 
@@ -100,8 +115,21 @@ class IAMAnalyser:
         request_timeout: int = 60,
         rate_limit_delay: float = 0.15,
         max_workers: int = 1,
+        scan_strategy: str = "resource",
+        checkpoint_path: str | None = None,
+        resume: bool = False,
         progress_callback: Callable[[str], None] | None = None,
     ):
+        if scan_strategy not in ("resource", "principal"):
+            raise ValueError(
+                f"scan_strategy must be 'resource' or 'principal', "
+                f"got '{scan_strategy}'"
+            )
+        self.scan_strategy = scan_strategy
+        self._checkpoint_path = checkpoint_path
+        self._resume = resume
+        self._checkpoint: IAMCheckpoint | None = None
+
         self.source_url = _validate_api_url(source_url, "Source URL")
         self.source_token = source_token
         if not source_token:
@@ -486,6 +514,40 @@ class IAMAnalyser:
             logger.debug("Mapped role name: %s -> %s", source_role, mapped)
         return mapped
 
+    def _build_resource_org_map(
+        self,
+    ) -> tuple[dict[tuple[str, int], str], int]:
+        """Pre-build (resource_type, resource_id) -> org_name map.
+
+        Returns the map and total resources_scanned count.
+        """
+        org_map: dict[tuple[str, int], str] = {}
+        resources_scanned = 0
+
+        for resource_type in RESOURCE_TYPES:
+            self._progress(f"  Building org map: {resource_type}...")
+            resources = self._source_paginate(f"{resource_type}/")
+            self._progress(
+                f"    {len(resources)} {resource_type}"
+            )
+
+            for resource in resources:
+                resources_scanned += 1
+                res_id = resource["id"]
+                org_id = resource.get("organization") or (
+                    resource.get("summary_fields", {})
+                    .get("organization", {})
+                    .get("id")
+                )
+                org_map[(resource_type, res_id)] = self._get_org_name(
+                    org_id
+                )
+
+        self._progress(
+            f"  Org map complete: {resources_scanned} resources"
+        )
+        return org_map, resources_scanned
+
     # ── Phase 1: Scan permissions ─────────────────────────────────────
 
     def _fetch_role_members(
@@ -558,6 +620,106 @@ class IAMAnalyser:
 
         return results
 
+    # ── Checkpoint persistence ────────────────────────────────────────
+
+    def _save_checkpoint(
+        self,
+        entries: list[PermissionEntry],
+        stats: MigrationStats,
+        *,
+        completed_resource_types: list[str] | None = None,
+        completed_user_ids: list[int] | None = None,
+        completed_team_ids: list[int] | None = None,
+    ) -> None:
+        """Atomic write of checkpoint state to disk (temp + rename, 0o600)."""
+        if not self._checkpoint_path:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        if self._checkpoint is None:
+            self._checkpoint = IAMCheckpoint(
+                scan_strategy=self.scan_strategy,
+                source_url=self.source_url,
+                started_at=now,
+            )
+
+        self._checkpoint.updated_at = now
+        self._checkpoint.permissions = [e.to_dict() for e in entries]
+        self._checkpoint.resources_scanned = stats.resources_scanned
+        self._checkpoint.permissions_found = stats.permissions_found
+        self._checkpoint.permissions_deduplicated = stats.permissions_deduplicated
+
+        if completed_resource_types is not None:
+            self._checkpoint.completed_resource_types = list(
+                completed_resource_types
+            )
+        if completed_user_ids is not None:
+            self._checkpoint.completed_user_ids = list(completed_user_ids)
+        if completed_team_ids is not None:
+            self._checkpoint.completed_team_ids = list(completed_team_ids)
+
+        data = json.dumps(self._checkpoint.to_dict(), indent=2)
+        dir_path = os.path.dirname(os.path.abspath(self._checkpoint_path))
+        os.makedirs(dir_path, mode=0o700, exist_ok=True)
+
+        fd, tmp_path = tempfile.mkstemp(
+            dir=dir_path, prefix=".iam_checkpoint_", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(data)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, self._checkpoint_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+        logger.debug("Checkpoint saved: %s", self._checkpoint_path)
+
+    def _load_checkpoint(self) -> IAMCheckpoint | None:
+        """Load checkpoint from disk. Returns None if missing or invalid."""
+        if not self._checkpoint_path or not os.path.exists(
+            self._checkpoint_path
+        ):
+            return None
+
+        try:
+            with open(self._checkpoint_path) as f:
+                data = json.load(f)
+            checkpoint = IAMCheckpoint.from_dict(data)
+            return checkpoint
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            logger.warning(
+                "Ignoring corrupt checkpoint %s: %s",
+                self._checkpoint_path,
+                exc,
+            )
+            return None
+
+    def _validate_checkpoint(
+        self, checkpoint: IAMCheckpoint
+    ) -> str | None:
+        """Validate checkpoint matches current run. Returns error or None."""
+        if checkpoint.version != 1:
+            return (
+                f"Unsupported checkpoint version {checkpoint.version} "
+                f"(expected 1)"
+            )
+        if checkpoint.scan_strategy != self.scan_strategy:
+            return (
+                f"Checkpoint strategy '{checkpoint.scan_strategy}' "
+                f"does not match current '{self.scan_strategy}'"
+            )
+        if checkpoint.source_url != self.source_url:
+            return (
+                f"Checkpoint source '{checkpoint.source_url}' "
+                f"does not match current '{self.source_url}'"
+            )
+        return None
+
     def scan_permissions(self) -> tuple[list[PermissionEntry], MigrationStats]:
         parallel = self.max_workers > 1
         mode_label = f"{self.max_workers} workers" if parallel else "sequential"
@@ -565,8 +727,37 @@ class IAMAnalyser:
         stats = MigrationStats()
         entries: list[PermissionEntry] = []
         seen: set[tuple] = set()
+        completed_types: set[str] = set()
+
+        if self._resume:
+            checkpoint = self._load_checkpoint()
+            if checkpoint:
+                err = self._validate_checkpoint(checkpoint)
+                if err:
+                    self._progress(f"  Checkpoint invalid: {err} — starting fresh")
+                else:
+                    completed_types = set(checkpoint.completed_resource_types)
+                    entries = [
+                        PermissionEntry.from_dict(p)
+                        for p in checkpoint.permissions
+                    ]
+                    seen = {e.dedup_key for e in entries}
+                    stats.resources_scanned = checkpoint.resources_scanned
+                    stats.permissions_found = checkpoint.permissions_found
+                    stats.permissions_deduplicated = (
+                        checkpoint.permissions_deduplicated
+                    )
+                    self._checkpoint = checkpoint
+                    self._progress(
+                        f"  Resumed from checkpoint: "
+                        f"{len(completed_types)} resource types done, "
+                        f"{len(entries)} permissions restored"
+                    )
 
         for resource_type in RESOURCE_TYPES:
+            if resource_type in completed_types:
+                self._progress(f"  Skipping {resource_type} (already checkpointed)")
+                continue
             self._progress(f"  Scanning {resource_type}...")
             resources = self._source_paginate(f"{resource_type}/")
             self._progress(f"  Found {len(resources)} {resource_type}")
@@ -603,6 +794,12 @@ class IAMAnalyser:
 
             if not role_work:
                 self._progress(f"  {resource_type}: 0 permission entries")
+                completed_types.add(resource_type)
+                self._save_checkpoint(
+                    entries,
+                    stats,
+                    completed_resource_types=list(completed_types),
+                )
                 continue
 
             self._progress(
@@ -686,11 +883,349 @@ class IAMAnalyser:
                 f"  {resource_type}: {type_count} permission entries"
             )
 
+            completed_types.add(resource_type)
+            self._save_checkpoint(
+                entries,
+                stats,
+                completed_resource_types=list(completed_types),
+            )
+
         if stats.permissions_deduplicated:
             self._progress(
                 f"Deduplicated {stats.permissions_deduplicated} duplicate entries"
             )
         self._progress(f"Total unique permissions: {stats.permissions_found}")
+        return entries, stats
+
+    # ── Phase 1-alt: Principal-side scan ─────────────────────────────
+
+    def _fetch_principal_roles(
+        self,
+        principal_type: str,
+        principal_id: int,
+        principal_name: str,
+        principal_org: str,
+        org_map: dict[tuple[str, int], str],
+    ) -> list[PermissionEntry]:
+        """Fetch all role assignments for a single user or team."""
+        results: list[PermissionEntry] = []
+        endpoint = (
+            f"users/{principal_id}/roles/"
+            if principal_type == "user"
+            else f"teams/{principal_id}/roles/"
+        )
+
+        roles = self._source_paginate(endpoint)
+        for role in roles:
+            sf = role.get("summary_fields", {})
+            raw_type = sf.get("resource_type")
+            if raw_type is None:
+                continue
+
+            resource_type = SINGULAR_TO_PLURAL.get(raw_type)
+            if resource_type is None:
+                logger.warning(
+                    "Unknown resource_type '%s' in %s — skipping",
+                    raw_type,
+                    endpoint,
+                )
+                continue
+
+            res_id = sf.get("resource_id")
+            if res_id is None:
+                continue
+
+            res_name = sf.get("resource_name", f"id-{res_id}")
+            res_org = org_map.get((resource_type, res_id), "N/A")
+
+            results.append(
+                PermissionEntry(
+                    resource_type=resource_type,
+                    resource_id=res_id,
+                    resource_name=res_name,
+                    resource_org=res_org,
+                    role_name=role.get("name", ""),
+                    principal_type=principal_type,
+                    principal_id=principal_id,
+                    principal_name=principal_name,
+                    principal_org=principal_org,
+                    is_cross_org=(
+                        principal_org != "N/A"
+                        and res_org != "N/A"
+                        and principal_org != res_org
+                    ),
+                )
+            )
+
+        return results
+
+    def scan_permissions_principal(
+        self,
+    ) -> tuple[list[PermissionEntry], MigrationStats]:
+        """Scan permissions by enumerating principals instead of resources.
+
+        For each user and team, fetches their direct role assignments via
+        users/{id}/roles/ and teams/{id}/roles/. Produces the same
+        PermissionEntry set as scan_permissions() but with far fewer API
+        calls on environments where users+teams << resources*roles.
+        """
+        parallel = self.max_workers > 1
+        mode_label = (
+            f"{self.max_workers} workers" if parallel else "sequential"
+        )
+        self._progress(
+            f"Phase 1: Scanning permissions — principal strategy "
+            f"({mode_label})..."
+        )
+
+        stats = MigrationStats()
+        entries: list[PermissionEntry] = []
+        seen: set[tuple] = set()
+        completed_user_ids: set[int] = set()
+        completed_team_ids: set[int] = set()
+
+        if self._resume:
+            checkpoint = self._load_checkpoint()
+            if checkpoint:
+                err = self._validate_checkpoint(checkpoint)
+                if err:
+                    self._progress(
+                        f"  Checkpoint invalid: {err} — starting fresh"
+                    )
+                else:
+                    completed_user_ids = set(checkpoint.completed_user_ids)
+                    completed_team_ids = set(checkpoint.completed_team_ids)
+                    entries = [
+                        PermissionEntry.from_dict(p)
+                        for p in checkpoint.permissions
+                    ]
+                    seen = {e.dedup_key for e in entries}
+                    stats.resources_scanned = checkpoint.resources_scanned
+                    stats.permissions_found = checkpoint.permissions_found
+                    stats.permissions_deduplicated = (
+                        checkpoint.permissions_deduplicated
+                    )
+                    self._checkpoint = checkpoint
+                    self._progress(
+                        f"  Resumed from checkpoint: "
+                        f"{len(completed_user_ids)} users + "
+                        f"{len(completed_team_ids)} teams done, "
+                        f"{len(entries)} permissions restored"
+                    )
+
+        org_map, resources_scanned = self._build_resource_org_map()
+        if not self._resume or not completed_user_ids:
+            stats.resources_scanned = resources_scanned
+
+        # ── Scan users ──
+        self._progress("  Scanning user role assignments...")
+        users = self._source_paginate("users/")
+        self._progress(f"  Found {len(users)} users")
+
+        user_work: list[tuple[str, int, str, str]] = []
+        for user in users:
+            uid = user["id"]
+            if uid in completed_user_ids:
+                continue
+            uname = user.get("username", f"user-{uid}")
+            org_id = (
+                user.get("summary_fields", {})
+                .get("organization", {})
+                .get("id")
+            )
+            user_org = self._get_org_name(org_id)
+            user_work.append(("user", uid, uname, user_org))
+
+        # ── Scan teams ──
+        self._progress("  Scanning team role assignments...")
+        teams = self._source_paginate("teams/")
+        self._progress(f"  Found {len(teams)} teams")
+
+        team_work: list[tuple[str, int, str, str]] = []
+        for team in teams:
+            tid = team["id"]
+            if tid in completed_team_ids:
+                continue
+            tname = team.get("name", f"team-{tid}")
+            org_id = team.get("organization") or (
+                team.get("summary_fields", {})
+                .get("organization", {})
+                .get("id")
+            )
+            team_org = self._get_org_name(org_id)
+            team_work.append(("team", tid, tname, team_org))
+
+        if completed_user_ids or completed_team_ids:
+            self._progress(
+                f"  Skipped {len(completed_user_ids)} users + "
+                f"{len(completed_team_ids)} teams (already checkpointed)"
+            )
+
+        all_work = user_work + team_work
+        self._progress(
+            f"  Fetching roles for {len(user_work)} users + "
+            f"{len(team_work)} teams..."
+        )
+
+        def _process_principal(
+            work_item: tuple[str, int, str, str],
+        ) -> list[PermissionEntry]:
+            ptype, pid, pname, porg = work_item
+            return self._fetch_principal_roles(
+                ptype, pid, pname, porg, org_map,
+            )
+
+        if parallel:
+            completed = 0
+            completed_lock = threading.Lock()
+
+            def _progress_tick() -> None:
+                nonlocal completed
+                with completed_lock:
+                    completed += 1
+                    c = completed
+                if c % 500 == 0 or c == len(all_work):
+                    self._progress(
+                        f"    {c}/{len(all_work)} principals processed"
+                    )
+
+            with ThreadPoolExecutor(
+                max_workers=self.max_workers
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        _process_principal, work_item
+                    ): work_item
+                    for work_item in all_work
+                }
+
+                for future in as_completed(futures):
+                    work = futures[future]
+                    ptype, pid = work[0], work[1]
+                    try:
+                        role_entries = future.result()
+                    except Exception:
+                        logger.error(
+                            "Principal role fetch failed for %s %d",
+                            ptype,
+                            pid,
+                        )
+                        _progress_tick()
+                        continue
+
+                    for entry in role_entries:
+                        if entry.dedup_key not in seen:
+                            seen.add(entry.dedup_key)
+                            entries.append(entry)
+                            stats.permissions_found += 1
+                        else:
+                            stats.permissions_deduplicated += 1
+
+                    if ptype == "user":
+                        completed_user_ids.add(pid)
+                    else:
+                        completed_team_ids.add(pid)
+
+                    _progress_tick()
+
+                    if completed % 100 == 0:
+                        self._save_checkpoint(
+                            entries,
+                            stats,
+                            completed_user_ids=list(completed_user_ids),
+                            completed_team_ids=list(completed_team_ids),
+                        )
+        else:
+            for i, work_item in enumerate(all_work):
+                ptype, pid = work_item[0], work_item[1]
+                try:
+                    role_entries = _process_principal(work_item)
+                except Exception:
+                    logger.error(
+                        "Principal role fetch failed for %s %d",
+                        ptype,
+                        pid,
+                    )
+                    continue
+
+                for entry in role_entries:
+                    if entry.dedup_key not in seen:
+                        seen.add(entry.dedup_key)
+                        entries.append(entry)
+                        stats.permissions_found += 1
+                    else:
+                        stats.permissions_deduplicated += 1
+
+                if ptype == "user":
+                    completed_user_ids.add(pid)
+                else:
+                    completed_team_ids.add(pid)
+
+                if (i + 1) % 100 == 0:
+                    self._save_checkpoint(
+                        entries,
+                        stats,
+                        completed_user_ids=list(completed_user_ids),
+                        completed_team_ids=list(completed_team_ids),
+                    )
+
+                if (i + 1) % 500 == 0:
+                    self._progress(
+                        f"    {i + 1}/{len(all_work)} principals "
+                        f"processed"
+                    )
+
+                time.sleep(self.rate_limit_delay)
+
+        # Every team implicitly has Read on itself. teams/{id}/roles/
+        # does not return this, but roles/{read_id}/teams/ does — so
+        # the resource-side scanner captures it. Add them here for
+        # equivalence.
+        for _pt, tid, tname, torg in team_work:
+            key = ("teams", tid, "Read", "team", tid)
+            if key not in seen:
+                seen.add(key)
+                entries.append(
+                    PermissionEntry(
+                        resource_type="teams",
+                        resource_id=tid,
+                        resource_name=tname,
+                        resource_org=torg,
+                        role_name="Read",
+                        principal_type="team",
+                        principal_id=tid,
+                        principal_name=tname,
+                        principal_org=torg,
+                        is_cross_org=False,
+                    )
+                )
+                stats.permissions_found += 1
+
+        user_count = sum(
+            1 for e in entries if e.principal_type == "user"
+        )
+        team_count = sum(
+            1 for e in entries if e.principal_type == "team"
+        )
+        self._progress(
+            f"  Permissions: {user_count} user, {team_count} team"
+        )
+        if stats.permissions_deduplicated:
+            self._progress(
+                f"Deduplicated {stats.permissions_deduplicated} "
+                f"duplicate entries"
+            )
+        self._progress(
+            f"Total unique permissions: {stats.permissions_found}"
+        )
+
+        self._save_checkpoint(
+            entries,
+            stats,
+            completed_user_ids=list(completed_user_ids),
+            completed_team_ids=list(completed_team_ids),
+        )
+
         return entries, stats
 
     # ── Phase 2: Scan team memberships ────────────────────────────────
@@ -816,7 +1351,7 @@ class IAMAnalyser:
         label = "Dry-run" if dry_run else "Migrating"
         self._progress(f"Phase 6: {label} team memberships...")
 
-        for membership in memberships:
+        for idx, membership in enumerate(memberships):
             target_team_id = self._get_target_id(
                 "teams", membership.team_id
             )
@@ -848,9 +1383,15 @@ class IAMAnalyser:
                 stats.team_memberships_migrated += 1
                 continue
 
-            resp = self._target_post(
-                f"teams/{target_team_id}/users/", {"id": target_user_id}
-            )
+            endpoint = f"teams/{target_team_id}/users/"
+            resp = self._target_post(endpoint, {"id": target_user_id})
+            if resp and resp.status_code in (401, 403):
+                raise AuthenticationError(
+                    endpoint,
+                    resp.status_code,
+                    entries_succeeded=stats.team_memberships_migrated,
+                    entries_remaining=len(memberships) - idx - 1,
+                )
             if resp and resp.status_code in (200, 201, 204):
                 membership.status = "migrated"
                 stats.team_memberships_migrated += 1
@@ -888,7 +1429,7 @@ class IAMAnalyser:
         self._progress(f"Phase 7: {label} resource permissions...")
         target_role_cache: dict[str, dict[str, int]] = {}
 
-        for entry in permissions:
+        for idx, entry in enumerate(permissions):
             target_resource_id = self._get_target_id(
                 entry.resource_type, entry.resource_id
             )
@@ -963,10 +1504,18 @@ class IAMAnalyser:
                 stats.permissions_migrated += 1
                 continue
 
+            endpoint = f"roles/{target_role_id}/{principal_endpoint}/"
             resp = self._target_post(
-                f"roles/{target_role_id}/{principal_endpoint}/",
+                endpoint,
                 {"id": target_principal_id},
             )
+            if resp and resp.status_code in (401, 403):
+                raise AuthenticationError(
+                    endpoint,
+                    resp.status_code,
+                    entries_succeeded=stats.permissions_migrated,
+                    entries_remaining=len(permissions) - idx - 1,
+                )
             if resp and resp.status_code in (200, 201, 204):
                 entry.status = "migrated"
                 stats.permissions_migrated += 1
@@ -1050,8 +1599,23 @@ class IAMAnalyser:
         """Read-only scan of source AAP — no target access required."""
         self._progress("Starting IAM audit (read-only)...")
         self._progress(f"Source: {self.source_url}")
+        self._progress(f"Scan strategy: {self.scan_strategy}")
+        if self._resume:
+            self._progress("Resume mode: ON")
+        if self._checkpoint_path:
+            self._progress(f"Checkpoint: {self._checkpoint_path}")
 
-        permissions, stats = self.scan_permissions()
+        if self.scan_strategy == "resource":
+            self._progress(
+                "WARNING: Resource strategy can take many hours on large "
+                "environments. Ensure your bearer token will not expire "
+                "during the scan. Use --resume to recover from interruptions."
+            )
+
+        if self.scan_strategy == "principal":
+            permissions, stats = self.scan_permissions_principal()
+        else:
+            permissions, stats = self.scan_permissions()
         memberships = self.scan_team_memberships()
         system_roles = self.scan_system_roles()
         cross_org_shares = self.detect_cross_org_shares(permissions)
@@ -1116,8 +1680,12 @@ class IAMAnalyser:
         self._progress(f"Starting IAM {label}...")
         self._progress(f"Source: {self.source_url}")
         self._progress(f"Target: {self.target_url}")
+        self._progress(f"Scan strategy: {self.scan_strategy}")
 
-        permissions, stats = self.scan_permissions()
+        if self.scan_strategy == "principal":
+            permissions, stats = self.scan_permissions_principal()
+        else:
+            permissions, stats = self.scan_permissions()
         memberships = self.scan_team_memberships()
         system_roles = self.scan_system_roles()
         cross_org_shares = self.detect_cross_org_shares(permissions)

@@ -51,6 +51,25 @@ def iam() -> None:
     show_default=True,
     help="Concurrent workers for role membership scanning. Use 'iam benchmark' to find optimal value.",
 )
+@click.option(
+    "--scan-strategy",
+    type=click.Choice(["resource", "principal"], case_sensitive=False),
+    default="resource",
+    show_default=True,
+    help="Scan strategy: 'principal' enumerates users/teams instead of resources (65x faster on large environments).",
+)
+@click.option(
+    "--resume",
+    is_flag=True,
+    default=False,
+    help="Resume from a previous checkpoint. Skips already-completed work units.",
+)
+@click.option(
+    "--checkpoint-dir",
+    type=click.Path(),
+    default=None,
+    help="Directory for checkpoint files (defaults to output-dir).",
+)
 @click.pass_context
 def audit(
     ctx: click.Context,
@@ -58,6 +77,9 @@ def audit(
     verify_ssl: bool,
     timeout: int,
     workers: int,
+    scan_strategy: str,
+    resume: bool,
+    checkpoint_dir: str | None,
 ) -> None:
     """Read-only scan: export permission matrix and generate report.
 
@@ -78,6 +100,9 @@ def audit(
         )
         sys.exit(1)
 
+    cp_dir = checkpoint_dir or output_dir
+    checkpoint_path = os.path.join(cp_dir, "iam_checkpoint.json")
+
     try:
         with IAMAnalyser(
             source_url=source_url,
@@ -85,6 +110,9 @@ def audit(
             verify_ssl=verify_ssl,
             request_timeout=timeout,
             max_workers=workers,
+            scan_strategy=scan_strategy,
+            checkpoint_path=checkpoint_path,
+            resume=resume,
             progress_callback=_echo,
         ) as analyser:
             result = analyser.audit()
@@ -158,6 +186,13 @@ def audit(
     help="Concurrent workers for role membership scanning.",
 )
 @click.option(
+    "--scan-strategy",
+    type=click.Choice(["resource", "principal"], case_sensitive=False),
+    default="resource",
+    show_default=True,
+    help="Scan strategy: 'principal' enumerates users/teams instead of resources (65x faster on large environments).",
+)
+@click.option(
     "--skip-user-roles",
     is_flag=True,
     default=False,
@@ -169,6 +204,18 @@ def audit(
     default=False,
     help="Migrate user permissions and team memberships only (run after --skip-user-roles).",
 )
+@click.option(
+    "--resume",
+    is_flag=True,
+    default=False,
+    help="Resume from a previous checkpoint. Skips already-completed work units.",
+)
+@click.option(
+    "--checkpoint-dir",
+    type=click.Path(),
+    default=None,
+    help="Directory for checkpoint files (defaults to output-dir).",
+)
 @click.pass_context
 def migrate(
     ctx: click.Context,
@@ -178,8 +225,11 @@ def migrate(
     dry_run: bool,
     timeout: int,
     workers: int,
+    scan_strategy: str,
     skip_user_roles: bool,
     users_only: bool,
+    resume: bool,
+    checkpoint_dir: str | None,
 ) -> None:
     """Migrate IAM permissions to target AAP.
 
@@ -240,6 +290,9 @@ def migrate(
     else:
         prefix = "iam_dry_run" if dry_run else "iam_migration"
 
+    cp_dir = checkpoint_dir or output_dir
+    checkpoint_path = os.path.join(cp_dir, "iam_checkpoint.json")
+
     try:
         with IAMAnalyser(
             source_url=source_url,
@@ -250,6 +303,9 @@ def migrate(
             verify_ssl=verify_ssl,
             request_timeout=timeout,
             max_workers=workers,
+            scan_strategy=scan_strategy,
+            checkpoint_path=checkpoint_path,
+            resume=resume,
             progress_callback=_echo,
         ) as analyser:
             result = analyser.migrate(

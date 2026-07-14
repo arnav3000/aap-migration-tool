@@ -33,6 +33,23 @@ class PermissionEntry:
             self.principal_id,
         )
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PermissionEntry":
+        return cls(
+            resource_type=data["resource_type"],
+            resource_id=data["resource_id"],
+            resource_name=data["resource_name"],
+            resource_org=data["resource_org"],
+            role_name=data["role_name"],
+            principal_type=data["principal_type"],
+            principal_id=data["principal_id"],
+            principal_name=data["principal_name"],
+            principal_org=data["principal_org"],
+            is_cross_org=data.get("is_cross_org", False),
+            status=data.get("status", "pending"),
+            error=data.get("error", ""),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "resource_type": self.resource_type,
@@ -219,3 +236,58 @@ class IAMAuditResult:
             "system_roles": [r.to_dict() for r in self.system_roles],
             "cross_org_shares": [c.to_dict() for c in self.cross_org_shares],
         }
+
+
+@dataclass
+class IAMCheckpoint:
+    """Persisted state for resumable IAM scans."""
+
+    version: int = 1
+    scan_strategy: str = "resource"
+    source_url: str = ""
+    started_at: str = ""
+    updated_at: str = ""
+    completed_resource_types: list[str] = field(default_factory=list)
+    completed_user_ids: list[int] = field(default_factory=list)
+    completed_team_ids: list[int] = field(default_factory=list)
+    permissions: list[dict[str, Any]] = field(default_factory=list)
+    resources_scanned: int = 0
+    permissions_found: int = 0
+    permissions_deduplicated: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "scan_strategy": self.scan_strategy,
+            "source_url": self.source_url,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+            "completed_resource_types": self.completed_resource_types,
+            "completed_user_ids": self.completed_user_ids,
+            "completed_team_ids": self.completed_team_ids,
+            "permissions": self.permissions,
+            "resources_scanned": self.resources_scanned,
+            "permissions_found": self.permissions_found,
+            "permissions_deduplicated": self.permissions_deduplicated,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "IAMCheckpoint":
+        return cls(
+            version=data.get("version", 1),
+            scan_strategy=data.get("scan_strategy", "resource"),
+            source_url=data.get("source_url", ""),
+            started_at=data.get("started_at", ""),
+            updated_at=data.get("updated_at", ""),
+            completed_resource_types=data.get(
+                "completed_resource_types", []
+            ),
+            completed_user_ids=data.get("completed_user_ids", []),
+            completed_team_ids=data.get("completed_team_ids", []),
+            permissions=data.get("permissions", []),
+            resources_scanned=data.get("resources_scanned", 0),
+            permissions_found=data.get("permissions_found", 0),
+            permissions_deduplicated=data.get(
+                "permissions_deduplicated", 0
+            ),
+        )
