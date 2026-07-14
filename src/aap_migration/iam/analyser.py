@@ -33,6 +33,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from aap_migration.iam.exceptions import PaginationError
 from aap_migration.iam.models import (
     CrossOrgShare,
     IAMAuditResult,
@@ -216,6 +217,9 @@ class IAMAnalyser:
         if params:
             initial_params.update(params)
         is_first_page = True
+        expected_count: int | None = None
+        parsed_base = urlparse(base_url)
+        base_origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
 
         while url:
             try:
@@ -226,19 +230,32 @@ class IAMAnalyser:
                     verify=self.verify_ssl,
                     timeout=self.request_timeout,
                 )
-                is_first_page = False
 
                 if resp.status_code != 200:
-                    logger.warning(
-                        "Paginate %s returned HTTP %d",
+                    if is_first_page:
+                        logger.warning(
+                            "Paginate %s returned HTTP %d",
+                            endpoint,
+                            resp.status_code,
+                        )
+                        break
+                    raise PaginationError(
                         endpoint,
-                        resp.status_code,
+                        "non-200 response while following next link",
+                        url=url,
+                        status_code=resp.status_code,
+                        items_collected=len(results),
+                        expected_count=expected_count,
                     )
-                    break
+
+                is_first_page = False
 
                 data = self._safe_json(resp)
                 if data is None:
                     break
+
+                if expected_count is None and "count" in data:
+                    expected_count = data["count"]
 
                 results.extend(data.get("results", []))
 
@@ -247,16 +264,27 @@ class IAMAnalyser:
                     if raw_next.startswith("http"):
                         url = self._validate_next_url(raw_next, expected_host)
                     else:
-                        url = f"{base_url}{raw_next}"
+                        url = f"{base_origin}{raw_next}"
                 else:
                     url = None
 
                 if url:
                     time.sleep(self.rate_limit_delay)
 
+            except PaginationError:
+                raise
             except requests.RequestException as exc:
                 logger.error("Pagination error for %s: %s", endpoint, exc)
                 break
+
+        if expected_count is not None and len(results) != expected_count:
+            raise PaginationError(
+                endpoint,
+                f"count mismatch: collected {len(results)}, "
+                f"server reported {expected_count}",
+                items_collected=len(results),
+                expected_count=expected_count,
+            )
 
         return results
 
