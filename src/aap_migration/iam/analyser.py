@@ -202,6 +202,20 @@ class IAMAnalyser:
             return None
         return next_url
 
+    _PAGINATE_MAX_RETRIES = 3
+    _PAGINATE_BACKOFF_BASE = 1.0  # seconds; doubles each retry
+
+    @staticmethod
+    def _retry_delay(resp: requests.Response, attempt: int, backoff_base: float) -> float:
+        """Return seconds to wait before retrying. Honors Retry-After."""
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(float(retry_after), 0.0)
+            except (ValueError, TypeError):
+                pass
+        return backoff_base * (2 ** attempt)
+
     def _paginate(
         self,
         base_url: str,
@@ -223,14 +237,39 @@ class IAMAnalyser:
 
         while url:
             try:
-                resp = session.get(
-                    url,
-                    headers={"Authorization": f"Bearer {token}"},
-                    params=initial_params if is_first_page else None,
-                    verify=self.verify_ssl,
-                    timeout=self.request_timeout,
-                )
+                resp: requests.Response | None = None
+                for attempt in range(self._PAGINATE_MAX_RETRIES):
+                    resp = session.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        params=initial_params if is_first_page else None,
+                        verify=self.verify_ssl,
+                        timeout=self.request_timeout,
+                    )
+                    if resp.status_code == 200:
+                        break
+                    retryable = (
+                        resp.status_code == 429
+                        or resp.status_code >= 500
+                    )
+                    if not retryable:
+                        break
+                    if attempt < self._PAGINATE_MAX_RETRIES - 1:
+                        delay = self._retry_delay(
+                            resp, attempt, self._PAGINATE_BACKOFF_BASE,
+                        )
+                        logger.warning(
+                            "Paginate %s returned HTTP %d, "
+                            "retrying in %.1fs (attempt %d/%d)",
+                            endpoint,
+                            resp.status_code,
+                            delay,
+                            attempt + 1,
+                            self._PAGINATE_MAX_RETRIES,
+                        )
+                        time.sleep(delay)
 
+                assert resp is not None
                 if resp.status_code != 200:
                     if is_first_page:
                         logger.warning(

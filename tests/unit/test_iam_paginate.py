@@ -12,12 +12,13 @@ from aap_migration.iam.analyser import IAMAnalyser
 from aap_migration.iam.exceptions import PaginationError
 
 
-def _make_response(status_code, body):
+def _make_response(status_code, body, headers=None):
     resp = MagicMock()
     resp.status_code = status_code
     resp.text = json.dumps(body)
     resp.json.return_value = body
     resp.url = "https://aap.example.com/api/v2/credentials/"
+    resp.headers = headers or {}
     return resp
 
 
@@ -224,3 +225,108 @@ class TestPaginateCountMismatch:
 
         results = analyser._source_paginate("credentials/")
         assert len(results) == 3
+
+
+class TestPaginateRetry:
+    """Retry with exponential backoff for 429 and 5xx responses."""
+
+    def test_502_502_200_succeeds(self):
+        """Two transient 502s followed by a 200 — all items collected."""
+        analyser = _build_analyser()
+        analyser._PAGINATE_BACKOFF_BASE = 0.0
+
+        fail_502 = _make_response(502, {"detail": "Bad Gateway"})
+        page1_ok = _make_response(200, {
+            "count": 2,
+            "next": None,
+            "previous": None,
+            "results": [{"id": 1}, {"id": 2}],
+        })
+
+        session = analyser._source_session
+        session.get.side_effect = [fail_502, fail_502, page1_ok]
+
+        results = analyser._source_paginate("credentials/")
+
+        assert len(results) == 2
+        assert session.get.call_count == 3
+
+    def test_502_three_times_raises(self):
+        """Three 502s exhaust retries — raises PaginationError on page 2."""
+        analyser = _build_analyser()
+        analyser._PAGINATE_BACKOFF_BASE = 0.0
+
+        page1 = _make_response(200, {
+            "count": 4,
+            "next": "/api/v2/credentials/?page=2&page_size=2",
+            "previous": None,
+            "results": [{"id": 1}, {"id": 2}],
+        })
+        fail_502 = _make_response(502, {"detail": "Bad Gateway"})
+
+        session = analyser._source_session
+        session.get.side_effect = [page1, fail_502, fail_502, fail_502]
+
+        with pytest.raises(PaginationError) as exc_info:
+            analyser._source_paginate("credentials/")
+
+        err = exc_info.value
+        assert err.status_code == 502
+        assert err.items_collected == 2
+
+    def test_429_honors_retry_after(self):
+        """429 with Retry-After header — retries and succeeds."""
+        analyser = _build_analyser()
+        analyser._PAGINATE_BACKOFF_BASE = 0.0
+
+        fail_429 = _make_response(
+            429, {"detail": "Rate limited"}, headers={"Retry-After": "0"},
+        )
+        page1_ok = _make_response(200, {
+            "count": 1,
+            "next": None,
+            "previous": None,
+            "results": [{"id": 1}],
+        })
+
+        session = analyser._source_session
+        session.get.side_effect = [fail_429, page1_ok]
+
+        results = analyser._source_paginate("credentials/")
+        assert len(results) == 1
+        assert session.get.call_count == 2
+
+    def test_403_raises_immediately_no_retry(self):
+        """403 is a non-retryable 4xx — raises immediately, no retry."""
+        analyser = _build_analyser()
+
+        page1 = _make_response(200, {
+            "count": 4,
+            "next": "/api/v2/credentials/?page=2&page_size=2",
+            "previous": None,
+            "results": [{"id": 1}, {"id": 2}],
+        })
+        fail_403 = _make_response(403, {"detail": "Forbidden"})
+
+        session = analyser._source_session
+        session.get.side_effect = [page1, fail_403]
+
+        with pytest.raises(PaginationError) as exc_info:
+            analyser._source_paginate("credentials/")
+
+        assert exc_info.value.status_code == 403
+        assert session.get.call_count == 2  # no retries for 403
+
+    def test_500_on_page1_breaks_silently_after_retries(self):
+        """500 on page 1 retries, then breaks silently (endpoint may not exist)."""
+        analyser = _build_analyser()
+        analyser._PAGINATE_BACKOFF_BASE = 0.0
+
+        fail_500 = _make_response(500, {"detail": "Internal Server Error"})
+
+        session = analyser._source_session
+        session.get.side_effect = [fail_500, fail_500, fail_500]
+
+        results = analyser._source_paginate("credentials/")
+        assert results == []
+        assert session.get.call_count == 3
