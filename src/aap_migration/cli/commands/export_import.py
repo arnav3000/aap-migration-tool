@@ -23,6 +23,11 @@ from aap_migration.cli.utils import (
     format_count,
     step_progress,
 )
+from aap_migration.migration.auditor_roles import (
+    AuditorRolesSummary,
+    assign_auditor_roles,
+    preflight_gateway_access,
+)
 from aap_migration.migration.exporter import create_exporter
 from aap_migration.migration.importer import create_importer
 from aap_migration.migration.parallel_exporter import ParallelExportCoordinator
@@ -2004,6 +2009,55 @@ def import_cmd(
 
                                 # Aggregate this phase's skips into total_skipped
                                 total_skipped += skipped_in_import
+
+                                # --- Post-phase: Gateway auditor role assignments (AAP 2.6+) ---
+                                # Gate: only when importing users AND at least one has is_system_auditor=True
+                                if rtype == "users":
+                                    auditor_sources = [
+                                        r for r in transformed_resources
+                                        if r.get("is_system_auditor") is True
+                                    ]
+                                    if auditor_sources:
+                                        echo_info(
+                                            f"🔑 {len(auditor_sources)} system auditor(s) detected — "
+                                            f"assigning Gateway Platform Auditor roles..."
+                                        )
+                                        try:
+                                            role_def_id = await preflight_gateway_access(ctx.target_client)
+                                        except RuntimeError as gw_err:
+                                            echo_error(
+                                                f"❌ Gateway preflight FAILED: {gw_err}\n"
+                                                f"   User import succeeded but auditor roles were NOT assigned.\n"
+                                                f"   Run tools/remediate_auditor_roles.py after fixing token access."
+                                            )
+                                            logger.error("gateway_preflight_failed", error=str(gw_err))
+                                            role_def_id = None
+
+                                        if role_def_id is not None:
+                                            auditor_users = []
+                                            for src_user in auditor_sources:
+                                                src_id = src_user.get("_source_id", src_user.get("id"))
+                                                mapping = ctx.migration_state.get_id_mapping("users", src_id)
+                                                if mapping:
+                                                    auditor_users.append({
+                                                        "username": src_user.get("username", "unknown"),
+                                                        "source_id": src_id,
+                                                        "target_id": mapping["target_id"],
+                                                    })
+
+                                            if auditor_users:
+                                                summary = await assign_auditor_roles(
+                                                    ctx.target_client, auditor_users, role_def_id
+                                                )
+                                                echo_info(
+                                                    f"🔑 Auditor roles: {summary.verified_count}/{summary.auditor_count} "
+                                                    f"assigned+verified (max sync {summary.sync_latency_ms_max:.0f}ms)"
+                                                )
+                                                if summary.failed:
+                                                    for f in summary.failed:
+                                                        echo_warning(
+                                                            f"   ⚠ auditor_assignment_failed: {f.username} — {f.error}"
+                                                        )
                             else:
                                 imported_count = 0
                                 skipped_in_import = 0  # All resources were skipped by pre-check and counted in skipped_count
