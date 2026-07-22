@@ -1385,17 +1385,17 @@ class IAMAnalyser:
 
             endpoint = f"teams/{target_team_id}/users/"
             resp = self._target_post(endpoint, {"id": target_user_id})
-            if resp and resp.status_code in (401, 403):
+            if resp is not None and resp.status_code in (401, 403):
                 raise AuthenticationError(
                     endpoint,
                     resp.status_code,
                     entries_succeeded=stats.team_memberships_migrated,
                     entries_remaining=len(memberships) - idx - 1,
                 )
-            if resp and resp.status_code in (200, 201, 204):
+            if resp is not None and resp.status_code in (200, 201, 204):
                 membership.status = "migrated"
                 stats.team_memberships_migrated += 1
-            elif resp and resp.status_code == 400:
+            elif resp is not None and resp.status_code == 400:
                 body = self._safe_json(resp) or {}
                 if "already" in str(body).lower():
                     membership.status = "migrated"
@@ -1405,9 +1405,12 @@ class IAMAnalyser:
                     membership.error = f"HTTP 400: {str(body)[:200]}"
                     stats.team_memberships_failed += 1
             else:
-                code = resp.status_code if resp else "no response"
+                code = resp.status_code if resp is not None else "no response"
+                body_preview = (resp.text or "")[:500] if resp is not None else ""
                 membership.status = "failed"
                 membership.error = f"HTTP {code}"
+                if body_preview:
+                    membership.error += f" | {body_preview}"
                 stats.team_memberships_failed += 1
 
             time.sleep(self.rate_limit_delay)
@@ -1509,17 +1512,17 @@ class IAMAnalyser:
                 endpoint,
                 {"id": target_principal_id},
             )
-            if resp and resp.status_code in (401, 403):
+            if resp is not None and resp.status_code in (401, 403):
                 raise AuthenticationError(
                     endpoint,
                     resp.status_code,
                     entries_succeeded=stats.permissions_migrated,
                     entries_remaining=len(permissions) - idx - 1,
                 )
-            if resp and resp.status_code in (200, 201, 204):
+            if resp is not None and resp.status_code in (200, 201, 204):
                 entry.status = "migrated"
                 stats.permissions_migrated += 1
-            elif resp and resp.status_code == 400:
+            elif resp is not None and resp.status_code == 400:
                 body = self._safe_json(resp) or {}
                 if "already" in str(body).lower():
                     entry.status = "migrated"
@@ -1529,9 +1532,12 @@ class IAMAnalyser:
                     entry.error = f"HTTP 400: {str(body)[:200]}"
                     stats.permissions_failed += 1
             else:
-                code = resp.status_code if resp else "no response"
+                code = resp.status_code if resp is not None else "no response"
+                body_preview = (resp.text or "")[:500] if resp is not None else ""
                 entry.status = "failed"
                 entry.error = f"HTTP {code}"
+                if body_preview:
+                    entry.error += f" | {body_preview}"
                 stats.permissions_failed += 1
 
             time.sleep(self.rate_limit_delay)
