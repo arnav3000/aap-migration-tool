@@ -1893,6 +1893,17 @@ def import_cmd(
 
                         transformed_resources.append(resource)
 
+                    # Snapshot auditor source IDs BEFORE import — _import_parallel
+                    # pops _source_id from each dict, so post-import reads get None.
+                    auditor_source_snapshot = [
+                        {
+                            "username": r.get("username", "unknown"),
+                            "source_id": r.get("_source_id", r.get("id", 0)),
+                        }
+                        for r in transformed_resources
+                        if r.get("is_system_auditor") is True
+                    ] if rtype == "users" else []
+
                     if not dry_run:
                         # Create appropriate importer using factory
                         try:
@@ -2023,14 +2034,13 @@ def import_cmd(
                             # --- Post-phase: Gateway auditor role assignments (AAP 2.6+) ---
                             # Runs for BOTH fresh imports and re-runs (all users pre-existing)
                             if rtype == "users":
-                                auditor_sources = [
-                                    r for r in transformed_resources
-                                    if r.get("is_system_auditor") is True
-                                ]
+                                # Use pre-captured snapshot — _source_id is popped by
+                                # _import_parallel during fresh import, so reading it
+                                # from transformed_resources post-import yields None.
                                 auditor_failed_count = 0
-                                if auditor_sources:
+                                if auditor_source_snapshot:
                                     echo_info(
-                                        f"🔑 {len(auditor_sources)} system auditor(s) detected — "
+                                        f"🔑 {len(auditor_source_snapshot)} system auditor(s) detected — "
                                         f"assigning Gateway Platform Auditor roles..."
                                     )
                                     try:
@@ -2039,20 +2049,19 @@ def import_cmd(
                                         logger.error(
                                             "gateway_preflight_failed",
                                             error=str(gw_err),
-                                            affected_count=len(auditor_sources),
+                                            affected_count=len(auditor_source_snapshot),
                                         )
                                         role_def_id = None
                                         preflight_error = str(gw_err)
 
                                     if role_def_id is not None:
                                         auditor_users = []
-                                        for src_user in auditor_sources:
-                                            src_id = src_user.get("_source_id", src_user.get("id"))
-                                            mapping = ctx.migration_state.get_id_mapping("users", src_id)
+                                        for snap in auditor_source_snapshot:
+                                            mapping = ctx.migration_state.get_id_mapping("users", snap["source_id"])
                                             if mapping:
                                                 auditor_users.append({
-                                                    "username": src_user.get("username", "unknown"),
-                                                    "source_id": src_id,
+                                                    "username": snap["username"],
+                                                    "source_id": snap["source_id"],
                                                     "target_id": mapping["target_id"],
                                                 })
 
@@ -2072,7 +2081,7 @@ def import_cmd(
                                                     )
                                     else:
                                         auditor_summary = create_preflight_failure_summary(
-                                            auditor_sources, preflight_error
+                                            auditor_source_snapshot, preflight_error
                                         )
                                         auditor_failed_count = auditor_summary.auditor_count
                                         echo_error(

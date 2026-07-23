@@ -74,7 +74,7 @@ def create_preflight_failure_summary(
     for src in auditor_sources:
         result = AuditorAssignmentResult(
             username=src.get("username", "unknown"),
-            source_id=src.get("_source_id", src.get("id", 0)),
+            source_id=src.get("source_id", src.get("_source_id", src.get("id", 0))),
             target_id=0,
             success=False,
             error=f"Gateway preflight failed: {error}",
