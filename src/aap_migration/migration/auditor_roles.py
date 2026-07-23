@@ -65,6 +65,24 @@ def _gateway_url(controller_base_url: str) -> str:
     return controller_base_url.replace("/api/controller/v2", "/api/gateway/v1")
 
 
+def create_preflight_failure_summary(
+    auditor_sources: list[dict[str, Any]],
+    error: str,
+) -> AuditorRolesSummary:
+    """Mark all auditors as failed when Gateway preflight is denied."""
+    summary = AuditorRolesSummary(auditor_count=len(auditor_sources))
+    for src in auditor_sources:
+        result = AuditorAssignmentResult(
+            username=src.get("username", "unknown"),
+            source_id=src.get("_source_id", src.get("id", 0)),
+            target_id=0,
+            success=False,
+            error=f"Gateway preflight failed: {error}",
+        )
+        summary.failed.append(result)
+    return summary
+
+
 async def preflight_gateway_access(
     client: Any,
 ) -> int:
