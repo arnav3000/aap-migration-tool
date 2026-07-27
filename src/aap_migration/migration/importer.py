@@ -37,6 +37,7 @@ ORGANIZATION_SCOPED_RESOURCES = {
     "notification_templates",
     "execution_environments",
     "labels",
+    "applications",
 }
 
 # Resource types that REQUIRE an organization (cannot be global/None)
@@ -5728,9 +5729,12 @@ class ApplicationImporter(ResourceImporter):
             if key.startswith('_'):
                 data.pop(key)
 
-        # Create application
+        # Create application via Platform Gateway API (AAP 2.6+)
+        # Controller endpoint /api/controller/v2/applications/ is legacy/deprecated
+        gateway_url = self.client.base_url.replace("/api/controller/v2", "/api/gateway/v1")
+        gateway_endpoint = f"{gateway_url}/applications/"
         try:
-            result = await self.client.post(f"{resource_type}/", json_data=data)
+            result = await self.client.post(gateway_endpoint, json_data=data)
 
             target_id = result["id"]
             new_client_id = result.get("client_id")
