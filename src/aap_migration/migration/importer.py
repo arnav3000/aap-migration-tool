@@ -14,6 +14,7 @@ from aap_migration.client.aap_target_client import AAPTargetClient
 from aap_migration.client.bulk_operations import BulkOperations
 from aap_migration.client.exceptions import APIError, ConflictError
 from aap_migration.config import PerformanceConfig
+from aap_migration.migration.credential_type_utils import BUILTIN_CREDENTIAL_TYPE_MAX_ID
 from aap_migration.migration.database import get_session
 from aap_migration.migration.models import MigrationProgress
 from aap_migration.migration.state import MigrationState
@@ -3337,16 +3338,9 @@ class CredentialImporter(ResourceImporter):
         "team": "teams",
     }
 
-    # Built-in credential type IDs (managed by AAP, consistent across versions)
-    # Built-in types are IDs 1-27 in AAP 2.3, 2.4, 2.5, and 2.6
-    # Custom types start at ID 28+
-    #
-    # NOTE: This assumption should be verified for your specific AAP versions.
-    # If your source or target AAP has different built-in credential type IDs,
-    # adjust this value accordingly. You can verify by checking:
-    #   GET /api/v2/credential_types/?managed=true
-    # on both source and target AAP instances.
-    BUILTIN_CREDENTIAL_TYPE_MAX_ID = 27
+    # Built-in credential type IDs (managed by AAP). Prefer name-based mappings;
+    # this ceiling is the fallback when no mapping exists yet.
+    BUILTIN_CREDENTIAL_TYPE_MAX_ID = BUILTIN_CREDENTIAL_TYPE_MAX_ID
 
     async def import_resource(
         self,

@@ -308,6 +308,26 @@ def test_credential_transformer_handles_external_types_recovery_and_encrypted_fi
         )
 
 
+def test_credential_transformer_allows_builtin_credential_type_without_mapping():
+    """Built-in types (e.g. Source Control id=2) must not block credential transform."""
+    state = FakeState(source_mappings={("organizations", 7)})
+    transformer = CredentialTransformer(state=state)
+
+    transformed = transformer.transform_resource(
+        "credentials",
+        {
+            "id": 10,
+            "name": "scm-cred",
+            "organization": 7,
+            "credential_type": 2,
+            "inputs": {"username": "git"},
+        },
+    )
+
+    assert transformed["credential_type"] == 2
+    assert ("credentials", 10, "scm-cred") in state.created
+
+
 def test_team_transformer_extracts_organization_from_summary_fields():
     from aap_migration.migration.transformer import TeamTransformer
 
