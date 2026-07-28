@@ -134,12 +134,22 @@ class ResourceImporter:
             if resource_type in ORGANIZATION_REQUIRED_RESOURCES:
                 organization_id = data.get("organization")
                 if organization_id is None:
-                    error_msg = (
-                        f"Missing required field 'organization' for {resource_type}. "
-                        f"Resource '{data.get('name', 'unknown')}' (source ID {source_id}) "
-                        f"cannot be created without an organization. This indicates invalid "
-                        f"data in source AAP that needs manual correction."
-                    )
+                    unresolved_org = data.pop("_unresolved_required_organization", None)
+                    name = data.get("name", "unknown")
+                    if unresolved_org is not None:
+                        error_msg = (
+                            f"Organization (source id {unresolved_org}) was not migrated for "
+                            f"{resource_type} '{name}' (source ID {source_id}). Include that "
+                            f"organization in the plan or migrate it first."
+                        )
+                    else:
+                        error_msg = (
+                            f"Missing required field 'organization' for {resource_type}. "
+                            f"Resource '{name}' (source ID {source_id}) "
+                            f"cannot be created without an organization. This often means the "
+                            f"organization was only present in summary_fields and was not "
+                            f"extracted, or the source record has no organization."
+                        )
                     logger.error(
                         "validation_failed_missing_organization",
                         resource_type=resource_type,
@@ -163,7 +173,7 @@ class ResourceImporter:
                         }
                     )
                     return None
-
+                data.pop("_unresolved_required_organization", None)
             # Remove None/null values from data before API call
             # AAP 2.6 API requires null-valued fields to be absent, not sent as null
             # EXCEPTION: Preserve None for credential ownership fields (organization/user/team)
@@ -657,6 +667,10 @@ class ResourceImporter:
 
                     # Remove the field to allow partial import
                     # (resource will be created without this dependency)
+                    if resource_type in ORGANIZATION_REQUIRED_RESOURCES and field == "organization":
+                        # Remember the source org so validation can report a useful error
+                        # instead of claiming the source record had no organization.
+                        resolved["_unresolved_required_organization"] = dep_source_id
                     resolved.pop(field, None)
 
         return resolved
@@ -1411,11 +1425,57 @@ class UserImporter(ResourceImporter):
             return result
 
         except ConflictError:
-            # Handle conflict (user already exists)
-            conflict_result = await self._handle_conflict(resource_type, source_id, data)
+            # Handle conflict (user already exists via 409)
+            conflict_result = await self._handle_user_conflict(source_id, data)
             if conflict_result:
                 self.stats["conflict_count"] += 1
             return conflict_result
+
+        except APIError as e:
+            # AAP often returns 400 with "already exists" for duplicate usernames
+            error_str = str(e).lower()
+            is_already_exists = "already exists" in error_str or (
+                e.response
+                and any(
+                    "already exists" in str(v).lower()
+                    for v in (e.response.values() if isinstance(e.response, dict) else [])
+                )
+            )
+            if is_already_exists:
+                logger.warning(
+                    "user_already_exists",
+                    source_id=source_id,
+                    username=data.get("username"),
+                    error=str(e),
+                )
+                conflict_result = await self._handle_user_conflict(source_id, data)
+                if conflict_result:
+                    self.stats["conflict_count"] += 1
+                    return conflict_result
+
+            error_msg = str(e)
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=error_msg,
+            )
+            self.stats["error_count"] += 1
+            self.import_errors.append(
+                {
+                    "resource_type": resource_type,
+                    "source_id": source_id,
+                    "name": data.get("username", "unknown"),
+                    "error": error_msg,
+                    "error_type": type(e).__name__,
+                }
+            )
+            logger.error(
+                "resource_import_failed",
+                resource_type=resource_type,
+                source_id=source_id,
+                error=error_msg,
+            )
+            return None
 
         except Exception as e:
             # Mark as failed
@@ -1443,6 +1503,48 @@ class UserImporter(ResourceImporter):
                 error=error_msg,
             )
 
+            return None
+
+    async def _handle_user_conflict(
+        self, source_id: int, data: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Map an existing target user by username when create conflicts."""
+        username = data.get("username")
+        if not username:
+            return None
+        try:
+            results = await self.client.get("users/", params={"username": username})
+            users = results.get("results") or []
+            if not users:
+                return None
+            existing = users[0]
+            target_id = int(existing["id"])
+            self.state.mark_completed(
+                resource_type="users",
+                source_id=source_id,
+                target_id=target_id,
+                target_name=existing.get("username", username),
+                source_name=username,
+            )
+            logger.info(
+                "user_conflict_mapped",
+                source_id=source_id,
+                target_id=target_id,
+                username=username,
+            )
+            return dict(existing)
+        except Exception as exc:
+            logger.error(
+                "user_conflict_resolution_failed",
+                source_id=source_id,
+                username=username,
+                error=str(exc),
+            )
+            self.state.mark_failed(
+                resource_type="users",
+                source_id=source_id,
+                error_message=f"Conflict resolution failed: {exc}",
+            )
             return None
 
     async def import_users(
@@ -1536,6 +1638,109 @@ class InstanceImporter(ResourceImporter):
     DEPENDENCIES: dict[str, str] = {}  # No dependencies - instances are foundational
     IDENTIFIER_FIELD = "hostname"  # Instances use 'hostname' instead of 'name'
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._target_instances_by_hostname: dict[str, dict[str, Any]] | None = None
+
+    async def _get_target_instances_by_hostname(self) -> dict[str, dict[str, Any]]:
+        if self._target_instances_by_hostname is None:
+            target_instances = await self.client.list_resources("instances")
+            self._target_instances_by_hostname = {
+                inst["hostname"]: inst for inst in target_instances
+            }
+        return self._target_instances_by_hostname
+
+    async def import_resource(
+        self,
+        resource_type: str,
+        source_id: int,
+        data: dict[str, Any],
+        resolve_dependencies: bool = True,
+    ) -> dict[str, Any] | None:
+        """Map a single source instance to a target instance by hostname.
+
+        Planner and single-resource paths call this instead of create_resource —
+        instances cannot be created via the AAP API.
+        """
+        _ = resolve_dependencies
+        source_hostname = data.get("hostname") or data.get("name") or "unknown"
+
+        if self.state.is_migrated(resource_type, source_id):
+            target_id = self.state.get_mapped_id(resource_type, source_id)
+            self.stats["skipped_count"] += 1
+            if target_id is not None:
+                return {
+                    "id": target_id,
+                    "hostname": source_hostname,
+                    "_already_migrated": True,
+                    "_skip_reason": f"Instance already mapped (target id {target_id})",
+                }
+            return None
+
+        self.state.mark_in_progress(
+            resource_type=resource_type,
+            source_id=source_id,
+            source_name=source_hostname,
+            phase="import",
+        )
+
+        instance_mappings = self.resource_mappings.get("instances") or {}
+        target_hostname = instance_mappings.get(source_hostname, source_hostname)
+        target_by_hostname = await self._get_target_instances_by_hostname()
+        target_instance = target_by_hostname.get(target_hostname)
+
+        if not target_instance:
+            error_msg = (
+                f"No target instance for '{source_hostname}'. Add mapping to config/mappings.yaml"
+            )
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=error_msg,
+            )
+            self.stats["error_count"] += 1
+            self.import_errors.append(
+                {
+                    "resource_type": resource_type,
+                    "source_id": source_id,
+                    "name": source_hostname,
+                    "error": error_msg,
+                    "error_type": "InstanceMappingError",
+                }
+            )
+            logger.warning(
+                "instance_not_found_on_target",
+                source_id=source_id,
+                source_hostname=source_hostname,
+                target_hostname=target_hostname,
+                hint="Add to config/mappings.yaml: instances: { source: target }",
+            )
+            return None
+
+        target_id = int(target_instance["id"])
+        self.state.save_id_mapping(
+            resource_type=resource_type,
+            source_id=source_id,
+            target_id=target_id,
+            source_name=source_hostname,
+            target_name=target_instance.get("hostname", target_hostname),
+        )
+        self.state.mark_completed(
+            resource_type=resource_type,
+            source_id=source_id,
+            target_id=target_id,
+            target_name=target_instance.get("hostname", target_hostname),
+        )
+        self.stats["imported_count"] += 1
+        logger.info(
+            "instance_mapped",
+            source_id=source_id,
+            target_id=target_id,
+            source_hostname=source_hostname,
+            target_hostname=target_hostname,
+        )
+        return target_instance
+
     async def import_instances(
         self,
         instances: list[dict[str, Any]],
@@ -1562,20 +1767,6 @@ class InstanceImporter(ResourceImporter):
         failed_count = 0
         skipped_count = 0
 
-        # Get instance hostname mappings from config/mappings.yaml
-        instance_mappings = self.resource_mappings.get("instances") or {}
-
-        # Fetch all target instances once
-        target_instances = await self.client.list_resources("instances")
-        target_by_hostname = {inst["hostname"]: inst for inst in target_instances}
-
-        logger.info(
-            "instance_mapping_started",
-            source_count=len(instances),
-            target_count=len(target_instances),
-            configured_mappings=len(instance_mappings),
-        )
-
         for instance in instances:
             raw_sid = instance.get("_source_id") or instance.get("id")
             if raw_sid is None:
@@ -1591,65 +1782,14 @@ class InstanceImporter(ResourceImporter):
                 continue
 
             source_id = int(raw_sid)
-            source_hostname = instance.get("hostname", "unknown")
-
-            # Check if already mapped
-            if self.state.is_migrated("instances", source_id):
+            result = await self.import_resource("instances", source_id, instance)
+            if result and result.get("_already_migrated"):
                 skipped_count += 1
-                if progress_callback:
-                    progress_callback(success_count, failed_count, skipped_count)
-                continue
-
-            # Mark in progress
-            self.state.mark_in_progress(
-                resource_type="instances",
-                source_id=source_id,
-                source_name=source_hostname,
-                phase="import",
-            )
-
-            # Resolve target hostname (from mapping or exact match)
-            target_hostname = instance_mappings.get(source_hostname, source_hostname)
-            target_instance = target_by_hostname.get(target_hostname)
-
-            if target_instance:
-                # Found match - save ID mapping
-                self.state.mark_completed(
-                    resource_type="instances",
-                    source_id=source_id,
-                    target_id=target_instance["id"],
-                    target_name=target_instance["hostname"],
-                )
-                results.append(target_instance)
+            elif result:
+                results.append(result)
                 success_count += 1
-                self.stats["imported_count"] += 1
-                logger.info(
-                    "instance_mapped",
-                    source_id=source_id,
-                    target_id=target_instance["id"],
-                    source_hostname=source_hostname,
-                    target_hostname=target_hostname,
-                )
             else:
-                # No match found - log warning with hint
-                error_msg = (
-                    f"No target instance for '{source_hostname}'. "
-                    f"Add mapping to config/mappings.yaml"
-                )
-                self.state.mark_failed(
-                    resource_type="instances",
-                    source_id=source_id,
-                    error_message=error_msg,
-                )
                 failed_count += 1
-                self.stats["error_count"] += 1
-                logger.warning(
-                    "instance_not_found_on_target",
-                    source_id=source_id,
-                    source_hostname=source_hostname,
-                    target_hostname=target_hostname,
-                    hint="Add to config/mappings.yaml: instances: { source: target }",
-                )
 
             if progress_callback:
                 progress_callback(success_count, failed_count, skipped_count)
@@ -3276,6 +3416,11 @@ class CredentialImporter(ResourceImporter):
         if resolve_dependencies:
             data = await self._resolve_dependencies(resource_type, data)
 
+        # AAP requires at least one of organization / user / team. When ownership
+        # was stripped (unmapped org/user/team) or never present, own the credential
+        # as the target's builtin admin user so create can succeed.
+        data = await self._ensure_credential_ownership(data)
+
         try:
             # Build query params for exact match: (name, organization, credential_type)
             # Credentials are unique by this composite key in AAP
@@ -3451,6 +3596,57 @@ class CredentialImporter(ResourceImporter):
                 }
             )
             return None
+
+    async def _lookup_target_admin_user_id(self) -> int | None:
+        """Return the target AAP builtin admin user id, cached per importer instance."""
+        cached = getattr(self, "_cached_admin_user_id", None)
+        if cached is not None:
+            return cached
+        try:
+            results = await self.client.get("users/", params={"username": "admin"})
+            users = results.get("results") or []
+            if users and users[0].get("id") is not None:
+                self._cached_admin_user_id = int(users[0]["id"])
+                return self._cached_admin_user_id
+        except Exception as exc:
+            logger.warning(
+                "credential_admin_user_lookup_failed",
+                error=str(exc),
+                message="Could not look up builtin admin user on target",
+            )
+        return None
+
+    async def _ensure_credential_ownership(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Ensure credential has organization, user, or team ownership for the target API.
+
+        When none remain after dependency resolution, assign ownership to the
+        target's builtin admin user.
+        """
+        if data.get("organization") or data.get("user") or data.get("team"):
+            return data
+
+        admin_id = await self._lookup_target_admin_user_id()
+        if admin_id is None:
+            logger.error(
+                "credential_missing_owner_no_admin",
+                credential_name=data.get("name"),
+                message=(
+                    "Credential has no organization/user/team and target admin "
+                    "user could not be found"
+                ),
+            )
+            return data
+
+        data["user"] = admin_id
+        data.pop("organization", None)
+        data.pop("team", None)
+        logger.info(
+            "credential_owner_defaulted_to_admin",
+            credential_name=data.get("name"),
+            admin_user_id=admin_id,
+            message="Assigned credential to builtin admin user — no org/user/team remaining",
+        )
+        return data
 
     async def _resolve_dependencies(
         self, resource_type: str, data: dict[str, Any]

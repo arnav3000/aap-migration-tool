@@ -1149,6 +1149,22 @@ class CredentialTransformer(DataTransformer):
                     "Advanced auth methods (AppRole, Kubernetes, namespace) must be reconfigured manually.",
                 )
 
+        # vault_id is only valid on Ansible Vault (and similar vault) types.
+        # Leaving it on SCM/Machine/etc. credentials causes target 400s like:
+        #   'vault_id' is not one of ['ssh_private_key', 'url']
+        cred_type_lower = str(cred_type_name).lower()
+        is_vault_type = "vault" in cred_type_lower
+        if not is_vault_type and "vault_id" in data["inputs"]:
+            del data["inputs"]["vault_id"]
+            logger.info(
+                "credential_vault_id_removed",
+                resource_type="credentials",
+                source_id=source_id,
+                source_name=data.get("name"),
+                credential_type=cred_type_name,
+                message="Removed vault_id from non-vault credential type inputs",
+            )
+
     def _apply_specific_transformations(
         self, data: dict[str, Any], resource_type: str
     ) -> dict[str, Any]:
@@ -1266,6 +1282,28 @@ class CredentialTransformer(DataTransformer):
             encrypted_fields = []
 
             ssh_key_fields = {"ssh_key_data", "private_key", "ssh_private_key"}
+            # Boolean inputs must never receive string secrets — AAP rejects that with
+            # "secret not allowed for boolean type (verify_ssl)".
+            boolean_input_fields = {
+                "verify_ssl",
+                "verify_certificate",
+                "verify_certificates",
+                "update_on_launch",
+                "overwrite",
+                "overwrite_vars",
+            }
+
+            # Coerce string/bool-ish values for known boolean fields up front
+            for bool_key in list(data["inputs"].keys()):
+                if bool_key not in boolean_input_fields:
+                    continue
+                raw = data["inputs"][bool_key]
+                if raw == "$encrypted$":
+                    # Secrets cannot represent booleans — default to True (verify on)
+                    data["inputs"][bool_key] = True
+                    encrypted_fields.append(bool_key)
+                elif isinstance(raw, str):
+                    data["inputs"][bool_key] = raw.strip().lower() in {"1", "true", "yes", "on"}
 
             # First pass: Check if we need an encrypted key (ssh_key_unlock is present/encrypted)
             ssh_key_unlock_value = None
@@ -1282,63 +1320,56 @@ class CredentialTransformer(DataTransformer):
                 temp_values["ssh_key_unlock"] = ssh_key_unlock_value
                 encrypted_fields.append("ssh_key_unlock")
 
-            for key, value in data["inputs"].items():
-                if value == "$encrypted$":
-                    # Skip if already handled (e.g. ssh_key_unlock)
-                    if key == "ssh_key_unlock":
-                        continue
+            for key, value in list(data["inputs"].items()):
+                if value != "$encrypted$":
+                    continue
+                # Skip if already handled (e.g. ssh_key_unlock / booleans)
+                if key == "ssh_key_unlock" or key in boolean_input_fields:
+                    continue
 
-                    if key in ssh_key_fields or ("private" in key.lower() and "key" in key.lower()):
-                        # Generate valid PEM format for SSH key fields (cached if config available)
-                        if ssh_key_unlock_value:
-                            # Use encrypted key generator with the passphrase we generated
-                            if self.config and self.config.performance:
-                                temp_value = self.config.performance.get_dummy_encrypted_ssh_key(
-                                    ssh_key_unlock_value
-                                )
-                            else:
-                                temp_value = generate_temp_encrypted_ssh_key(ssh_key_unlock_value)
-                        else:
-                            # Use unencrypted key generator
-                            if self.config and self.config.performance:
-                                temp_value = self.config.performance.get_dummy_ssh_key()
-                            else:
-                                temp_value = generate_temp_ssh_key()
-                    else:
-                        # Generate temp value for other secrets (cached if config available)
+                if key in ssh_key_fields or ("private" in key.lower() and "key" in key.lower()):
+                    # Generate valid PEM format for SSH key fields (cached if config available)
+                    if ssh_key_unlock_value:
+                        # Use encrypted key generator with the passphrase we generated
                         if self.config and self.config.performance:
-                            temp_value = self.config.performance.get_dummy_password()
+                            temp_value = self.config.performance.get_dummy_encrypted_ssh_key(
+                                ssh_key_unlock_value
+                            )
                         else:
-                            temp_value = secrets.token_urlsafe(16)
+                            temp_value = generate_temp_encrypted_ssh_key(ssh_key_unlock_value)
+                    else:
+                        # Use unencrypted key generator
+                        if self.config and self.config.performance:
+                            temp_value = self.config.performance.get_dummy_ssh_key()
+                        else:
+                            temp_value = generate_temp_ssh_key()
+                else:
+                    # Generate temp value for other secrets (cached if config available)
+                    if self.config and self.config.performance:
+                        temp_value = self.config.performance.get_dummy_password()
+                    else:
+                        temp_value = secrets.token_urlsafe(16)
 
-                    data["inputs"][key] = temp_value
-                    temp_values[key] = temp_value
-                    encrypted_fields.append(key)
+                data["inputs"][key] = temp_value
+                temp_values[key] = temp_value
+                encrypted_fields.append(key)
 
-            if temp_values:
-                data["_needs_vault_lookup"] = True
+            if temp_values or encrypted_fields:
+                if temp_values:
+                    data["_needs_vault_lookup"] = True
                 data["_encrypted_fields"] = encrypted_fields
                 logger.info(
                     "credential_temp_values_generated",
                     resource_type="credentials",
                     source_id=source_id,
                     source_name=data.get("name"),
-                    fields=list(temp_values.keys()),
+                    fields=list(temp_values.keys()) or encrypted_fields,
                     message="Temporary values generated for encrypted fields - update after migration",
                 )
 
-        # Set null organization to Default (ID=1) for API compatibility
-        # Testing if organization is required by the API
-        if "organization" in data and data["organization"] is None:
-            data["organization"] = 1  # Default organization
-            logger.info(
-                "defaulted_null_organization",
-                resource_type="credentials",
-                source_id=source_id,
-                source_name=data.get("name"),
-                organization_id=1,
-                message="Set null organization to Default (ID=1)",
-            )
+        # Leave organization=None when unset. Import assigns the target admin user
+        # when no organization/user/team ownership remains after dependency resolve.
+        # Do not invent source org ID 1 here — that org may not be in the migration plan.
 
         return data
 
@@ -1811,8 +1842,40 @@ class TeamTransformer(DataTransformer):
     DEPENDENCIES = {
         "organization": "organizations",
     }
-    # Organization is optional for teams (some teams may be global)
-    REQUIRED_DEPENDENCIES = set()
+    # AAP requires every team to belong to an organization
+    REQUIRED_DEPENDENCIES = {"organization"}
+
+    def _extract_organization_from_summary(self, data: dict[str, Any]) -> None:
+        """Copy organization from summary_fields when the top-level field is missing."""
+        org = data.get("organization")
+        if org:
+            return
+        org_info = data.get("summary_fields", {}).get("organization")
+        if isinstance(org_info, dict) and org_info.get("id") is not None:
+            data["organization"] = org_info["id"]
+            logger.debug(
+                "extracted_organization_from_summary",
+                resource_type="teams",
+                source_id=coerce_source_id(data),
+                source_name=data.get("name"),
+                organization_id=org_info["id"],
+            )
+
+    def _validate_dependencies(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> None:
+        # Extract before required-dependency checks so summary-only org is not lost.
+        self._extract_organization_from_summary(data)
+        super()._validate_dependencies(data, resource_type)
+
+    def _apply_specific_transformations(
+        self, data: dict[str, Any], resource_type: str
+    ) -> dict[str, Any]:
+        """Ensure organization is present before read-only fields are stripped."""
+        self._extract_organization_from_summary(data)
+        return data
 
 
 class CredentialTypeTransformer(DataTransformer):
@@ -1869,6 +1932,19 @@ class CredentialTypeTransformer(DataTransformer):
                 message="Built-in credential type (managed=True)",
             )
 
+        # Custom credential types with kind=galaxy are rejected by newer AAP
+        # (Must be 'cloud' or 'net', not galaxy). Skip rather than fail import.
+        if data.get("kind") == "galaxy" and not data.get("managed"):
+            source_id = coerce_source_id(data)
+            self.stats["skipped_count"] += 1
+            raise SkipResourceError(
+                f"Skipping credential type '{data.get('name')}': kind 'galaxy' "
+                f"is not supported on the target (must be 'cloud' or 'net')",
+                resource_type=resource_type,
+                source_id=source_id,
+                missing_dependency="credential_types:kind=galaxy",
+            )
+
         # Clean up inputs schema - remove 'metadata' if present (causes validation errors in 2.6)
         # Error: Additional properties are not allowed ('metadata' was unexpected)
         inputs = data.get("inputs")
@@ -1880,6 +1956,25 @@ class CredentialTypeTransformer(DataTransformer):
                 source_name=data.get("name"),
             )
             del inputs["metadata"]
+
+        # AAP 2.5+ rejects 'dependencies' on custom credential type injectors/inputs
+        injectors = data.get("injectors")
+        if isinstance(injectors, dict) and "dependencies" in injectors:
+            logger.info(
+                "removing_dependencies_from_credential_type_injectors",
+                resource_type="credential_types",
+                source_id=data.get("_source_id") or data.get("id"),
+                source_name=data.get("name"),
+            )
+            del injectors["dependencies"]
+        if isinstance(inputs, dict) and "dependencies" in inputs:
+            logger.info(
+                "removing_dependencies_from_credential_type_inputs",
+                resource_type="credential_types",
+                source_id=data.get("_source_id") or data.get("id"),
+                source_name=data.get("name"),
+            )
+            del inputs["dependencies"]
 
         return data
 
