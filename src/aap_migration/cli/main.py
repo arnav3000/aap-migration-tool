@@ -26,6 +26,7 @@ from aap_migration.cli.commands import project_failures as project_failures_comm
 from aap_migration.cli.commands import retry as retry_commands
 from aap_migration.cli.commands import state as state_commands
 from aap_migration.cli.commands import transform as transform_commands
+from aap_migration.cli.commands import validate as validate_commands
 from aap_migration.cli.context import MigrationContext
 from aap_migration.cli.menu import interactive_menu
 from aap_migration.utils.logging import configure_logging, get_logger
@@ -139,6 +140,7 @@ cli.add_command(patch_projects_commands.patch_projects)
 cli.add_command(project_failures_commands.analyze_project_failures)
 cli.add_command(migration_report_commands.generate_migration_report)
 cli.add_command(iam_commands.iam)
+cli.add_command(validate_commands.validate)
 
 
 def main() -> int:
