@@ -249,7 +249,16 @@ def test_state_covers_seed_and_update_branches(sqlite_db_url, tmp_path):
     assert skipped_progress.status == "skipped"
     assert skipped_progress.target_id == 2100
 
-    assert state.get_id_mapping("users", 21) is None
+    # Duplicate-detection skip must populate id_mappings so dependents can resolve FKs
+    assert state.get_mapped_id("users", 21) == 2100
+    assert state.is_migrated("users", 21) is True
+    assert state.get_id_mapping("users", 21) == {
+        "source_id": 21,
+        "target_id": 2100,
+        "source_name": "user21",
+        "target_name": "User Twenty One",
+        "resource_type": "users",
+    }
     assert state.get_mapping_by_name("users", "missing") is None
 
     state.save_id_mapping(

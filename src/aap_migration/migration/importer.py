@@ -251,19 +251,26 @@ class ResourceImporter:
                             organization_id=organization_id,
                             parent_id=parent_id,
                             parent_field=parent_field,
-                            action="marking_as_skipped_duplicate",
+                            action="mapping_existing_target_resource",
                         )
-                        # Mark as skipped with target_id (duplicate detection)
-                        self.state.mark_skipped(
+                        # Map source → existing target. Prefer mark_completed so
+                        # is_migrated / get_mapped_id work for dependents (projects, etc.).
+                        self.state.mark_completed(
                             resource_type=resource_type,
                             source_id=source_id,
-                            reason=f"Duplicate exists in target (name: {resource_name}, target_id: {existing['id']})",
-                            target_id=existing["id"],
+                            target_id=int(existing["id"]),
                             target_name=existing.get("name"),
                             source_name=resource_name,
                         )
                         self.stats["skipped_count"] += 1
-                        return existing
+                        return {
+                            **existing,
+                            "_already_migrated": True,
+                            "_skip_reason": (
+                                f"Already exists on target (id {existing['id']}) — "
+                                f"mapped to source id {source_id}"
+                            ),
+                        }
                 except Exception as e:
                     # If lookup fails, continue with normal create (don't break import)
                     logger.debug(

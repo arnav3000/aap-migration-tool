@@ -186,7 +186,10 @@ async def test_resource_importer_import_resource_handles_duplicates_conflicts_an
         resolve_dependencies=False,
     )
     assert duplicate["id"] == 900
-    assert state.skipped[-1]["target_id"] == 900
+    assert duplicate["_already_migrated"] is True
+    assert state.completed[-1]["target_id"] == 900
+    assert state.get_mapped_id("teams", 2) == 900
+    assert importer.stats["skipped_count"] == 1
 
     async def fake_handle_conflict(resource_type, source_id, data):
         return {"id": 901, "name": data["name"]}
