@@ -1,6 +1,6 @@
 # AAP Migration Tool -- CLI container
 # Base: Universal Base Image (UBI) 9
-FROM registry.access.redhat.com/ubi9/ubi:9.4
+FROM registry.access.redhat.com/ubi9/ubi:9.8
 
 # Labels (OCI standard)
 LABEL org.opencontainers.image.title="aap-migration-tool" \
