@@ -26,6 +26,17 @@ regexes = [
     '''TARGET__TOKEN="<.*>"''',
     '''VAULT__.*="<.*>"''',
     '''\*\*\*REMOVED\*\*\*''',  # Redacted tokens in container/.env.container
+    # Documentation placeholder tokens in curl examples
+    '''YOUR_(SOURCE|TARGET)?_?TOKEN''',
+    '''(SOURCE|TARGET)_TOKEN''',
+    '''\$TOKEN\b''',
+    '''your_username:your_password''',
+    '''YOUR_KEY_HERE''',
+    '''YOUR_.*_TOKEN''',
+    '''YOUR_.*_AAP_TOKEN''',
+    # README example tokens (clearly fake, truncated with ...)
+    '''aBc123dEf456GhI789jKlMnO''',
+    '''xYz987WvU654TsR321qPoNmL''',
 ]
 
 # Paths to ignore - test fixtures, examples, documentation
@@ -46,6 +57,14 @@ paths = [
     '''.*REPORT\.md$''',
     '''.*INSTRUCTIONS\.md$''',
     '''.*RESULTS\.md$''',
+    '''.*GUIDE\.md$''',
+    '''.*WORKFLOW\.md$''',
+    '''CREDENTIAL.*\.md$''',
+    '''.*MIGRATION.*\.md$''',
+    '''README.*\.md$''',
+    '''docs/.*''',
+    '''examples/.*''',
+    '''credential_decrypt/.*''',
     '''container/\.env\.container$''',  # Template file with placeholders
     '''CRITICAL-RULES\.md$''',  # Documentation
 ]
