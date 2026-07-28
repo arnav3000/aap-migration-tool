@@ -457,10 +457,14 @@ async def _build_credential_review(
                 "name": cred["name"],
                 "credential_type": cred["credential_type"],
                 "organization": cred["organization"],
+                "source": cred.get("source", ""),
+                "name_prefix": cred.get("name_prefix", ""),
                 "used_by": used_by.get(sid, []),
             }
         )
-    result.sort(key=lambda c: (len(c["used_by"]) == 0, c["credential_type"], c["name"]))
+    result.sort(
+        key=lambda c: (len(c["used_by"]) == 0, c["source"], c["credential_type"], c["name"])
+    )
     return result
 
 
@@ -512,6 +516,7 @@ def _build_source_contexts(
                 ),
                 "state": MigrationState(migration_config.state),
                 "name_prefix": src_cfg.get("name_prefix", ""),
+                "connection_name": src_cfg.get("connection_name", "") or src_cfg["url"],
                 "org_ids": src_cfg["org_ids"],
                 "url": src_cfg["url"],
             }
@@ -553,6 +558,7 @@ async def _migrate_resource_type(
         state = src["state"]
         migration_config = src["migration_config"]
         name_prefix: str = src["name_prefix"]
+        connection_name: str = src.get("connection_name") or src["url"]
         org_ids: list[int] = src["org_ids"]
 
         try:
@@ -643,6 +649,8 @@ async def _migrate_resource_type(
                                         "name", ""
                                     ),
                                     "source_id": str(source_id),
+                                    "source": connection_name,
+                                    "name_prefix": name_prefix,
                                 }
                             )
                     else:
@@ -728,24 +736,27 @@ async def _handle_credential_pause(
     """Pause migration for credential secret review, wait for user to resume."""
     import asyncio
 
-    all_org_ids: list[int] = []
-    all_src_clients = []
+    # Review each source's credentials against that source only — credential
+    # IDs are not comparable across AAP instances.
+    review_tasks = []
     for s in sources:
-        all_org_ids.extend(s["org_ids"])
-        all_src_clients.append(s["src_client"])
+        source_label = s.get("connection_name") or s["url"]
+        source_creds = [c for c in created_creds if c.get("source") == source_label]
+        if not source_creds:
+            continue
+        review_tasks.append(_build_credential_review(s["src_client"], source_creds, s["org_ids"]))
 
-    reviews = await asyncio.gather(
-        *[_build_credential_review(sc, created_creds, all_org_ids) for sc in all_src_clients]
-    )
+    reviews = await asyncio.gather(*review_tasks) if review_tasks else []
     cred_review: list[dict[str, Any]] = []
     for r in reviews:
         cred_review.extend(r)
 
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     deduped: list[dict[str, Any]] = []
     for cr in cred_review:
-        if cr["name"] not in seen:
-            seen.add(cr["name"])
+        key = (cr.get("source", ""), cr["name"])
+        if key not in seen:
+            seen.add(key)
             deduped.append(cr)
     cred_review = deduped
 
@@ -886,6 +897,7 @@ async def execute_phase(
                 "verify_ssl": cfg.verify_ssl,
                 "timeout": cfg.timeout,
                 "name_prefix": ps.name_prefix or "",
+                "connection_name": getattr(conn, "name", None) or cfg.url,
                 "org_ids": org_ids,
                 "auth_scheme": ConnectionService._auth_scheme(conn),
             }
@@ -896,9 +908,6 @@ async def execute_phase(
 
     phase_name = phase.name or f"Phase {phase.phase_number}"
     db_url = get_db_url()
-
-    phase.status = PhaseStatus.RUNNING
-    db.flush()
 
     svc = get_job_service()
     session_factory = get_app_state().db_session_factory
@@ -994,8 +1003,13 @@ async def execute_phase(
         )
         return totals
 
+    # Persist api_jobs via start_job BEFORE any write on this request session.
+    # Flushing phase.status first holds SQLite's write lock, so the separate
+    # persist session hits "database is locked", swallows it, and the later
+    # phase.job_id FK update fails with FOREIGN KEY constraint failed.
     job_id = svc.start_job(f"Plan: {phase_name}", "migration-run", _do_phase)
 
+    phase.status = PhaseStatus.RUNNING
     phase.job_id = job_id
     plan.status = "active"
     db.flush()

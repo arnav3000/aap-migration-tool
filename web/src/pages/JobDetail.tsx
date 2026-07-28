@@ -342,6 +342,7 @@ export function JobDetail() {
                 <Table variant="compact">
                   <Thead>
                     <Tr>
+                      <Th>Source</Th>
                       <Th>Credential Name</Th>
                       <Th>Credential Type</Th>
                       <Th>Organization</Th>
@@ -351,6 +352,20 @@ export function JobDetail() {
                   <Tbody>
                     {credentialReview.map((cred, i) => (
                       <Tr key={i}>
+                        <Td>
+                          {cred.source ? (
+                            <>
+                              {cred.source}
+                              {cred.name_prefix ? (
+                                <Label isCompact color="grey" style={{ marginLeft: 6 }}>
+                                  {cred.name_prefix}
+                                </Label>
+                              ) : null}
+                            </>
+                          ) : (
+                            '—'
+                          )}
+                        </Td>
                         <Td><strong>{cred.name}</strong></Td>
                         <Td>
                           <Label isCompact color="blue">{cred.credential_type}</Label>

@@ -152,6 +152,9 @@ class JobService:
         """Create the initial DB row so foreign keys can reference the job immediately."""
         if self._db_session_factory is None:
             return
+        import logging
+
+        logger = logging.getLogger(__name__)
         try:
             from aap_migration.api.models import JobRecord
 
@@ -171,10 +174,11 @@ class JobService:
                 job.seq_id = record.seq_id
             except Exception:
                 session.rollback()
+                logger.exception("Failed to persist initial job record %s", job.id)
             finally:
                 session.close()
-        except Exception:  # nosec B110
-            pass
+        except Exception:
+            logger.exception("Failed to open session for initial job persist %s", job.id)
 
     def start_job(
         self,

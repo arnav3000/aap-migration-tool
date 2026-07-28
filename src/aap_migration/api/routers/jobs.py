@@ -121,12 +121,22 @@ def get_job_credentials_csv(job_id: str) -> StreamingResponse:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(
-        ["Credential Name", "Credential Type", "Organization", "Used By Type", "Used By Name"]
+        [
+            "Source",
+            "Name Prefix",
+            "Credential Name",
+            "Credential Type",
+            "Organization",
+            "Used By Type",
+            "Used By Name",
+        ]
     )
     for cred in creds:
-        for usage in cred.get("used_by", []):
+        for usage in cred.get("used_by", []) or [{"resource_type": "", "resource_name": ""}]:
             writer.writerow(
                 [
+                    cred.get("source", ""),
+                    cred.get("name_prefix", ""),
                     cred.get("name", ""),
                     cred.get("credential_type", ""),
                     cred.get("organization", ""),
