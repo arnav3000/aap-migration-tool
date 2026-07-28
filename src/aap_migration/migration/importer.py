@@ -3600,14 +3600,15 @@ class CredentialImporter(ResourceImporter):
     async def _lookup_target_admin_user_id(self) -> int | None:
         """Return the target AAP builtin admin user id, cached per importer instance."""
         cached = getattr(self, "_cached_admin_user_id", None)
-        if cached is not None:
+        if isinstance(cached, int):
             return cached
         try:
             results = await self.client.get("users/", params={"username": "admin"})
             users = results.get("results") or []
             if users and users[0].get("id") is not None:
-                self._cached_admin_user_id = int(users[0]["id"])
-                return self._cached_admin_user_id
+                admin_id = int(users[0]["id"])
+                self._cached_admin_user_id = admin_id
+                return admin_id
         except Exception as exc:
             logger.warning(
                 "credential_admin_user_lookup_failed",
