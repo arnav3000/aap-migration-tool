@@ -564,6 +564,228 @@ async def test_credential_pause_reviews_each_source_separately(
 
 
 @pytest.mark.asyncio
+async def test_credential_pause_still_pauses_on_source_label_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Source-label mismatches must not skip the secret-update pause."""
+    monkeypatch.setattr(
+        planner,
+        "_build_credential_review",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    created_creds = [
+        {
+            "name": "dev_Machine",
+            "credential_type": "Machine",
+            "organization": "Default",
+            "source_id": "42",
+            "source": "https://dev.example.com",
+            "name_prefix": "dev_",
+        }
+    ]
+    # connection_name differs from stamped source — previously skipped the pause
+    sources = [
+        {
+            "connection_name": "Dev AAP",
+            "url": "https://dev.example.com",
+            "name_prefix": "dev_",
+            "org_ids": [1],
+            "src_client": SimpleNamespace(),
+        }
+    ]
+
+    job = SimpleNamespace(result=None, status="running", _resume_event=asyncio.Event())
+
+    async def wait_for_resume() -> None:
+        await job._resume_event.wait()
+        job._resume_event.clear()
+
+    job.wait_for_resume = wait_for_resume
+    job._resume_event.set()
+    events: list[dict] = []
+    logs: list[str] = []
+
+    class FakeSvc:
+        def persist_job(self, j):
+            return None
+
+    await planner._handle_credential_pause(
+        job,
+        FakeSvc(),
+        created_creds,
+        sources,
+        "plan-x",
+        "phase-x",
+        events.append,
+        logs.append,
+    )
+
+    pause = next(e for e in events if e.get("_event") == "credential_pause")
+    assert pause["credentials"][0]["name"] == "dev_Machine"
+    assert job.status == "running"
+    assert any("Paused" in line for line in logs)
+
+
+@pytest.mark.asyncio
+async def test_migrate_tracks_skipped_credentials_for_pause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Already-migrated credentials must still be listed for the secret pause."""
+
+    class FakeExporter:
+        async def export(self):
+            yield {
+                "id": 42,
+                "name": "Machine",
+                "organization": 1,
+                "summary_fields": {
+                    "credential_type": {"name": "Machine"},
+                    "organization": {"name": "Default"},
+                },
+            }
+
+    class FakeImporter:
+        async def import_resource(self, resource_type, source_id, data):
+            return {"id": 99, "name": data["name"], "_already_migrated": True}
+
+    monkeypatch.setattr(
+        "aap_migration.migration.exporter.create_exporter", lambda **kwargs: FakeExporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.importer.create_importer", lambda **kwargs: FakeImporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.transformer.create_transformer", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "aap_migration.resources.RESOURCE_REGISTRY",
+        {
+            "credentials": SimpleNamespace(
+                description="Credentials",
+                has_transformer=False,
+            )
+        },
+    )
+
+    created_creds: list[dict[str, str]] = []
+    events: list[dict] = []
+    sources = [
+        {
+            "src_client": object(),
+            "state": object(),
+            "migration_config": SimpleNamespace(performance=None, resource_mappings={}),
+            "name_prefix": "dev_",
+            "connection_name": "Dev AAP",
+            "org_ids": [1],
+            "url": "https://dev.example.com",
+        }
+    ]
+
+    created, skipped, failed, exported = await planner._migrate_resource_type(
+        "credentials",
+        sources,
+        object(),
+        1,
+        events.append,
+        lambda _line: None,
+        created_creds,
+    )
+
+    assert (created, skipped, failed, exported) == (0, 1, 0, 1)
+    assert created_creds[0]["name"] == "dev_Machine"
+    assert created_creds[0]["source"] == "Dev AAP"
+    assert any(e.get("result") == "exists" for e in events)
+    exists_evt = next(e for e in events if e.get("result") == "exists")
+    assert "Already migrated" in exists_evt.get("detail", "") or exists_evt.get("detail")
+
+
+@pytest.mark.asyncio
+async def test_migrate_logs_skip_reason_for_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipped resources must emit a human-readable reason in events and logs."""
+    from aap_migration.migration.transformer import SkipResourceError
+
+    class FakeExporter:
+        async def export(self):
+            yield {
+                "id": 42,
+                "name": "Vault Cred",
+                "organization": 1,
+                "summary_fields": {
+                    "credential_type": {"name": "Vault"},
+                    "organization": {"name": "Default"},
+                },
+            }
+
+    class FakeTransformer:
+        def transform_resource(self, resource_type, data, validate=True):
+            raise SkipResourceError(
+                "Skipping 'Vault Cred': required credential_types "
+                "(source id 9) was not migrated — include that dependency "
+                "in the plan or migrate it first",
+                resource_type="credentials",
+                source_id=42,
+                missing_dependency="credential_types:9",
+            )
+
+    class FakeImporter:
+        async def import_resource(self, *args, **kwargs):
+            raise AssertionError("import should not run after transform skip")
+
+    monkeypatch.setattr(
+        "aap_migration.migration.exporter.create_exporter", lambda **kwargs: FakeExporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.importer.create_importer", lambda **kwargs: FakeImporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.transformer.create_transformer",
+        lambda **kwargs: FakeTransformer(),
+    )
+    monkeypatch.setattr(
+        "aap_migration.resources.RESOURCE_REGISTRY",
+        {
+            "credentials": SimpleNamespace(
+                description="Credentials",
+                has_transformer=True,
+            )
+        },
+    )
+
+    events: list[dict] = []
+    logs: list[str] = []
+    sources = [
+        {
+            "src_client": object(),
+            "state": object(),
+            "migration_config": SimpleNamespace(performance=None, resource_mappings={}),
+            "name_prefix": "",
+            "connection_name": "Dev AAP",
+            "org_ids": [1],
+            "url": "https://dev.example.com",
+        }
+    ]
+
+    created, skipped, failed, exported = await planner._migrate_resource_type(
+        "credentials",
+        sources,
+        object(),
+        1,
+        events.append,
+        logs.append,
+        [],
+    )
+
+    assert (created, skipped, failed, exported) == (0, 1, 0, 0)
+    skip_evt = next(e for e in events if e.get("result") == "skipped")
+    assert "credential_types" in skip_evt["detail"]
+    assert any("Skipped credentials/Vault Cred" in line for line in logs)
+    assert any("credential_types" in line for line in logs)
+
+
+@pytest.mark.asyncio
 async def test_migrate_resource_type_applies_name_prefix_and_tags_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

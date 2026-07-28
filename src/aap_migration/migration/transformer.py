@@ -358,6 +358,7 @@ class DataTransformer:
             if not self.state.has_source_mapping(dep_resource_type, dep_source_id):
                 if field in self.REQUIRED_DEPENDENCIES:
                     # Required dependency is missing - skip this resource
+                    source_name = data.get("name") or data.get("username") or source_id
                     logger.warning(
                         "required_dependency_missing",
                         resource_type=resource_type,
@@ -370,8 +371,9 @@ class DataTransformer:
                     )
                     self.stats["skipped_count"] += 1
                     raise SkipResourceError(
-                        f"{resource_type} {source_id} references non-exported "
-                        f"{dep_resource_type} {dep_source_id}",
+                        f"Skipping '{source_name}': required {dep_resource_type} "
+                        f"(source id {dep_source_id}) was not migrated — include that "
+                        f"dependency in the plan or migrate it first",
                         resource_type=resource_type,
                         source_id=source_id,
                         missing_dependency=f"{dep_resource_type}:{dep_source_id}",
@@ -1174,6 +1176,7 @@ class CredentialTransformer(DataTransformer):
         ):
             # Check if mapped
             if self.state and not self.state.get_mapped_id("credential_types", cred_type_id):
+                cred_name = data.get("name") or source_id
                 logger.info(
                     "skipping_credential_external_type_unmapped",
                     resource_type="credentials",
@@ -1184,7 +1187,8 @@ class CredentialTransformer(DataTransformer):
                 )
                 self.stats["skipped_count"] += 1
                 raise SkipResourceError(
-                    f"Credential {source_id} depends on unmapped external credential type {cred_type_id}",
+                    f"Skipping '{cred_name}': external credential type "
+                    f"(source id {cred_type_id}) is not mapped on the target",
                     resource_type=resource_type,
                     source_id=source_id,
                     missing_dependency=f"credential_types:{cred_type_id}",

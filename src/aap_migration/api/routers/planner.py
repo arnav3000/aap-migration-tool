@@ -524,6 +524,52 @@ def _build_source_contexts(
     return target_config, target_client, sources
 
 
+def _resource_display_name(resource: dict[str, Any], source_id: Any) -> str:
+    return str(resource.get("name") or resource.get("username") or source_id)
+
+
+def _import_result_detail(result: Any) -> str:
+    """Human-readable reason from importer marker fields."""
+    if not isinstance(result, dict):
+        return ""
+    reason = result.get("_skip_reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    if result.get("_already_migrated"):
+        return "Already migrated in state — update secrets if needed"
+    if result.get("_skipped"):
+        return "Matched existing managed resource on target — mapped only"
+    return ""
+
+
+def _emit_resource_result(
+    emit: Callable[[dict[str, Any]], None],
+    log: Callable[[str], None],
+    *,
+    phase_num: int,
+    name: str,
+    rtype: str,
+    result: str,
+    detail: str = "",
+) -> None:
+    """Emit a resource_result event and a plain-text log line for skips/fails."""
+    detail = (detail or "")[:300]
+    emit(
+        {
+            "_event": "resource_result",
+            "phase_num": phase_num,
+            "name": name,
+            "resource_type": rtype,
+            "result": result,
+            "detail": detail,
+        }
+    )
+    if result in ("skipped", "exists", "failed") and detail:
+        log(f"  {result.capitalize()} {rtype}/{name}: {detail}")
+    elif result in ("skipped", "exists", "failed"):
+        log(f"  {result.capitalize()} {rtype}/{name}")
+
+
 async def _migrate_resource_type(
     rtype: str,
     sources: list[dict[str, Any]],
@@ -597,23 +643,44 @@ async def _migrate_resource_type(
                     continue
 
                 raw_summary = resource.get("summary_fields", {})
+                res_name = _resource_display_name(resource, source_id)
 
                 if transformer:
                     try:
                         resource = transformer.transform_resource(
                             resource_type=rtype, data=resource, validate=True
                         )
-                    except SkipResourceError:
+                        res_name = _resource_display_name(resource, source_id)
+                    except SkipResourceError as skip_exc:
                         skipped += 1
+                        _emit_resource_result(
+                            emit,
+                            log,
+                            phase_num=phase_num,
+                            name=res_name,
+                            rtype=rtype,
+                            result="skipped",
+                            detail=str(skip_exc),
+                        )
                         continue
-                    except Exception:
+                    except Exception as exc:
                         failed += 1
+                        _emit_resource_result(
+                            emit,
+                            log,
+                            phase_num=phase_num,
+                            name=res_name,
+                            rtype=rtype,
+                            result="failed",
+                            detail=f"Transform error: {exc}",
+                        )
                         continue
 
                 if name_prefix:
                     from aap_migration.utils.naming import apply_name_prefix
 
                     apply_name_prefix(rtype, resource, name_prefix)
+                    res_name = _resource_display_name(resource, source_id)
 
                 exported += 1
 
@@ -626,47 +693,117 @@ async def _migrate_resource_type(
                             source_id=int(source_id),
                             data=resource,
                         )
-                    res_name = resource.get("name", resource.get("username", str(source_id)))
+                    res_name = _resource_display_name(resource, source_id)
+                    import_err = None
+                    outcome = "created"
+                    detail = ""
+
                     if result:
-                        created += 1
-                        emit(
-                            {
-                                "_event": "resource_result",
-                                "phase_num": phase_num,
-                                "name": res_name,
-                                "resource_type": rtype,
-                                "result": "created",
-                                "detail": "",
-                            }
+                        already_present = isinstance(result, dict) and bool(
+                            result.get("_already_migrated") or result.get("_skipped")
                         )
-                        if rtype == "credentials":
-                            created_creds.append(
+                        if already_present:
+                            outcome = "exists"
+                            detail = _import_result_detail(result)
+                            skipped += 1
+                            _emit_resource_result(
+                                emit,
+                                log,
+                                phase_num=phase_num,
+                                name=res_name,
+                                rtype=rtype,
+                                result=outcome,
+                                detail=detail,
+                            )
+                        else:
+                            created += 1
+                            emit(
                                 {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
                                     "name": res_name,
-                                    "credential_type": raw_summary.get("credential_type", {}).get(
-                                        "name", "Unknown"
-                                    ),
-                                    "organization": raw_summary.get("organization", {}).get(
-                                        "name", ""
-                                    ),
-                                    "source_id": str(source_id),
-                                    "source": connection_name,
-                                    "name_prefix": name_prefix,
+                                    "resource_type": rtype,
+                                    "result": "created",
+                                    "detail": "",
                                 }
                             )
                     else:
-                        skipped += 1
+                        # Importers often return None for both skips and handled failures.
+                        # Prefer import_errors / state so the UI shows the real reason.
+                        for err in getattr(importer, "import_errors", []) or []:
+                            if err.get("source_id") == int(source_id):
+                                import_err = err
+                        if import_err:
+                            outcome = "failed"
+                            detail = import_err.get("error") or "Import failed"
+                            if import_err.get("error_type"):
+                                detail = f"{import_err['error_type']}: {detail}"
+                            failed += 1
+                            _emit_resource_result(
+                                emit,
+                                log,
+                                phase_num=phase_num,
+                                name=res_name,
+                                rtype=rtype,
+                                result=outcome,
+                                detail=detail,
+                            )
+                        elif state.is_migrated(rtype, int(source_id)):
+                            outcome = "exists"
+                            detail = "Already migrated in state — update secrets if needed"
+                            skipped += 1
+                            _emit_resource_result(
+                                emit,
+                                log,
+                                phase_num=phase_num,
+                                name=res_name,
+                                rtype=rtype,
+                                result=outcome,
+                                detail=detail,
+                            )
+                        else:
+                            outcome = "skipped"
+                            detail = (
+                                "Import returned no result (already migrated, "
+                                "filtered, or failed — check server logs)"
+                            )
+                            skipped += 1
+                            _emit_resource_result(
+                                emit,
+                                log,
+                                phase_num=phase_num,
+                                name=res_name,
+                                rtype=rtype,
+                                result=outcome,
+                                detail=detail,
+                            )
+
+                    # Track every credential we touched for the post-cred secret pause,
+                    # including already-migrated ones — secrets are never exported and
+                    # must still be filled in before dependent resources run.
+                    if rtype == "credentials" and outcome != "failed":
+                        created_creds.append(
+                            {
+                                "name": res_name,
+                                "credential_type": raw_summary.get("credential_type", {}).get(
+                                    "name", "Unknown"
+                                ),
+                                "organization": raw_summary.get("organization", {}).get("name", ""),
+                                "source_id": str(source_id),
+                                "source": connection_name,
+                                "name_prefix": name_prefix,
+                            }
+                        )
                 except Exception as exc:
                     failed += 1
-                    emit(
-                        {
-                            "_event": "resource_result",
-                            "phase_num": phase_num,
-                            "name": resource.get("name", resource.get("username", str(source_id))),
-                            "resource_type": rtype,
-                            "result": "failed",
-                            "detail": str(exc)[:200],
-                        }
+                    _emit_resource_result(
+                        emit,
+                        log,
+                        phase_num=phase_num,
+                        name=_resource_display_name(resource, source_id),
+                        rtype=rtype,
+                        result="failed",
+                        detail=str(exc),
                     )
 
                 now = time.monotonic()
@@ -736,21 +873,69 @@ async def _handle_credential_pause(
 ) -> None:
     """Pause migration for credential secret review, wait for user to resume."""
     import asyncio
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if not created_creds:
+        return
 
     # Review each source's credentials against that source only — credential
     # IDs are not comparable across AAP instances.
     review_tasks = []
+    matched: set[str] = set()
     for s in sources:
         source_label = s.get("connection_name") or s["url"]
         source_creds = [c for c in created_creds if c.get("source") == source_label]
         if not source_creds:
             continue
+        for c in source_creds:
+            matched.add(f"{c.get('source', '')}:{c.get('source_id', '')}:{c.get('name', '')}")
         review_tasks.append(_build_credential_review(s["src_client"], source_creds, s["org_ids"]))
 
     reviews = await asyncio.gather(*review_tasks) if review_tasks else []
     cred_review: list[dict[str, Any]] = []
     for r in reviews:
         cred_review.extend(r)
+
+    # Never skip the pause because of source-label mismatches — secrets still
+    # need to be filled in before dependent resources migrate.
+    unmatched = [
+        c
+        for c in created_creds
+        if f"{c.get('source', '')}:{c.get('source_id', '')}:{c.get('name', '')}" not in matched
+    ]
+    if unmatched:
+        logger.warning(
+            "credential_pause_unmatched_sources count=%s sources=%s",
+            len(unmatched),
+            sorted({c.get("source", "") for c in unmatched}),
+        )
+        for c in unmatched:
+            cred_review.append(
+                {
+                    "name": c["name"],
+                    "credential_type": c.get("credential_type", ""),
+                    "organization": c.get("organization", ""),
+                    "source": c.get("source", ""),
+                    "name_prefix": c.get("name_prefix", ""),
+                    "used_by": [],
+                }
+            )
+
+    if not cred_review:
+        # Last-resort fallback so a review-builder failure cannot skip the pause.
+        cred_review = [
+            {
+                "name": c["name"],
+                "credential_type": c.get("credential_type", ""),
+                "organization": c.get("organization", ""),
+                "source": c.get("source", ""),
+                "name_prefix": c.get("name_prefix", ""),
+                "used_by": [],
+            }
+            for c in created_creds
+        ]
 
     seen: set[tuple[str, str]] = set()
     deduped: list[dict[str, Any]] = []
@@ -760,9 +945,6 @@ async def _handle_credential_pause(
             seen.add(key)
             deduped.append(cr)
     cred_review = deduped
-
-    if not cred_review:
-        return
 
     emit({"_event": "credential_pause", "credentials": cred_review})
     log("Paused — waiting for user to update credential secrets on the target and resume.")
