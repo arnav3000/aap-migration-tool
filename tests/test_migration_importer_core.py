@@ -426,6 +426,43 @@ async def test_user_importer_maps_existing_username_on_400():
 
 
 @pytest.mark.asyncio
+async def test_project_importer_attaches_credential_on_already_migrated():
+    """Re-runs must PATCH SCM credential onto projects created without one."""
+    state = FakeState(
+        mapped_ids={
+            ("projects", 1): 101,
+            ("organizations", 7): 107,
+            ("credentials", 9): 209,
+        },
+        migrated={("projects", 1)},
+    )
+    client = FakeTargetClient()
+    client.get_results[("projects/101/", ())] = {
+        "id": 101,
+        "name": "dev_Project",
+        "credential": None,
+    }
+    importer = ProjectImporter(client, state, PerformanceConfig())
+
+    result = await importer.import_resource(
+        "projects",
+        1,
+        {
+            "name": "dev_Project",
+            "organization": 7,
+            "credential": 9,
+            "scm_type": "git",
+            "scm_url": "https://example.com/repo.git",
+        },
+    )
+
+    assert result is not None
+    assert result["_already_migrated"] is True
+    assert "credential attached" in result["_skip_reason"]
+    assert client.update_calls == [("projects", 101, {"credential": 209})]
+
+
+@pytest.mark.asyncio
 async def test_project_importer_schedule_followup_wait_and_factory(monkeypatch):
     state = FakeState(mapped_ids={("projects", 1): 101})
     client = FakeTargetClient()
