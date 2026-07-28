@@ -1128,7 +1128,7 @@ make build-test
 
 The default workflow is container-first and only requires a container runtime on
 the host. The dedicated `container/Containerfile.test` image installs Python,
-Node, nginx, and the project test dependencies so the main suite does not rely
+Node 24, nginx, and the project test dependencies so the main suite does not rely
 on a host-local Python or Node installation.
 
 Integration checks that require live AAP or Vault systems should be kept behind
