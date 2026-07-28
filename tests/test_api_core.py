@@ -228,13 +228,76 @@ def test_seed_connections_from_env_encryption_and_defaults(
     session = session_factory()
     connections = session.query(Connection).order_by(Connection.role).all()
 
-    assert [conn.role for conn in connections] == ["source", "target"]
-    assert crypto.decrypt_token(connections[0].token) == "source-token"
-    assert connections[0].verify_ssl is False
-    assert connections[0].timeout == 45
-    assert crypto.decrypt_token(connections[1].token) == "target-token"
-    assert connections[1].verify_ssl is True
-    assert connections[1].timeout == 30
+    assert [conn.role for conn in connections] == ["destination", "source"]
+    assert crypto.decrypt_token(connections[1].token) == "source-token"
+    assert connections[1].verify_ssl is False
+    assert connections[1].timeout == 45
+    assert crypto.decrypt_token(connections[0].token) == "target-token"
+    assert connections[0].verify_ssl is True
+    assert connections[0].timeout == 30
+    session.close()
+
+
+def test_seed_connections_does_not_override_existing_db_values(
+    monkeypatch: pytest.MonkeyPatch, session_factory: sessionmaker
+) -> None:
+    """SOURCE__/TARGET__ env must not replace connections already in the DB."""
+    from aap_migration.api.crypto import encrypt_token
+
+    session = session_factory()
+    session.add(
+        Connection(
+            name="UI Source",
+            url="https://ui-source.example.com",
+            token=encrypt_token("ui-source-token"),
+            role="source",
+            type="awx",
+        )
+    )
+    session.add(
+        Connection(
+            name="UI Destination",
+            url="https://ui-dest.example.com",
+            token=encrypt_token("ui-dest-token"),
+            role="destination",
+            type="aap",
+        )
+    )
+    session.commit()
+    session.close()
+
+    monkeypatch.setenv("SOURCE__URL", "https://env-source.example.com")
+    monkeypatch.setenv("SOURCE__TOKEN", "env-source-token")
+    monkeypatch.setenv("TARGET__URL", "https://env-target.example.com")
+    monkeypatch.setenv("TARGET__TOKEN", "env-target-token")
+
+    _seed_connections_from_env(session_factory)
+
+    session = session_factory()
+    connections = session.query(Connection).order_by(Connection.name).all()
+    assert len(connections) == 2
+    assert [(c.name, c.url, crypto.decrypt_token(c.token)) for c in connections] == [
+        ("UI Destination", "https://ui-dest.example.com", "ui-dest-token"),
+        ("UI Source", "https://ui-source.example.com", "ui-source-token"),
+    ]
+    session.close()
+
+
+def test_seed_connections_skips_placeholder_env_values(
+    monkeypatch: pytest.MonkeyPatch, session_factory: sessionmaker
+) -> None:
+    monkeypatch.setenv("SOURCE__URL", "https://<source_aap_url>/api/v2")
+    monkeypatch.setenv("SOURCE__TOKEN", "xxxxx")
+    monkeypatch.setenv("TARGET__URL", "https://target.example.com")
+    monkeypatch.setenv("TARGET__TOKEN", "real-target-token")
+
+    _seed_connections_from_env(session_factory)
+
+    session = session_factory()
+    connections = session.query(Connection).all()
+    assert len(connections) == 1
+    assert connections[0].role == "destination"
+    assert connections[0].url == "https://target.example.com"
     session.close()
 
 

@@ -2,7 +2,7 @@ export interface Connection {
   id: string;
   name: string;
   type: 'awx' | 'aap';
-  role: 'source' | 'destination';
+  role: 'source' | 'destination' | 'target';
   url: string;
   token: string;
   verify_ssl: boolean;

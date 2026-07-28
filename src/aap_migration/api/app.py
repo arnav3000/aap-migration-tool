@@ -164,29 +164,71 @@ def _recover_stale_jobs(session_factory: sessionmaker) -> None:
         session.close()
 
 
+def _is_placeholder_env_value(value: str | None) -> bool:
+    """Return True for empty or template-style SOURCE__/TARGET__ values."""
+    if value is None:
+        return True
+    cleaned = value.strip().strip('"').strip("'")
+    if not cleaned:
+        return True
+    # Template markers from .env.example / container/.env
+    if "<" in cleaned and ">" in cleaned:
+        return True
+    placeholders = {
+        "xxxxx",
+        "xxxxxx",
+        "changeme",
+        "your-token",
+        "your-source-token",
+        "your-target-token",
+    }
+    return cleaned.lower() in placeholders
+
+
 def _seed_connections_from_env(session_factory: sessionmaker) -> None:
-    """Auto-create connections from SOURCE__*/TARGET__* env vars if DB is empty."""
+    """Bootstrap missing connections from SOURCE__/TARGET__ env vars.
+
+    Existing DB connections are never updated or replaced. Each role is seeded
+    independently only when that role is absent, and placeholder env values are
+    ignored so template `.env` files cannot wipe UI-configured instances.
+    """
     from aap_migration.api.crypto import encrypt_token
 
     session = session_factory()
     try:
-        if session.query(Connection).count() > 0:
-            return
+        existing = session.query(Connection).all()
+        has_source = any(c.role == "source" for c in existing)
+        has_destination = any(c.role in ("destination", "target") for c in existing)
 
-        for role, prefix in [("source", "SOURCE__"), ("target", "TARGET__")]:
+        # (db_role, env_prefix, default_type)
+        roles_to_seed: list[tuple[str, str, str, bool]] = [
+            ("source", "SOURCE__", "awx", has_source),
+            ("destination", "TARGET__", "aap", has_destination),
+        ]
+
+        created = False
+        for role, prefix, default_type, already_present in roles_to_seed:
+            if already_present:
+                continue
             url = os.environ.get(f"{prefix}URL")
             token = os.environ.get(f"{prefix}TOKEN")
-            if url and token:
-                conn = Connection(
-                    name=f"{role.capitalize()} AAP",
-                    url=url,
-                    token=encrypt_token(token),
-                    role=role,
-                    verify_ssl=os.environ.get(f"{prefix}VERIFY_SSL", "true").lower() == "true",
-                    timeout=int(os.environ.get(f"{prefix}TIMEOUT", "30")),
-                )
-                session.add(conn)
-        session.commit()
+            if _is_placeholder_env_value(url) or _is_placeholder_env_value(token):
+                continue
+            assert url is not None and token is not None  # narrowed by placeholder check
+            conn = Connection(
+                name=f"{role.capitalize()} AAP",
+                url=url.strip().strip('"').strip("'"),
+                token=encrypt_token(token.strip().strip('"').strip("'")),
+                type=default_type,
+                role=role,
+                verify_ssl=os.environ.get(f"{prefix}VERIFY_SSL", "true").lower() == "true",
+                timeout=int(os.environ.get(f"{prefix}TIMEOUT", "30")),
+            )
+            session.add(conn)
+            created = True
+
+        if created:
+            session.commit()
     except Exception:
         session.rollback()
     finally:

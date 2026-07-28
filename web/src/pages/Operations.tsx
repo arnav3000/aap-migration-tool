@@ -109,11 +109,11 @@ export function Operations() {
         </>
       )}
 
-      {connections.filter(c => c.role === 'destination').length > 0 && (
+      {connections.filter(c => c.role === 'destination' || c.role === 'target').length > 0 && (
         <>
           <Title headingLevel="h2" size="lg" style={{ marginBottom: 8 }}>Destinations</Title>
           <Flex style={{ marginBottom: 16 }}>
-            {connections.filter(c => c.role === 'destination').map(conn => (
+            {connections.filter(c => c.role === 'destination' || c.role === 'target').map(conn => (
               <FlexItem key={conn.id}>
                 <Button
                   variant={selectedId === conn.id ? 'primary' : 'secondary'}
