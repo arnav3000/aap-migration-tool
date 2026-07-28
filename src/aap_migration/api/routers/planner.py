@@ -610,9 +610,10 @@ async def _migrate_resource_type(
                         failed += 1
                         continue
 
-                if name_prefix and rtype not in ("users", "settings", "host_inventory_memberships"):
-                    if "name" in resource:
-                        resource["name"] = f"{name_prefix}{resource['name']}"
+                if name_prefix:
+                    from aap_migration.utils.naming import apply_name_prefix
+
+                    apply_name_prefix(rtype, resource, name_prefix)
 
                 exported += 1
 

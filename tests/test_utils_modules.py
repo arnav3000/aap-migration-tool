@@ -334,3 +334,23 @@ def test_version_validation_parsing_and_metadata() -> None:
         validate_version_compatibility("bad", "2.6.0")
 
     assert get_version_info("bad")["major"] == 0
+
+
+def test_apply_name_prefix_skips_managed_credential_types() -> None:
+    from aap_migration.utils.naming import apply_name_prefix
+
+    managed = {"name": "Machine", "managed": True}
+    apply_name_prefix("credential_types", managed, "dev_")
+    assert managed["name"] == "Machine"
+
+    custom = {"name": "MyVault", "managed": False}
+    apply_name_prefix("credential_types", custom, "dev_")
+    assert custom["name"] == "dev_MyVault"
+
+    cred = {"name": "deploy-key"}
+    apply_name_prefix("credentials", cred, "dev_")
+    assert cred["name"] == "dev_deploy-key"
+
+    user = {"name": "admin"}
+    apply_name_prefix("users", user, "dev_")
+    assert user["name"] == "admin"
