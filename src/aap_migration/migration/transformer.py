@@ -319,6 +319,23 @@ class DataTransformer:
     # Dependency Validation Methods (NEW)
     # ==========================================================================
 
+    def _extract_dependency_ids_from_summary(self, data: dict[str, Any]) -> None:
+        """Copy FK IDs from summary_fields onto top-level fields before dep checks.
+
+        Many AAP list/detail payloads omit top-level FK IDs while still exposing
+        them under summary_fields. Validation must see those IDs or required
+        deps are silently skipped.
+        """
+        summary = data.get("summary_fields")
+        if not isinstance(summary, dict):
+            return
+        for field in self.DEPENDENCIES:
+            if data.get(field):
+                continue
+            info = summary.get(field)
+            if isinstance(info, dict) and info.get("id") is not None:
+                data[field] = info["id"]
+
     def _validate_dependencies(
         self,
         data: dict[str, Any],
@@ -345,18 +362,31 @@ class DataTransformer:
             # No dependencies defined for this resource type
             return
 
+        self._extract_dependency_ids_from_summary(data)
+
         source_id = coerce_source_id(data)
 
         for field, dep_resource_type in self.DEPENDENCIES.items():
             dep_source_id = data.get(field)
+            is_required = field in self.REQUIRED_DEPENDENCIES
 
-            # Skip if field is not set or is None/0
+            # Required FK absent entirely → skip (cannot import correctly)
             if not dep_source_id:
+                if is_required:
+                    source_name = data.get("name") or data.get("username") or source_id
+                    self.stats["skipped_count"] += 1
+                    raise SkipResourceError(
+                        f"Skipping '{source_name}': required field '{field}' "
+                        f"({dep_resource_type}) is missing from the source record",
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        missing_dependency=f"{dep_resource_type}:missing",
+                    )
                 continue
 
             # Check if the dependency exists in id_mappings
             if not self.state.has_source_mapping(dep_resource_type, dep_source_id):
-                if field in self.REQUIRED_DEPENDENCIES:
+                if is_required:
                     # Required dependency is missing - skip this resource
                     source_name = data.get("name") or data.get("username") or source_id
                     logger.warning(
@@ -1036,12 +1066,41 @@ class CredentialTransformer(DataTransformer):
         "user": "users",
         "team": "teams",
     }
-    # Organization and credential_type are required; user/team ownership is optional
-    REQUIRED_DEPENDENCIES = {"organization", "credential_type"}
+    # credential_type is always required. organization/user/team are optional ownership —
+    # AAP allows user/team-owned credentials with organization=null; import falls back to admin.
+    REQUIRED_DEPENDENCIES = {"credential_type"}
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.external_credential_type_ids: set[int] | None = None
+
+    def _extract_credential_fks(self, data: dict[str, Any]) -> None:
+        """Ensure organization/credential_type IDs exist before dependency checks."""
+        summary = data.get("summary_fields") or {}
+        if not data.get("organization"):
+            org_info = summary.get("organization")
+            if isinstance(org_info, dict) and org_info.get("id") is not None:
+                data["organization"] = org_info["id"]
+        if not data.get("credential_type"):
+            cred_type_info = summary.get("credential_type")
+            if isinstance(cred_type_info, dict) and cred_type_info.get("id") is not None:
+                data["credential_type"] = cred_type_info["id"]
+            elif "related" in data and data["related"].get("credential_type"):
+                import re
+
+                match = re.search(
+                    r"/credential_types/(\d+)/", str(data["related"]["credential_type"])
+                )
+                if match:
+                    data["credential_type"] = int(match.group(1))
+
+    def _validate_dependencies(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> None:
+        self._extract_credential_fks(data)
+        super()._validate_dependencies(data, resource_type)
 
     def _load_external_credential_types(self) -> None:
         """Load IDs of external credential types from export files.
@@ -2082,8 +2141,8 @@ class ExecutionEnvironmentTransformer(DataTransformer):
         "organization": "organizations",
         "credential": "credentials",
     }
-    # Organization is required; credential (for private registries) is optional
-    REQUIRED_DEPENDENCIES = {"organization"}
+    # Organization is optional (global/managed EEs have none); credential is optional
+    REQUIRED_DEPENDENCIES = set()
 
 
 class InventoryGroupTransformer(DataTransformer):
@@ -2396,14 +2455,36 @@ class CredentialInputSourceTransformer(DataTransformer):
     """Transformer for credential input source resources.
 
     These resources link one credential's input field to another credential.
-    They depend on both the "parent" credential and the "source" credential.
+    They depend on both the target credential and the source credential.
+    AAP API field names are ``target_credential`` and ``source_credential``.
     """
 
     DEPENDENCIES = {
-        "credential": "credentials",  # The credential being modified
-        "source_credential": "credentials",  # The credential providing the input
+        "target_credential": "credentials",
+        "source_credential": "credentials",
     }
-    REQUIRED_DEPENDENCIES = {"credential", "source_credential"}
+    REQUIRED_DEPENDENCIES = {"target_credential", "source_credential"}
+
+    def _normalize_target_credential_field(self, data: dict[str, Any]) -> None:
+        """Normalize legacy ``credential`` alias to ``target_credential``."""
+        if not data.get("target_credential") and data.get("credential"):
+            data["target_credential"] = data.pop("credential")
+        elif "credential" in data and data.get("target_credential"):
+            data.pop("credential", None)
+
+    def _validate_dependencies(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> None:
+        self._normalize_target_credential_field(data)
+        super()._validate_dependencies(data, resource_type)
+
+    def _apply_specific_transformations(
+        self, data: dict[str, Any], resource_type: str
+    ) -> dict[str, Any]:
+        self._normalize_target_credential_field(data)
+        return data
 
 
 class JobsTransformer(DataTransformer):
@@ -2522,9 +2603,9 @@ class ApplicationTransformer(DataTransformer):
 
         # Add migration notes
         data["_migration_notes"] = {
-            "client_secret_action": "will_be_auto_generated"
-            if data.get("_requires_new_secret")
-            else "none",
+            "client_secret_action": (
+                "will_be_auto_generated" if data.get("_requires_new_secret") else "none"
+            ),
             "redirect_uris_action": "review_for_environment",
             "external_systems_action": "update_with_new_client_id_secret",
         }
@@ -2624,9 +2705,9 @@ class SettingsTransformer(DataTransformer):
             "safe_to_copy_count": len(categorized["safe_to_copy"]),
             "review_required_count": len(categorized["review_required"]),
             "sensitive_count": len(categorized["sensitive"]),
-            "auto_import_percentage": round(len(categorized["safe_to_copy"]) / len(data) * 100, 1)
-            if len(data) > 0
-            else 0,
+            "auto_import_percentage": (
+                round(len(categorized["safe_to_copy"]) / len(data) * 100, 1) if len(data) > 0 else 0
+            ),
         }
 
         return categorized

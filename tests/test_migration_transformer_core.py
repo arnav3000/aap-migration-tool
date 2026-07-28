@@ -164,10 +164,16 @@ def test_generate_keys_and_base_transformer_schema_flow(tmp_path):
     assert transformer.stats["fields_added"] == 1
     assert transformer.stats["fields_renamed"] == 2
 
-    with pytest.raises(SkipResourceError, match="references non-exported organizations 404"):
+    with pytest.raises(SkipResourceError, match="organizations \\(source id 404\\)"):
         transformer.transform_resource(
             "widgets",
             {"id": 56, "name": "Missing Org", "organization": 404},
+        )
+
+    with pytest.raises(SkipResourceError, match="required field 'organization'"):
+        transformer.transform_resource(
+            "widgets",
+            {"id": 57, "name": "No Org Field"},
         )
 
 

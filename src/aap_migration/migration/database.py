@@ -26,6 +26,75 @@ _engine: Engine | None = None
 _SessionFactory: sessionmaker | None = None
 
 
+def _ensure_source_key_columns(engine: Engine) -> None:
+    """Add source_key columns/indexes on existing databases (create_all is not enough)."""
+    dialect = engine.dialect.name
+    tables = ("migration_progress", "id_mappings")
+    try:
+        with engine.begin() as conn:
+            for table in tables:
+                if dialect == "sqlite":
+                    cols = {
+                        row[1]
+                        for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+                    }
+                    if "source_key" not in cols:
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {table} ADD COLUMN source_key "
+                                "VARCHAR(128) NOT NULL DEFAULT ''"
+                            )
+                        )
+                        logger.info("added_source_key_column", table=table)
+                elif dialect == "postgresql":
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS source_key "
+                            "VARCHAR(128) NOT NULL DEFAULT ''"
+                        )
+                    )
+                    # Replace legacy unique constraints that omit source_key
+                    if table == "migration_progress":
+                        conn.execute(
+                            text(
+                                "ALTER TABLE migration_progress "
+                                "DROP CONSTRAINT IF EXISTS uq_resource_type_source_id"
+                            )
+                        )
+                        conn.execute(
+                            text(
+                                "DO $$ BEGIN "
+                                "IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+                                "WHERE conname = 'uq_progress_source_key_type_id') THEN "
+                                "ALTER TABLE migration_progress ADD CONSTRAINT "
+                                "uq_progress_source_key_type_id "
+                                "UNIQUE (source_key, resource_type, source_id); "
+                                "END IF; END $$;"
+                            )
+                        )
+                    else:
+                        conn.execute(
+                            text(
+                                "ALTER TABLE id_mappings "
+                                "DROP CONSTRAINT IF EXISTS uq_resource_type_source_id_mapping"
+                            )
+                        )
+                        conn.execute(
+                            text(
+                                "DO $$ BEGIN "
+                                "IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+                                "WHERE conname = 'uq_mapping_source_key_type_id') THEN "
+                                "ALTER TABLE id_mappings ADD CONSTRAINT "
+                                "uq_mapping_source_key_type_id "
+                                "UNIQUE (source_key, resource_type, source_id); "
+                                "END IF; END $$;"
+                            )
+                        )
+    except Exception as e:
+        # Non-fatal: fresh create_all DBs already have the column; legacy DBs may need reset
+        logger.warning("source_key_schema_ensure_failed", error=str(e))
+
+
 def _enable_sqlite_foreign_keys(dbapi_conn: Any, connection_record: Any) -> None:
     """
     Enable foreign key constraints for SQLite connections.
@@ -164,6 +233,9 @@ def init_database(
 
         # Create all tables
         Base.metadata.create_all(_engine)
+
+        # Best-effort upgrade for existing DBs that predate source_key scoping
+        _ensure_source_key_columns(_engine)
 
         # Create session factory
         _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False)

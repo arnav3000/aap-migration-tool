@@ -55,6 +55,16 @@ class MigrationProgress(Base):
     source_id: Mapped[int] = mapped_column(
         BigInteger, nullable=False, index=True, comment="ID in source AAP 2.3 system"
     )
+    # Isolates multi-source plans that share one state DB (numeric IDs collide across AAPs).
+    # Empty string = single-source / CLI default.
+    source_key: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        default="",
+        server_default="",
+        index=True,
+        comment="Plan source / connection scope key (empty for single-source)",
+    )
     source_name: Mapped[str] = mapped_column(
         String(512), nullable=False, comment="Name of resource in source system"
     )
@@ -113,7 +123,12 @@ class MigrationProgress(Base):
 
     # Constraints
     __table_args__ = (
-        UniqueConstraint("resource_type", "source_id", name="uq_resource_type_source_id"),
+        UniqueConstraint(
+            "source_key",
+            "resource_type",
+            "source_id",
+            name="uq_progress_source_key_type_id",
+        ),
         CheckConstraint(
             "status IN ('pending', 'in_progress', 'completed', 'failed', 'skipped')",
             name="ck_migration_progress_status",
@@ -229,6 +244,15 @@ class IDMapping(Base):
     source_id: Mapped[int] = mapped_column(
         BigInteger, nullable=False, index=True, comment="ID in source AAP 2.3 system"
     )
+    # Isolates multi-source plans that share one state DB (numeric IDs collide across AAPs).
+    source_key: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        default="",
+        server_default="",
+        index=True,
+        comment="Plan source / connection scope key (empty for single-source)",
+    )
     target_id: Mapped[int | None] = mapped_column(
         BigInteger,
         nullable=True,
@@ -266,7 +290,12 @@ class IDMapping(Base):
 
     # Constraints
     __table_args__ = (
-        UniqueConstraint("resource_type", "source_id", name="uq_resource_type_source_id_mapping"),
+        UniqueConstraint(
+            "source_key",
+            "resource_type",
+            "source_id",
+            name="uq_mapping_source_key_type_id",
+        ),
         Index("idx_resource_type_target_id", "resource_type", "target_id"),
         Index("idx_source_id_target_id", "source_id", "target_id"),
     )

@@ -1668,14 +1668,16 @@ class InstanceImporter(ResourceImporter):
         if self.state.is_migrated(resource_type, source_id):
             target_id = self.state.get_mapped_id(resource_type, source_id)
             self.stats["skipped_count"] += 1
-            if target_id is not None:
-                return {
-                    "id": target_id,
-                    "hostname": source_hostname,
-                    "_already_migrated": True,
-                    "_skip_reason": f"Instance already mapped (target id {target_id})",
-                }
-            return None
+            return {
+                "id": target_id,
+                "hostname": source_hostname,
+                "_already_migrated": True,
+                "_skip_reason": (
+                    f"Instance already mapped (target id {target_id})"
+                    if target_id is not None
+                    else "Instance already marked migrated in state"
+                ),
+            }
 
         self.state.mark_in_progress(
             resource_type=resource_type,
@@ -5472,51 +5474,74 @@ class SystemJobTemplateImporter(ResourceImporter):
 class CredentialInputSourceImporter(ResourceImporter):
     """Importer for credential input source resources.
 
-    Credential input sources link credential input fields to values
-    from other credentials (e.g., a Vault credential).
+    Credential input sources link credential input fields to values from other
+    credentials (e.g. HashiCorp Vault). AAP exposes them with
+    ``target_credential`` / ``source_credential`` fields.
     """
 
     DEPENDENCIES: dict[str, str] = {
-        "credential": "credentials",  # The credential being modified
-        "source_credential": "credentials",  # The credential providing the input
+        "target_credential": "credentials",
+        "source_credential": "credentials",
     }
+
+    async def import_resource(
+        self,
+        resource_type: str,
+        source_id: int,
+        data: dict[str, Any],
+        resolve_dependencies: bool = True,
+    ) -> dict[str, Any] | None:
+        """Import one credential input source (planner / single-resource path)."""
+        _ = resolve_dependencies
+        results = await self.import_credential_input_sources(
+            [{**data, "_source_id": source_id, "id": source_id}]
+        )
+        if not results:
+            # Prefer last recorded import error for this source_id when available
+            for err in reversed(self.import_errors):
+                if err.get("source_id") == source_id:
+                    return None
+            self.stats["skipped_count"] += 1
+            return {
+                "_skipped": True,
+                "_skip_reason": (
+                    "Credential input source skipped — missing fields or "
+                    "target/source credential not mapped"
+                ),
+            }
+        return results[0]
 
     async def import_credential_input_sources(
         self,
         input_sources: list[dict[str, Any]],
         progress_callback: Callable[[int, int, int], None] | None = None,
     ) -> list[dict[str, Any]]:
-        """Import multiple credential input sources by patching existing credentials.
-
-        This importer does not create new resources. Instead, it modifies the `inputs`
-        field of an existing credential to link it to another source credential.
+        """Import credential input sources via the AAP credential_input_sources API.
 
         Args:
             input_sources: List of credential input source data
             progress_callback: Optional callback for progress updates.
 
         Returns:
-            List of patched credential data
+            List of created/mapped input source records
         """
-        results = []
-        # Removed local success_count, failed_count, skipped_count
+        results: list[dict[str, Any]] = []
 
         for input_source in input_sources:
             source_id = input_source.pop("_source_id", input_source.get("id"))
-            # `credential` is the ID of the credential whose input is being sourced.
-            source_target_credential_id = input_source.get(
-                "credential"
-            )  # Renamed for clarity to avoid confusion with the source_credential for the input value.
+            # Prefer AAP field name; accept legacy "credential" alias from older exports
+            source_target_credential_id = input_source.get("target_credential")
+            if source_target_credential_id is None:
+                source_target_credential_id = input_source.get("credential")
             source_input_field_name = input_source.get("input_field_name")
-            # `source_credential` is the ID of the credential that provides the source (e.g., a HashiCorp Vault credential).
             source_source_credential_id = input_source.get("source_credential")
-            source_source_credential_field_name = input_source.get("source_credential_field_name")
+            metadata = input_source.get("metadata") or {}
+            description = input_source.get("description")
 
             if (
                 source_target_credential_id is None
                 or not source_input_field_name
                 or source_source_credential_id is None
-                or not source_source_credential_field_name
             ):
                 logger.warning(
                     "credential_input_source_missing_fields",
@@ -5524,6 +5549,13 @@ class CredentialInputSourceImporter(ResourceImporter):
                     message="Skipping credential input source due to missing required fields",
                 )
                 self.stats["error_count"] += 1
+                self.import_errors.append(
+                    {
+                        "source_id": int(source_id) if source_id is not None else None,
+                        "error": "Missing target_credential, source_credential, or input_field_name",
+                        "error_type": "ValidationError",
+                    }
+                )
                 if progress_callback:
                     progress_callback(
                         self.stats["imported_count"],
@@ -5534,7 +5566,25 @@ class CredentialInputSourceImporter(ResourceImporter):
 
             source_id_int = int(source_id)
 
-            # Check if the credential associated with this input source has already been migrated.
+            if self.state.is_migrated("credential_input_sources", source_id_int):
+                target_id = self.state.get_mapped_id("credential_input_sources", source_id_int)
+                self.stats["skipped_count"] += 1
+                if target_id is not None:
+                    results.append(
+                        {
+                            "id": target_id,
+                            "_already_migrated": True,
+                            "_skip_reason": (f"Already migrated (target id {target_id})"),
+                        }
+                    )
+                if progress_callback:
+                    progress_callback(
+                        self.stats["imported_count"],
+                        self.stats["error_count"],
+                        self.stats["skipped_count"],
+                    )
+                continue
+
             target_credential_id = self.state.get_mapped_id(
                 "credentials", int(source_target_credential_id)
             )
@@ -5546,6 +5596,16 @@ class CredentialInputSourceImporter(ResourceImporter):
                     message="Skipping credential input source - target credential not found",
                 )
                 self.stats["error_count"] += 1
+                self.import_errors.append(
+                    {
+                        "source_id": source_id_int,
+                        "error": (
+                            f"Target credential (source id {source_target_credential_id}) "
+                            "was not migrated"
+                        ),
+                        "error_type": "DependencyError",
+                    }
+                )
                 if progress_callback:
                     progress_callback(
                         self.stats["imported_count"],
@@ -5554,7 +5614,6 @@ class CredentialInputSourceImporter(ResourceImporter):
                     )
                 continue
 
-            # Resolve the source_credential to its target ID
             target_source_credential_id = self.state.get_mapped_id(
                 "credentials", int(source_source_credential_id)
             )
@@ -5566,6 +5625,16 @@ class CredentialInputSourceImporter(ResourceImporter):
                     message="Skipping credential input source - source credential not found",
                 )
                 self.stats["error_count"] += 1
+                self.import_errors.append(
+                    {
+                        "source_id": source_id_int,
+                        "error": (
+                            f"Source credential (source id {source_source_credential_id}) "
+                            "was not migrated"
+                        ),
+                        "error_type": "DependencyError",
+                    }
+                )
                 if progress_callback:
                     progress_callback(
                         self.stats["imported_count"],
@@ -5574,60 +5643,68 @@ class CredentialInputSourceImporter(ResourceImporter):
                     )
                 continue
 
-            # Construct the value to patch into the target credential's 'inputs'
-            # Format: "$<target_source_credential_id>.<source_credential_field_name>$"
-            new_input_value = (
-                f"${target_source_credential_id}.{source_source_credential_field_name}$"
+            payload: dict[str, Any] = {
+                "target_credential": target_credential_id,
+                "source_credential": target_source_credential_id,
+                "input_field_name": source_input_field_name,
+            }
+            if metadata:
+                payload["metadata"] = metadata
+            if description:
+                payload["description"] = description
+
+            self.state.mark_in_progress(
+                resource_type="credential_input_sources",
+                source_id=source_id_int,
+                source_name=str(
+                    input_source.get("name") or f"{source_input_field_name}@{target_credential_id}"
+                ),
+                phase="import",
             )
 
             try:
-                # Fetch the target credential to get its current inputs
-                # This is a GET, then PATCH - ensures other inputs are preserved
-                target_credential_obj = await self.client.get(
-                    f"credentials/{target_credential_id}/"
-                )
-                current_inputs = target_credential_obj.get("inputs", {})
+                # Prefer create via the credential_input_sources endpoint
+                result = await self.client.post("credential_input_sources/", json_data=payload)
+                if not isinstance(result, dict):
+                    result = {"id": target_credential_id}
 
-                # Update the specific input field
-                current_inputs[source_input_field_name] = new_input_value
-
-                # Patch the target credential with the updated inputs
-                # Note: This is an important distinction: we modify an existing resource,
-                # not create a new one. The target_id for the state mapping will be
-                # the ID of the credential that was patched.
-                await self.client.patch(
-                    f"credentials/{target_credential_id}/",
-                    json_data={"inputs": current_inputs},
-                )
-
-                # Mark as completed (even though it's a PATCH, not CREATE)
+                created_id = int(result.get("id") or target_credential_id)
                 self.state.mark_completed(
                     resource_type="credential_input_sources",
                     source_id=source_id_int,
-                    target_id=target_credential_id,  # Link to the patched credential
-                    source_name=input_source.get("name", f"CIS-{source_id_int}"),
-                    target_name=target_credential_obj.get("name"),
+                    target_id=created_id,
+                    source_name=str(
+                        input_source.get("name")
+                        or f"{source_input_field_name}@{target_credential_id}"
+                    ),
+                    target_name=result.get("input_field_name") or source_input_field_name,
                 )
                 self.stats["imported_count"] += 1
-                results.append(
-                    {"id": target_credential_id, "name": target_credential_obj.get("name")}
-                )
+                results.append(result)
                 logger.info(
-                    "credential_input_source_patched",
+                    "credential_input_source_created",
                     source_id=source_id,
                     target_credential_id=target_credential_id,
+                    source_credential_id=target_source_credential_id,
                     input_field=source_input_field_name,
-                    new_input_value=new_input_value,
+                    target_id=created_id,
                 )
 
             except Exception as e:
                 self.stats["error_count"] += 1
                 logger.error(
-                    "credential_input_source_patch_failed",
+                    "credential_input_source_create_failed",
                     source_id=source_id,
                     target_credential_id=target_credential_id,
                     error=str(e),
                     exc_info=True,
+                )
+                self.import_errors.append(
+                    {
+                        "source_id": source_id_int,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    }
                 )
                 self.state.mark_failed(
                     resource_type="credential_input_sources",
