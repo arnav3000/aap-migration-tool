@@ -323,9 +323,10 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 .st{{display:inline-block;font-size:.68rem;font-weight:700;padding:2px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:.3px}}
 .st-c{{background:var(--pass-bg);color:var(--pass)}}.st-f{{background:var(--fail-bg);color:var(--fail)}}
 .st-s{{background:var(--skip-bg);color:var(--skip)}}.st-p{{background:#e1e4e8;color:#57606a}}
-
-/* ── Object browser table ── */
+.st-fc{{background:var(--warn-bg);color:var(--warn)}}
+.obj-tbl tr.row-fc{{background:var(--warn-bg)}}
 .obj-tbl td.err{{font-size:.78rem;color:var(--fail);max-width:350px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.obj-tbl td.note-fc{{color:var(--warn)}}
 .obj-tbl tr.row-f{{background:#fff5f5}}.obj-tbl tr.row-s{{background:#fffbe6}}.obj-tbl tr.row-p{{background:#f5f5f5}}
 .obj-tbl tr{{cursor:pointer}}.obj-tbl tr:hover{{background:#e8f0fe}}
 /* ── Field comparison panel ── */
@@ -500,10 +501,20 @@ function pctParts(parts,total){{
 function hcls(h){{return h==='red'?'h-r':h==='amber'?'h-a':'h-g'}}
 function hlbl(h){{return h.toUpperCase()}}
 function allTypes(){{return D.per_type.map(function(t){{return t.resource_type}}).sort()}}
-function stBadge(st){{var m={{c:'COMPLETED',f:'FAILED',s:'SKIPPED',p:'PENDING'}};return'<span class="st st-'+st+'">'+((m[st])||st)+'</span>'}}
+function stBadge(st,fc){{
+  var m={{c:'COMPLETED',f:'FAILED',s:'SKIPPED',p:'PENDING'}};
+  var h='<span class="st st-'+st+'">'+((m[st])||st)+'</span>';
+  if(fc)h+=' <span class="st st-fc" title="One or more fields differ from source">FIELDS CHANGED</span>';
+  return h;
+}}
 function stLabel(st){{var m={{c:'Completed',f:'Failed',s:'Skipped',p:'Pending'}};return m[st]||st}}
 function invForType(rt){{return INV[rt]||[]}}
 function invForTypeOrg(rt,org){{return(INV[rt]||[]).filter(function(e){{return e.o===org}})}}
+function matchesObjFilter(e){{
+  if(objSt==='fc')return !!e.fc;
+  if(objSt!=='all'&&e.st!==objSt)return false;
+  return true;
+}}
 
 /* ── Field comparison ── */
 var fdExpanded=null;
@@ -536,14 +547,14 @@ function toggleObjectDetail(rt,idx,rowEl){{
   var old=document.querySelector('.fd-row');if(old)old.remove();
   var items=INV[rt]||[];var e=items[idx];
   if(!e)return;
-  var stMap={{c:'Completed',f:'Failed',s:'Skipped',p:'Pending'}};
   var h='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.6rem .8rem;font-size:.82rem;margin-bottom:.6rem">';
   h+='<div><span style="color:var(--fg2)">Name:</span> <strong>'+esc(e.n)+'</strong></div>';
   h+='<div><span style="color:var(--fg2)">Type:</span> '+esc(rt)+'</div>';
   h+='<div><span style="color:var(--fg2)">Source ID:</span> '+(e.s!=null?e.s:'—')+'</div>';
   h+='<div><span style="color:var(--fg2)">Target ID:</span> '+(e.t!=null?e.t:'—')+'</div>';
   if(e.o)h+='<div><span style="color:var(--fg2)">Organization:</span> '+esc(e.o)+'</div>';
-  h+='<div><span style="color:var(--fg2)">Status:</span> <span class="st st-'+e.st+'">'+(stMap[e.st]||e.st)+'</span></div>';
+  h+='<div><span style="color:var(--fg2)">Status:</span> '+stBadge(e.st,e.fc)+'</div>';
+  if(e.fc)h+='<div style="grid-column:1/-1"><span style="color:var(--fg2)">Field parity:</span> <span style="color:var(--warn);font-weight:600">One or more fields differ from source (see comparison below)</span></div>';
   if(e.e)h+='<div style="grid-column:1/-1"><span style="color:var(--fg2)">Error:</span> <span style="color:var(--fail)">'+esc(e.e)+'</span></div>';
   h+='</div>';
   var td=FD[rt];
@@ -899,12 +910,15 @@ function renderOrgObj(orgName,rt){{
   if(!o){{orgObjType=null;orgDrill=null;renderOrgs();return}}
   var items=invForTypeOrg(rt,o.org_name);
   var filtered=items.filter(function(e){{
-    if(objSt!=='all'&&e.st!==objSt)return false;
+    if(!matchesObjFilter(e))return false;
     if(objSearch&&e.n.toLowerCase().indexOf(objSearch.toLowerCase())<0)return false;
     return true;
   }});
-  var cC=0,cF=0,cS=0,cP=0;
-  items.forEach(function(e){{if(e.st==='c')cC++;else if(e.st==='f')cF++;else if(e.st==='s')cS++;else cP++}});
+  var cC=0,cF=0,cS=0,cP=0,cFc=0;
+  items.forEach(function(e){{
+    if(e.st==='c')cC++;else if(e.st==='f')cF++;else if(e.st==='s')cS++;else cP++;
+    if(e.fc)cFc++;
+  }});
 
   var oSafe=esc(o.org_name).replace(/'/g,"\\\\'");
   var h='<div class="drill">';
@@ -915,6 +929,8 @@ function renderOrgObj(orgName,rt){{
   h+='<div class="card"><div class="v">'+fmt(items.length)+'</div><div class="l">Total objects</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'c\\';objPage=1;renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')">';
   h+='<div class="v ok">'+fmt(cC)+'</div><div class="l">Completed objects</div></div>';
+  if(cFc){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'fc\\';objPage=1;renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')">';
+  h+='<div class="v warn">'+fmt(cFc)+'</div><div class="l">Fields changed &#8594;</div></div>';}}
   if(cF){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'f\\';objPage=1;renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')">';
   h+='<div class="v bad">'+fmt(cF)+'</div><div class="l">Failed objects</div></div>';}}
   if(cS){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'s\\';objPage=1;renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')">';
@@ -933,16 +949,19 @@ var typeDrill=null,allObjView=null,allObjType='all';
 function allInvItems(){{
   var all=[];
   Object.keys(INV).forEach(function(rt){{
-    (INV[rt]||[]).forEach(function(e){{all.push({{_rt:rt,n:e.n,o:e.o,s:e.s,t:e.t,st:e.st,e:e.e,_ref:e}})}})
+    (INV[rt]||[]).forEach(function(e){{all.push({{_rt:rt,n:e.n,o:e.o,s:e.s,t:e.t,st:e.st,e:e.e,fc:e.fc,_ref:e}})}})
   }});
   return all;
 }}
 function renderAllObjects(){{
   var items=allInvItems();
-  var cC=0,cF=0,cS=0,cP=0;
-  items.forEach(function(e){{if(e.st==='c')cC++;else if(e.st==='f')cF++;else if(e.st==='s')cS++;else cP++}});
+  var cC=0,cF=0,cS=0,cP=0,cFc=0;
+  items.forEach(function(e){{
+    if(e.st==='c')cC++;else if(e.st==='f')cF++;else if(e.st==='s')cS++;else cP++;
+    if(e.fc)cFc++;
+  }});
   var filtered=items.filter(function(e){{
-    if(objSt!=='all'&&e.st!==objSt)return false;
+    if(!matchesObjFilter(e))return false;
     if(allObjType!=='all'&&e._rt!==allObjType)return false;
     if(objOrg&&(!e.o||e.o.toLowerCase().indexOf(objOrg.toLowerCase())<0))return false;
     if(objSearch&&e.n.toLowerCase().indexOf(objSearch.toLowerCase())<0)return false;
@@ -954,6 +973,7 @@ function renderAllObjects(){{
   h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr));">';
   h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'all\\';objPage=1;renderAllObjects()"><div class="v">'+fmt(items.length)+'</div><div class="l">Total objects</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'c\\';objPage=1;renderAllObjects()"><div class="v ok">'+fmt(cC)+'</div><div class="l">Completed objects</div></div>';
+  if(cFc){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'fc\\';objPage=1;renderAllObjects()"><div class="v warn">'+fmt(cFc)+'</div><div class="l">Fields changed &#8594;</div></div>';}}
   h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'f\\';objPage=1;renderAllObjects()"><div class="v'+(cF>0?' bad':' skip')+'">'+fmt(cF)+'</div><div class="l">Failed objects</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'s\\';objPage=1;renderAllObjects()"><div class="v skip">'+fmt(cS)+'</div><div class="l">Skipped objects</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'p\\';objPage=1;renderAllObjects()"><div class="v skip">'+fmt(cP)+'</div><div class="l">Pending objects</div></div>';
@@ -963,6 +983,7 @@ function renderAllObjects(){{
   h+='<select onchange="objSt=this.value;objPage=1;renderAllObjects()">';
   h+='<option value="all"'+(objSt==='all'?' selected':'')+'>All statuses</option>';
   h+='<option value="c"'+(objSt==='c'?' selected':'')+'>Completed</option>';
+  h+='<option value="fc"'+(objSt==='fc'?' selected':'')+'>Fields changed</option>';
   h+='<option value="f"'+(objSt==='f'?' selected':'')+'>Failed</option>';
   h+='<option value="s"'+(objSt==='s'?' selected':'')+'>Skipped</option>';
   h+='<option value="p"'+(objSt==='p'?' selected':'')+'>Pending</option>';
@@ -986,14 +1007,16 @@ function renderAllObjects(){{
   slice.forEach(function(e){{
     var invArr=INV[e._rt]||[];var idx=invArr.indexOf(e._ref);if(idx<0)for(var ii=0;invArr.length>ii;ii++){{if(invArr[ii].s===e.s&&invArr[ii].n===e.n){{idx=ii;break}}}}
     var oc=idx>=0?(' onclick="toggleObjectDetail(\\''+esc(e._rt)+'\\','+idx+',this)"'):' ';
-    h+='<tr class="row-'+e.st+'"'+oc+' title="Click for details">';
+    var rowCls='row-'+e.st+(e.fc?' row-fc':'');
+    h+='<tr class="'+rowCls+'"'+oc+' title="Click for details">';
     h+='<td><strong>'+esc(e.n)+'</strong></td>';
     h+='<td style="font-size:.78rem">'+esc(e._rt)+'</td>';
     h+='<td>'+esc(e.o||'—')+'</td>';
     h+='<td class="num">'+(e.s!=null?e.s:'—')+'</td>';
     h+='<td class="num">'+(e.t!=null?e.t:'—')+'</td>';
-    h+='<td>'+stBadge(e.st)+'</td>';
-    h+='<td class="err" title="'+esc(e.e||'')+'">'+esc(e.e||'—')+'</td>';
+    h+='<td>'+stBadge(e.st,e.fc)+'</td>';
+    var note=e.e||(e.fc?'Field differences vs source':'');
+    h+='<td class="'+(e.e?'err':(e.fc?'note-fc':''))+'" title="'+esc(note)+'">'+esc(note||'—')+'</td>';
     h+='</tr>';
   }});
   h+='</tbody></table>';
@@ -1115,14 +1138,17 @@ var objPage=1,objSt='all',objOrg='',objSearch='';
 function renderTypeDrill(rt){{
   var items=invForType(rt);
   var filtered=items.filter(function(e){{
-    if(objSt!=='all'&&e.st!==objSt)return false;
+    if(!matchesObjFilter(e))return false;
     if(objOrg&&(!e.o||e.o.toLowerCase().indexOf(objOrg.toLowerCase())<0))return false;
     if(objSearch&&e.n.toLowerCase().indexOf(objSearch.toLowerCase())<0)return false;
     return true;
   }});
 
-  var cC=0,cF=0,cS=0,cP=0;
-  items.forEach(function(e){{if(e.st==='c')cC++;else if(e.st==='f')cF++;else if(e.st==='s')cS++;else cP++}});
+  var cC=0,cF=0,cS=0,cP=0,cFc=0;
+  items.forEach(function(e){{
+    if(e.st==='c')cC++;else if(e.st==='f')cF++;else if(e.st==='s')cS++;else cP++;
+    if(e.fc)cFc++;
+  }});
 
   var h='<div class="drill">';
   h+='<button class="back-btn" onclick="objSt=\\'all\\';objOrg=\\'\\';objSearch=\\'\\';objPage=1;typeDrill=null;renderTypes()">&#9664; Back to all types</button>';
@@ -1132,6 +1158,8 @@ function renderTypeDrill(rt){{
   h+='<div class="card"><div class="v">'+fmt(items.length)+'</div><div class="l">Total objects</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'c\\';objPage=1;renderTypeDrill(\\''+esc(rt)+'\\')">';
   h+='<div class="v ok">'+fmt(cC)+'</div><div class="l">Completed objects</div></div>';
+  if(cFc){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'fc\\';objPage=1;renderTypeDrill(\\''+esc(rt)+'\\')">';
+  h+='<div class="v warn">'+fmt(cFc)+'</div><div class="l">Fields changed &#8594;</div></div>';}}
   if(cF){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'f\\';objPage=1;renderTypeDrill(\\''+esc(rt)+'\\')">';
   h+='<div class="v bad">'+fmt(cF)+'</div><div class="l">Failed objects</div></div>';}}
   if(cS){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'s\\';objPage=1;renderTypeDrill(\\''+esc(rt)+'\\')">';
@@ -1160,6 +1188,7 @@ function renderObjectTable(items,filtered,targetEl,backLabel,renderSelf,rt){{
   h+='<select onchange="objSt=this.value;objPage=1;'+renderSelf+'">';
   h+='<option value="all"'+(objSt==='all'?' selected':'')+'>All statuses</option>';
   h+='<option value="c"'+(objSt==='c'?' selected':'')+'>Completed</option>';
+  h+='<option value="fc"'+(objSt==='fc'?' selected':'')+'>Fields changed</option>';
   h+='<option value="f"'+(objSt==='f'?' selected':'')+'>Failed</option>';
   h+='<option value="s"'+(objSt==='s'?' selected':'')+'>Skipped</option>';
   h+='<option value="p"'+(objSt==='p'?' selected':'')+'>Pending</option>';
@@ -1188,13 +1217,15 @@ function renderObjectTable(items,filtered,targetEl,backLabel,renderSelf,rt){{
   slice.forEach(function(e){{
     var idx=allItems.indexOf(e);if(idx<0)for(var ii=0;allItems.length>ii;ii++){{if(allItems[ii].s===e.s&&allItems[ii].n===e.n){{idx=ii;break}}}}
     var oc=idx>=0?(' onclick="toggleObjectDetail(\\''+esc(rt)+'\\','+idx+',this)"'):' ';
-    h+='<tr class="row-'+e.st+'"'+oc+' title="Click for details">';
+    var rowCls='row-'+e.st+(e.fc?' row-fc':'');
+    h+='<tr class="'+rowCls+'"'+oc+' title="Click for details">';
     h+='<td><strong>'+esc(e.n)+'</strong></td>';
     if(showOrg)h+='<td>'+esc(e.o||'—')+'</td>';
     h+='<td class="num">'+(e.s!=null?e.s:'—')+'</td>';
     h+='<td class="num">'+(e.t!=null?e.t:'—')+'</td>';
-    h+='<td>'+stBadge(e.st)+'</td>';
-    h+='<td class="err" title="'+esc(e.e||'')+'">'+esc(e.e||'—')+'</td>';
+    h+='<td>'+stBadge(e.st,e.fc)+'</td>';
+    var note=e.e||(e.fc?'Field differences vs source':'');
+    h+='<td class="'+(e.e?'err':(e.fc?'note-fc':''))+'" title="'+esc(note)+'">'+esc(note||'—')+'</td>';
     h+='</tr>';
   }});
   h+='</tbody></table>';

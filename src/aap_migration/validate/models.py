@@ -317,6 +317,8 @@ class ObjectEntry:
     target_id: Optional[int] = None
     status: str = ""
     error: str = ""
+    # True when T3/T4 found ≥1 field difference vs target (orthogonal to status)
+    field_changed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"n": self.name, "s": self.source_id, "st": self.status[0] if self.status else ""}
@@ -326,6 +328,8 @@ class ObjectEntry:
             d["t"] = self.target_id
         if self.error:
             d["e"] = self.error
+        if self.field_changed:
+            d["fc"] = True
         return d
 
 
