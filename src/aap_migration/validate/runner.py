@@ -1552,6 +1552,16 @@ def build_validation_result(
     total_explained = 0
     types_with_unexplained = 0
 
+    # Organization name → (source_id, target_id) for Org Health src/tgt display
+    org_id_by_name: dict[str, tuple[Optional[int], Optional[int]]] = {}
+    org_src_to_tgt = src_to_tgt.get("organizations", {})
+    for org_obj in exports.get("organizations", []):
+        oname = _object_display_name(org_obj)
+        osid = _object_source_id(org_obj)
+        if not oname or osid is None:
+            continue
+        org_id_by_name[oname] = (osid, org_src_to_tgt.get(osid))
+
     for rtype in types:
         stats = all_stats.get(rtype, {})
         mapping = src_to_tgt.get(rtype, {})
@@ -1644,9 +1654,15 @@ def build_validation_result(
 
             if org_key not in per_org_data:
                 org_id = org_info[1] if org_info else None
+                mapped = org_id_by_name.get(org_key)
+                if mapped:
+                    src_org_id, tgt_org_id = mapped
+                else:
+                    src_org_id, tgt_org_id = org_id, None
                 per_org_data[org_key] = OrgValidationSummary(
                     org_name=org_key,
-                    source_id=org_id,
+                    source_id=src_org_id if src_org_id is not None else org_id,
+                    target_id=tgt_org_id,
                 )
                 org_type_counts[org_key] = {}
 

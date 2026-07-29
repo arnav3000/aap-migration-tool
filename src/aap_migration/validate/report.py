@@ -474,7 +474,7 @@ let curTab='dashboard';
 /* ── Helpers ── */
 function esc(s){{if(s==null)return'';var d=document.createElement('div');d.textContent=String(s);return d.innerHTML}}
 function fmt(n){{return n.toLocaleString()}}
-function ids(s,t){{return'<span class="ids">[src:'+(s!=null?s:'—')+' → tgt:'+(t!=null?t:'—')+']</span>'}}
+function ids(s,t){{return'<span class="ids">[src:'+(s!=null?s:'N/A')+' → tgt:'+(t!=null?t:'N/A')+']</span>'}}
 function objD(n,o,s,t){{var h='<strong>'+esc(n)+'</strong>';if(o)h+=' &middot; '+esc(o);h+=' '+ids(s,t);return h}}
 function pct(n,d){{return d?Math.round(n/d*100):0}}
 /* Match/completion %: never round up to 100% when anything is still missing */
