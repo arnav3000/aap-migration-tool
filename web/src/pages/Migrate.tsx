@@ -141,7 +141,8 @@ export function Migrate() {
 
     try {
       const orgIds = selectedOrgIds.length > 0 ? selectedOrgIds : undefined;
-      const result = await api.migrationPreview(sourceId, destId, orgIds);
+      const prefix = namePrefix.trim() || undefined;
+      const result = await api.migrationPreview(sourceId, destId, orgIds, prefix);
       setPreviewJobId(result.job_id);
       setStep('preview');
       pollPreview(result.job_id);

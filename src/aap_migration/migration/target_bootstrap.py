@@ -7,7 +7,7 @@ so migrate does not rediscover every object one HTTP call at a time.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from aap_migration.migration.state import MigrationState
@@ -43,6 +43,7 @@ class BootstrapStats:
     mapped: int = 0
     unmatched: int = 0
     skipped: int = 0
+    mapped_source_ids: list[int] = field(default_factory=list)
 
 
 def _identifier_field(resource_type: str) -> str:
@@ -237,6 +238,7 @@ async def bootstrap_mappings_for_type(
             resource_type, source_id_int
         ):
             stats.mapped += 1
+            stats.mapped_source_ids.append(source_id_int)
             continue
 
         expected_name = _expected_target_name(resource_type, source_item, name_prefix)
@@ -270,8 +272,10 @@ async def bootstrap_mappings_for_type(
                 source_id=source_id_int,
                 target_id=target_id,
                 target_name=str(target_name) if target_name else None,
+                source_name=str(source_name) if source_name else expected_name,
             )
             stats.mapped += 1
+            stats.mapped_source_ids.append(source_id_int)
         except Exception as exc:
             logger.debug(
                 "target_bootstrap_map_failed",

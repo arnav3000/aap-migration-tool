@@ -37,11 +37,12 @@ export const api = {
   runCleanup: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/cleanup`),
   runExport: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/export`),
 
-  migrationPreview: (sourceId: string, destinationId: string, organizations?: number[]) =>
+  migrationPreview: (sourceId: string, destinationId: string, organizations?: number[], namePrefix?: string) =>
     request<{ job_id: string }>('POST', '/api/migrate/preview', {
       source_id: sourceId,
       destination_id: destinationId,
       ...(organizations?.length ? { organizations } : {}),
+      ...(namePrefix ? { name_prefix: namePrefix } : {}),
     }),
   getMigrationPreview: (jobId: string) =>
     request<unknown>('GET', `/api/migrate/preview/${jobId}`),

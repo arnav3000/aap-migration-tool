@@ -24,9 +24,11 @@ Name-only existence on the target cannot replace mappings when:
 
 ## Hybrid checks today
 
-1. Fast path: `state.is_migrated` → skip (no HTTP)
-2. Else: `find_resource_by_name` / create with `check_exists`; on hit/409, write the mapping
-3. **Target bootstrap** (pre-scan): list source + target, match by natural key, seed `id_mappings` before ETL so re-runs are not blind
+1. **Migrate preview** scans source + target in dependency order, seeds `id_mappings`
+   for objects that already exist, and labels each item create vs already-on-target
+2. Fast path on run: `state.is_migrated` → skip (no HTTP)
+3. Else: `find_resource_by_name` / create with `check_exists`; on hit/409, write the mapping
+4. Run-time bootstrap still runs as a safety net before each resource type’s ETL
 
 ## PostgreSQL is the state store
 

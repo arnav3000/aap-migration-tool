@@ -32,7 +32,9 @@ class FakeJob:
 
 
 @pytest.mark.asyncio
-async def test_migration_router_preview_run_and_state(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_migration_router_preview_run_and_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     svc = FakeJobService()
     source = SimpleNamespace(id="src", name="Source", url="https://source.example.com")
     target = SimpleNamespace(id="dst", name="Target", url="https://target.example.com")
@@ -53,7 +55,19 @@ async def test_migration_router_preview_run_and_state(monkeypatch: pytest.Monkey
     )
     monkeypatch.setattr(migration.ConnectionService, "_auth_scheme", lambda conn: "Token")
     monkeypatch.setattr(migration, "get_job_service", lambda: svc)
-    monkeypatch.setattr(migration, "get_exportable_types", lambda: ["organizations", "users"])
+    monkeypatch.setattr(migration, "get_db_url", lambda: f"sqlite:///{tmp_path / 'preview.db'}")
+    monkeypatch.setattr(
+        "aap_migration.resources.get_fully_supported_types",
+        lambda: ["organizations", "users"],
+    )
+
+    async def _async_zero(*_a, **_k):
+        return 0
+
+    monkeypatch.setattr(
+        "aap_migration.migration.credential_type_utils.map_managed_credential_types",
+        _async_zero,
+    )
 
     class FakeSourceClient:
         def __init__(self, config, auth_scheme=None):
@@ -70,10 +84,16 @@ async def test_migration_router_preview_run_and_state(monkeypatch: pytest.Monkey
                 return [{"id": 1, "name": "Default"}]
             if endpoint == "users/":
                 return [
-                    {"id": 2, "username": "alice", "organization": 1},
-                    {"id": 3, "username": "bob", "organization": 2},
+                    {"id": 2, "username": "alice"},
+                    {"id": 3, "username": "bob"},
                 ]
             return []
+
+        async def list_resources(self, resource_type, page_size=200):
+            endpoint = {"organizations": "organizations/", "users": "users/"}.get(
+                resource_type, f"{resource_type}/"
+            )
+            return await self.get_paginated(endpoint, page_size=page_size)
 
     class FakeTargetClient(FakeSourceClient):
         async def get_paginated(self, endpoint, page_size=200):
@@ -96,20 +116,14 @@ async def test_migration_router_preview_run_and_state(monkeypatch: pytest.Monkey
     preview_result = await preview_callback(FakeJob(), logs.append)
     assert preview_result["resources"]["organizations"][0]["action"] == "create"
     assert preview_result["resources"]["users"][0]["action"] == "skip"
-    assert (
-        "users" not in preview_result["resources"] or len(preview_result["resources"]["users"]) == 1
-    )
+    assert preview_result["resources"]["users"][0]["name"] == "alice"
+    assert preview_result["bootstrap"]["mapped"] >= 1
     assert any("Filtering to organizations: [1]" in line for line in logs)
+    assert any("Scanning source and target" in line for line in logs)
 
     svc.jobs["preview-job"] = FakeJob(status="completed", result={"hello": "world"})
     merged = migration.get_migration_preview("preview-job")
     assert merged["hello"] == "world"
-
-    monkeypatch.setattr(migration, "get_db_url", lambda: "sqlite:///:memory:")
-    monkeypatch.setattr(
-        "aap_migration.resources.get_fully_supported_types",
-        lambda: ["organizations", "users"],
-    )
 
     captured: dict[str, object] = {}
 
