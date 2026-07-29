@@ -168,16 +168,39 @@ async def migration_run(
             _migrate_resource_type,
             _run_cac_org_update,
         )
-        from aap_migration.resources import get_fully_supported_types
+        from aap_migration.resources import (
+            apply_host_membership_resource_cascade,
+            get_fully_supported_types,
+        )
 
         def emit(event: dict[str, Any]) -> None:
             log("\t" + json.dumps(event))
 
-        resource_order = get_fully_supported_types()
+        preview_resources: dict[str, list[dict[str, Any]]] = {}
+        preview_job = svc.get_job(body.job_id)
+        if preview_job and preview_job.result:
+            preview_resources = preview_job.result.get("resources") or {}
+        else:
+            # Some job backends stash preview payload on metadata instead of result.
+            meta = getattr(preview_job, "job_metadata", None) if preview_job else None
+            if isinstance(meta, dict):
+                preview_resources = meta.get("resources") or {}
+
+        full_resource_order = get_fully_supported_types()
+        resource_order = apply_host_membership_resource_cascade(
+            full_resource_order,
+            exclusions=exclusions,
+            preview_resources=preview_resources or None,
+        )
         org_ids = list(org_filter) if org_filter else []
 
         emit({"_event": "migration_start", "total_phases": len(resource_order)})
         log(f"Starting migration of {len(resource_order)} resource types")
+        if (
+            "host_inventory_memberships" in full_resource_order
+            and "host_inventory_memberships" not in resource_order
+        ):
+            log("Skipping host_inventory_memberships because hosts were excluded")
         if org_ids:
             log(f"Filtering to organizations: {org_ids}")
         if name_prefix:
@@ -204,9 +227,11 @@ async def migration_run(
             run_target_auth,
             db_url,
         )
-        if exclusions:
-            for src in sources:
+        for src in sources:
+            if exclusions:
                 src["excluded_ids"] = exclusions
+            if preview_resources:
+                src["preview_resources"] = preview_resources
 
         totals = {"created": 0, "skipped": 0, "failed": 0, "updated": 0}
         created_creds: list[dict[str, str]] = []

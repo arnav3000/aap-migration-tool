@@ -388,10 +388,21 @@ class PerformanceConfig(BaseModel):
         return self._cached_encrypted_ssh_keys[passphrase]
 
 
+# Default compose Postgres DSN (host port when API/CLI run on the host).
+DEFAULT_STATE_DATABASE_URL = "postgresql://aap_user:changeme@localhost:5432/aap_migration"
+
+
 class StateConfig(BaseModel):
     """State management configuration."""
 
-    db_path: str = Field(default="./migration_state.db", description="Path to state database file")
+    db_path: str = Field(
+        default=DEFAULT_STATE_DATABASE_URL,
+        description=(
+            "PostgreSQL DSN for migration state "
+            "(e.g. postgresql://aap_user:changeme@localhost:5432/aap_migration). "
+            "SQLite URLs are supported for unit tests only."
+        ),
+    )
     checkpoint_frequency: int = Field(
         default=100, ge=10, le=1000, description="Items between checkpoints"
     )

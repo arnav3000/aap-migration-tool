@@ -26,6 +26,11 @@ from aap_migration.api.schemas import (
 )
 from aap_migration.api.services.connection_service import ConnectionService
 from aap_migration.api.services.job_service import Job, JobStatus, PhaseStatus
+from aap_migration.resources import (
+    excluded_preview_count,
+    is_host_inventory_membership_excluded,
+    is_resource_type_fully_excluded,
+)
 
 router = APIRouter()
 
@@ -602,6 +607,34 @@ async def _migrate_resource_type(
     last_progress = time.monotonic()
     PROGRESS_INTERVAL = 2.0
 
+    # Fast-path: every source fully excluded this type — skip without exporting.
+    if sources and all(
+        is_resource_type_fully_excluded(
+            rtype, src.get("excluded_ids"), src.get("preview_resources")
+        )
+        for src in sources
+    ):
+        for src in sources:
+            skipped += excluded_preview_count(
+                rtype, src.get("excluded_ids"), src.get("preview_resources")
+            )
+        log(f"Skipping {info.description}: all {skipped} resource(s) excluded by user")
+        emit(
+            {
+                "_event": "phase_complete",
+                "phase_num": phase_num,
+                "description": info.description,
+                "created": 0,
+                "updated": 0,
+                "skipped": skipped,
+                "failed": 0,
+                "exported": 0,
+                "duration": "0.0s",
+                "warnings": {},
+            }
+        )
+        return 0, skipped, 0, 0
+
     # Credentials depend on built-in credential types that may never be
     # "migrated". Map them by name onto the target before export/transform.
     if rtype in ("credentials", "credential_types"):
@@ -627,8 +660,39 @@ async def _migrate_resource_type(
         name_prefix: str = src["name_prefix"]
         connection_name: str = src.get("connection_name") or src["url"]
         org_ids: list[int] = src["org_ids"]
+        bulk_skipped_excluded = 0
+        bulk_skipped_org = 0
+        bulk_skipped_host_cascade = 0
+
+        # Per-source fast-path when preview proves full exclusion.
+        if is_resource_type_fully_excluded(
+            rtype, src.get("excluded_ids"), src.get("preview_resources")
+        ):
+            n = excluded_preview_count(rtype, src.get("excluded_ids"), src.get("preview_resources"))
+            skipped += n
+            log(
+                f"  Skipping {info.description} from {connection_name}: "
+                f"all {n} resource(s) excluded by user"
+            )
+            continue
 
         try:
+            from aap_migration.migration.target_bootstrap import bootstrap_mappings_for_type
+
+            bootstrap = await bootstrap_mappings_for_type(
+                rtype,
+                src_client,
+                target_client,
+                state,
+                name_prefix=name_prefix,
+                org_ids=org_ids or None,
+            )
+            if bootstrap.mapped:
+                log(
+                    f"  Bootstrapped {bootstrap.mapped} existing {info.description} "
+                    f"from target ({bootstrap.unmatched} not on target)"
+                )
+
             exporter = create_exporter(
                 resource_type=rtype,
                 client=src_client,
@@ -651,6 +715,8 @@ async def _migrate_resource_type(
                 name_prefix=name_prefix,
             )
 
+            excluded_for_type = {str(x) for x in ((src.get("excluded_ids") or {}).get(rtype) or [])}
+
             async for resource in exporter.export():
                 source_id = resource.get("id")
                 if source_id is None:
@@ -663,29 +729,19 @@ async def _migrate_resource_type(
 
                 if org_ids and not _resource_in_orgs(rtype, resource, source_id, org_ids):
                     skipped += 1
-                    _emit_resource_result(
-                        emit,
-                        log,
-                        phase_num=phase_num,
-                        name=_resource_display_name(resource, source_id),
-                        rtype=rtype,
-                        result="skipped",
-                        detail="Not in selected organizations for this phase",
-                    )
+                    bulk_skipped_org += 1
                     continue
 
-                excluded_for_type = (src.get("excluded_ids") or {}).get(rtype) or []
-                if excluded_for_type and str(source_id) in {str(x) for x in excluded_for_type}:
+                if excluded_for_type and str(source_id) in excluded_for_type:
                     skipped += 1
-                    _emit_resource_result(
-                        emit,
-                        log,
-                        phase_num=phase_num,
-                        name=_resource_display_name(resource, source_id),
-                        rtype=rtype,
-                        result="skipped",
-                        detail="Excluded by user",
-                    )
+                    bulk_skipped_excluded += 1
+                    continue
+
+                if rtype == "host_inventory_memberships" and is_host_inventory_membership_excluded(
+                    resource, src.get("excluded_ids")
+                ):
+                    skipped += 1
+                    bulk_skipped_host_cascade += 1
                     continue
 
                 raw_summary = resource.get("summary_fields", {})
@@ -867,6 +923,37 @@ async def _migrate_resource_type(
                         }
                     )
                     last_progress = now
+
+            if bulk_skipped_excluded:
+                _emit_resource_result(
+                    emit,
+                    log,
+                    phase_num=phase_num,
+                    name=f"({bulk_skipped_excluded} resources)",
+                    rtype=rtype,
+                    result="skipped",
+                    detail="Excluded by user",
+                )
+            if bulk_skipped_org:
+                _emit_resource_result(
+                    emit,
+                    log,
+                    phase_num=phase_num,
+                    name=f"({bulk_skipped_org} resources)",
+                    rtype=rtype,
+                    result="skipped",
+                    detail="Not in selected organizations for this phase",
+                )
+            if bulk_skipped_host_cascade:
+                _emit_resource_result(
+                    emit,
+                    log,
+                    phase_num=phase_num,
+                    name=f"({bulk_skipped_host_cascade} resources)",
+                    rtype=rtype,
+                    result="skipped",
+                    detail="Host excluded by user",
+                )
 
         except Exception as exc:
             failed += 1
@@ -1195,6 +1282,14 @@ async def execute_phase(
                     "Phase resource_types filter excluded every migratable type — "
                     "check the phase configuration"
                 )
+        from aap_migration.resources import apply_host_membership_resource_cascade
+
+        resource_order = apply_host_membership_resource_cascade(resource_order)
+        if not resource_order:
+            raise ValueError(
+                "Phase resource_types filter excluded every migratable type — "
+                "check the phase configuration"
+            )
         num_resource_types = len(resource_order)
         CRED_PAUSE_AFTER = {"credentials", "credential_input_sources"}
         created_creds: list[dict[str, str]] = []

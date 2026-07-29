@@ -10,10 +10,17 @@ from aap_migration.migration.state import MigrationState
 
 def build_state(tmp_path, *, migration_id: str = "migration-1") -> MigrationState:
     return MigrationState(
-        StateConfig(db_path=str(tmp_path / f"{migration_id}.db")),
+        StateConfig(db_path=f"sqlite:///{tmp_path / f'{migration_id}.db'}"),
         migration_id=migration_id,
         migration_name="Example Migration",
     )
+
+
+def test_migration_state_rejects_bare_sqlite_paths(tmp_path) -> None:
+    from aap_migration.client.exceptions import ConfigurationError
+
+    with pytest.raises(ConfigurationError, match="postgresql://"):
+        MigrationState(StateConfig(db_path=str(tmp_path / "legacy.db")), migration_id="x")
 
 
 def test_migration_state_tracks_progress_and_mappings(tmp_path) -> None:

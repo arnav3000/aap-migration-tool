@@ -9,8 +9,9 @@ from collections.abc import Generator
 from sqlalchemy.orm import Session, sessionmaker
 
 from aap_migration.api.services.job_service import JobService
+from aap_migration.config import DEFAULT_STATE_DATABASE_URL
 
-_DEFAULT_PG_URL = "postgresql://aap_user:changeme@localhost:5432/aap_migration"
+_DEFAULT_PG_URL = DEFAULT_STATE_DATABASE_URL
 
 
 def get_db_url() -> str:

@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from sqlalchemy import func
 
-from aap_migration.client.exceptions import StateError
+from aap_migration.client.exceptions import ConfigurationError, StateError
 from aap_migration.config import StateConfig
 from aap_migration.migration.database import get_session, init_database
 from aap_migration.migration.models import (
@@ -72,13 +72,26 @@ class MigrationState:
 
         # Initialize database
         try:
-            # Support both full database URLs and file paths
+            # Require an explicit SQLAlchemy URL. Bare file paths used to imply
+            # SQLite; that default is gone — PostgreSQL is the state store.
             if config.db_path.startswith(("postgresql://", "sqlite://", "mysql://")):
-                # Already a full database URL, use as-is
                 self.database_url = config.db_path
             else:
-                # Treat as SQLite file path
-                self.database_url = f"sqlite:///{config.db_path}"
+                raise ConfigurationError(
+                    "State database must be a full DSN "
+                    f"(postgresql://...), got {config.db_path!r}. "
+                    "Default: postgresql://aap_user:changeme@localhost:5432/aap_migration. "
+                    "Bare SQLite file paths are no longer supported."
+                )
+
+            if self.database_url.startswith("sqlite://"):
+                logger.warning(
+                    "sqlite_state_db_deprecated",
+                    message=(
+                        "SQLite state URLs are for unit tests only; "
+                        "use PostgreSQL (compose db service) for migrations"
+                    ),
+                )
 
             init_database(
                 self.database_url,
@@ -93,6 +106,8 @@ class MigrationState:
                 database_path=config.db_path,
                 source_key=self.source_key or "(default)",
             )
+        except ConfigurationError:
+            raise
         except Exception as e:
             logger.error("Failed to initialize migration state", error=str(e))
             raise StateError(f"Failed to initialize migration state: {e}") from e

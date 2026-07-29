@@ -8,6 +8,16 @@ from typing import Any
 _NAME_PREFIX_SKIP_TYPES = frozenset({"users", "settings", "host_inventory_memberships"})
 
 
+def should_apply_name_prefix(resource_type: str, resource: dict[str, Any] | None = None) -> bool:
+    """Return True when ``resource_type`` (and optional resource) should be prefixed."""
+    if resource_type in _NAME_PREFIX_SKIP_TYPES:
+        return False
+    if resource is not None and resource_type in ("credential_types", "credentials"):
+        if resource.get("managed"):
+            return False
+    return True
+
+
 def apply_name_prefix(resource_type: str, resource: dict[str, Any], name_prefix: str) -> None:
     """Prepend ``name_prefix`` to ``resource["name"]`` when appropriate.
 
@@ -23,8 +33,6 @@ def apply_name_prefix(resource_type: str, resource: dict[str, Any], name_prefix:
     resource["_name_prefix"] = name_prefix
     if "name" not in resource:
         return
-    if resource_type in _NAME_PREFIX_SKIP_TYPES:
-        return
-    if resource_type in ("credential_types", "credentials") and resource.get("managed"):
+    if not should_apply_name_prefix(resource_type, resource):
         return
     resource["name"] = f"{name_prefix}{resource['name']}"

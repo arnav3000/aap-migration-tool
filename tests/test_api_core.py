@@ -132,22 +132,9 @@ def test_get_db_rolls_back_on_error() -> None:
     assert session.closed is True
 
 
-def test_create_app_normalizes_plain_db_path(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    captured: dict[str, str] = {}
-    real_engine = create_database_engine(f"sqlite:///{tmp_path / 'real.db'}")
-
-    def fake_create_database_engine(url: str):
-        captured["url"] = url
-        return real_engine
-
-    monkeypatch.setattr("aap_migration.api.app.create_database_engine", fake_create_database_engine)
-
-    app = create_app(db_url="relative.db")
-
-    assert app.title == "AAP Bridge API"
-    assert captured["url"] == "sqlite:///relative.db"
-
-    real_engine.dispose()
+def test_create_app_rejects_bare_db_path(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    with pytest.raises(ValueError, match="postgresql://"):
+        create_app(db_url="relative.db")
 
 
 def test_migrate_add_seq_id_backfills_legacy_jobs(tmp_path) -> None:

@@ -19,7 +19,7 @@ from aap_migration.utils.idempotency import (
 
 def build_state(tmp_path) -> MigrationState:
     return MigrationState(
-        StateConfig(db_path=str(tmp_path / "state.db")),
+        StateConfig(db_path=f"sqlite:///{tmp_path / 'state.db'}"),
         migration_id="migration-1",
         migration_name="Example Migration",
     )

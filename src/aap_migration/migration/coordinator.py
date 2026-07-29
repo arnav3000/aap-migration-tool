@@ -573,6 +573,22 @@ class MigrationCoordinator:
         }
 
         try:
+            from aap_migration.migration.target_bootstrap import bootstrap_mappings_for_type
+
+            bootstrap = await bootstrap_mappings_for_type(
+                resource_type,
+                self.source_client,
+                self.target_client,
+                self.state,
+            )
+            if bootstrap.mapped:
+                logger.info(
+                    "target_bootstrap_seeded",
+                    resource_type=resource_type,
+                    mapped=bootstrap.mapped,
+                    unmatched=bootstrap.unmatched,
+                )
+
             # Create exporter, transformer, importer
             exporter = create_exporter(
                 resource_type=resource_type,

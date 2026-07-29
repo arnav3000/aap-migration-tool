@@ -94,10 +94,10 @@ def validate_container_env(env_path: Path = DEFAULT_ENV_PATH) -> list[str]:
         )
 
     db_path = values.get("MIGRATION_STATE_DB_PATH", "").strip()
-    if db_path and not (db_path.startswith("postgresql://") or db_path.startswith("sqlite:///")):
+    if db_path and not db_path.startswith("postgresql://"):
         errors.append(
-            "MIGRATION_STATE_DB_PATH must start with postgresql:// or sqlite:/// "
-            f"(got: {db_path!r})."
+            "MIGRATION_STATE_DB_PATH must start with postgresql:// "
+            f"(got: {db_path!r}). SQLite is not supported for container deployments."
         )
 
     return errors

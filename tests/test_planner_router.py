@@ -1045,9 +1045,146 @@ async def test_migrate_resource_type_honors_excluded_ids(
     assert (created, skipped, failed, exported) == (1, 1, 0, 1)
     assert imported_ids == [1]
     assert any(
-        e.get("name") == "Drop"
-        and e.get("result") == "skipped"
+        e.get("result") == "skipped"
         and "Excluded" in e.get("detail", "")
+        and "(1 resources)" in e.get("name", "")
+        for e in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_migrate_resource_type_short_circuits_fully_excluded_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    export_calls = {"n": 0}
+
+    class FakeExporter:
+        async def export(self):
+            export_calls["n"] += 1
+            yield {"id": 1, "name": "should-not-export"}
+
+    monkeypatch.setattr(
+        "aap_migration.migration.exporter.create_exporter", lambda **kwargs: FakeExporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.importer.create_importer", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.transformer.create_transformer", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "aap_migration.resources.RESOURCE_REGISTRY",
+        {
+            "hosts": SimpleNamespace(
+                description="Hosts",
+                has_transformer=False,
+            )
+        },
+    )
+
+    logs: list[str] = []
+    events: list[dict] = []
+    sources = [
+        {
+            "src_client": object(),
+            "state": object(),
+            "migration_config": SimpleNamespace(performance=None, resource_mappings={}),
+            "name_prefix": "",
+            "connection_name": "Dev AAP",
+            "org_ids": [],
+            "url": "https://dev.example.com",
+            "excluded_ids": {"hosts": [1, 2, 3]},
+            "preview_resources": {
+                "hosts": [
+                    {"source_id": 1},
+                    {"source_id": 2},
+                    {"source_id": 3},
+                ]
+            },
+        }
+    ]
+
+    created, skipped, failed, exported = await planner._migrate_resource_type(
+        "hosts",
+        sources,
+        object(),
+        1,
+        events.append,
+        logs.append,
+        [],
+    )
+
+    assert (created, skipped, failed, exported) == (0, 3, 0, 0)
+    assert export_calls["n"] == 0
+    assert any("all 3 resource(s) excluded by user" in line for line in logs)
+    assert any(e.get("_event") == "phase_complete" and e.get("skipped") == 3 for e in events)
+
+
+@pytest.mark.asyncio
+async def test_migrate_resource_type_skips_memberships_for_excluded_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported: list[dict] = []
+
+    class FakeExporter:
+        async def export(self):
+            yield {"host_id": 1, "inventory_id": 10, "host_name": "keep"}
+            yield {"host_id": 2, "inventory_id": 10, "host_name": "drop"}
+
+    class FakeImporter:
+        async def import_resource(self, resource=None, xformed=None):
+            imported.append(resource or {})
+            return {"status": "created"}
+
+    monkeypatch.setattr(
+        "aap_migration.migration.exporter.create_exporter", lambda **kwargs: FakeExporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.importer.create_importer", lambda **kwargs: FakeImporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.transformer.create_transformer", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "aap_migration.resources.RESOURCE_REGISTRY",
+        {
+            "host_inventory_memberships": SimpleNamespace(
+                description="Memberships",
+                has_transformer=False,
+            )
+        },
+    )
+
+    events: list[dict] = []
+    sources = [
+        {
+            "src_client": object(),
+            "state": object(),
+            "migration_config": SimpleNamespace(performance=None, resource_mappings={}),
+            "name_prefix": "",
+            "connection_name": "Dev AAP",
+            "org_ids": [],
+            "url": "https://dev.example.com",
+            "excluded_ids": {"hosts": [2]},
+        }
+    ]
+
+    created, skipped, failed, exported = await planner._migrate_resource_type(
+        "host_inventory_memberships",
+        sources,
+        object(),
+        1,
+        events.append,
+        lambda _line: None,
+        [],
+    )
+
+    assert (created, skipped, failed, exported) == (1, 1, 0, 1)
+    assert [m["host_id"] for m in imported] == [1]
+    assert any(
+        e.get("result") == "skipped"
+        and "Host excluded" in e.get("detail", "")
+        and "(1 resources)" in e.get("name", "")
         for e in events
     )
 
