@@ -474,6 +474,12 @@ def _build_full_org_summary(
     default="html",
     help="Output format (default: html)",
 )
+@click.option(
+    "--organization",
+    "--org",
+    type=str,
+    help="Generate report for a single organization only (case-insensitive match)",
+)
 @pass_context
 @requires_config
 @handle_errors
@@ -482,6 +488,7 @@ def generate_enhanced_report(
     output: str | None,
     resource_type: str | None,
     output_format: str,
+    organization: str | None,
 ) -> None:
     """Generate enhanced migration report with error analysis and metadata enrichment.
 
@@ -505,17 +512,6 @@ def generate_enhanced_report(
       markdown  Static markdown tables, suitable for Git/Wiki
       csv       Flat CSV for spreadsheet analysis
 
-    \b
-    EXAMPLES
-      aap-bridge enhanced-report
-      aap-bridge enhanced-report --format csv -o report.csv
-      aap-bridge enhanced-report -r job_templates --format markdown
-    - Resizable and sortable table columns (HTML)
-    - Click-to-expand error detail view (HTML)
-    - Group errors by pattern toggle (HTML)
-    - In-browser CSV export (HTML)
-    - Pending status tracking
-
     Examples:
 
         # Generate enhanced HTML report (interactive)
@@ -532,6 +528,12 @@ def generate_enhanced_report(
 
         # Generate CSV report
         aap-bridge enhanced-report --format csv
+
+        # Report for a single organization
+        aap-bridge enhanced-report --organization "Organisation-1"
+
+        # Single organization in CSV format
+        aap-bridge enhanced-report --org "Organisation-1" --format csv
     """
     echo_info("Generating enhanced migration report (V2)...")
 
@@ -539,7 +541,11 @@ def generate_enhanced_report(
     if not output:
         extension_map = {"html": "html", "markdown": "md", "csv": "csv"}
         ext = extension_map.get(output_format, "html")
-        output = f"{ctx.config.paths.report_dir}/org-failures-enhanced.{ext}"
+        if organization:
+            safe_org = re.sub(r"[^\w\-]", "_", organization)
+            output = f"{ctx.config.paths.report_dir}/org-{safe_org}-enhanced.{ext}"
+        else:
+            output = f"{ctx.config.paths.report_dir}/org-failures-enhanced.{ext}"
 
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -580,6 +586,29 @@ def generate_enhanced_report(
         echo_info("Mapping resources to organizations...")
         org_summary = _build_full_org_summary(org_mapper, all_resources)
         echo_info(f"Mapped to {len(org_summary)} organizations")
+
+        # Step 3b: Filter by organization if requested
+        if organization:
+            org_lower = organization.lower()
+            matched = {
+                name: data for name, data in org_summary.items()
+                if name.lower() == org_lower
+            }
+            if not matched:
+                available = sorted(org_summary.keys())
+                partial = [n for n in available if org_lower in n.lower()]
+                if partial:
+                    echo_error(
+                        f"Organization '{organization}' not found. Similar: {', '.join(partial[:5])}"
+                    )
+                else:
+                    echo_error(
+                        f"Organization '{organization}' not found. "
+                        f"Available ({len(available)}): {', '.join(available[:10])}{'...' if len(available) > 10 else ''}"
+                    )
+                raise click.ClickException(f"Organization '{organization}' not found")
+            org_summary = matched
+            echo_info(f"Filtered to organization: {list(org_summary.keys())[0]}")
 
         # Step 4: Build export metadata lookup
         echo_info("Loading export metadata (Last Modified, Modified By, Last Run, etc.)...")
@@ -1105,17 +1134,17 @@ def _generate_enhanced_html(org_summary: dict, migration_state) -> str:
         </div>
     </div>
     <div class="tabs">
-        <button class="tab active" data-tab="summary">Summary</button>
-        <button class="tab" data-tab="failures">Failures</button>
-        <button class="tab" data-tab="pending">Pending</button>
-        <button class="tab" data-tab="successful">Successful</button>
-        <button class="tab" data-tab="complete">Complete</button>
+        <button class="tab active" data-tab="summary">&#x1F4CA; Overview</button>
+        <button class="tab" data-tab="failures">&#x274C; Failures</button>
+        <button class="tab" data-tab="skipped">&#x23ED;&#xFE0F; Skipped</button>
+        <button class="tab" data-tab="successful">&#x2705; Successful</button>
+        <button class="tab" data-tab="complete">&#x1F4CB; Org Summary</button>
     </div>
     <div class="controls hidden" id="controls">
         <div class="control-group"><label for="orgSelect">Organization</label><select id="orgSelect"><option value="">All Organizations</option></select></div>
         <div class="control-group"><label for="resourceTypeFilter">Resource Type</label><select id="resourceTypeFilter"><option value="">All Types</option></select></div>
         <div class="control-group"><label for="errorFilter">Error</label><select id="errorFilter"><option value="">All Errors</option></select></div>
-        <div class="control-group"><label for="migrationStatusFilter">Migration Status</label><select id="migrationStatusFilter"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="skipped">Skipped</option><option value="pending">Pending</option></select></div>
+        <div class="control-group"><label for="migrationStatusFilter">Migration Status</label><select id="migrationStatusFilter"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="skipped">Skipped</option></select></div>
         <div class="control-group"><label for="statusFilter">Resource Status in AAP</label><select id="statusFilter"><option value="">All</option><option value="Active">Active</option><option value="Probably Stale">Probably Stale</option><option value="Unknown">Unknown</option></select></div>
         <div class="control-group"><label for="searchInput">Search</label><input type="text" id="searchInput" placeholder="Search by name, ID, org, or error..."></div>
         <div class="control-group"><label>&nbsp;</label>
@@ -1135,7 +1164,7 @@ def _generate_enhanced_html(org_summary: dict, migration_state) -> str:
     <div class="stats" id="statsContainer"></div>
     <div class="content" id="summaryContent"></div>
     <div class="content hidden" id="failuresContent"></div>
-    <div class="content hidden" id="pendingContent"></div>
+    <div class="content hidden" id="skippedContent"></div>
     <div class="content hidden" id="successfulContent"></div>
     <div class="content hidden" id="completeContent"></div>
     <div class="pagination hidden" id="paginationContainer">
@@ -1278,7 +1307,7 @@ function renderSummaryTab() {{
         if (!searchTerm) return true;
         return name.toLowerCase().includes(searchTerm);
     }});
-    const tC = orgs.reduce((s,[_,d])=>s+d.completed,0), tF = orgs.reduce((s,[_,d])=>s+d.failed,0), tSk = orgs.reduce((s,[_,d])=>s+d.skipped,0), tP = orgs.reduce((s,[_,d])=>s+(d.pending||0),0), tAll = orgs.reduce((s,[_,d])=>s+d.total,0);
+    const tC = orgs.reduce((s,[_,d])=>s+d.completed,0), tF = orgs.reduce((s,[_,d])=>s+d.failed,0), tSk = orgs.reduce((s,[_,d])=>s+d.skipped,0), tAll = orgs.reduce((s,[_,d])=>s+d.total,0);
     let tSt = 0; orgs.forEach(([_,o]) => o.resources.forEach(r => {{ if(r.resource_status==='Probably Stale') tSt++; }}));
     const sr = tAll > 0 ? Math.round((tC/tAll)*100) : 0;
     document.getElementById('statsContainer').innerHTML =
@@ -1286,22 +1315,30 @@ function renderSummaryTab() {{
         '<div class="stat-card success"><div class="value">' + tC + '</div><div class="label">Successful</div></div>' +
         '<div class="stat-card failed"><div class="value">' + tF + '</div><div class="label">Failed</div></div>' +
         '<div class="stat-card skipped"><div class="value">' + tSk + '</div><div class="label">Skipped</div></div>' +
-        (tP > 0 ? '<div class="stat-card pending"><div class="value">' + tP + '</div><div class="label">Pending</div></div>' : '') +
         '<div class="stat-card stalled"><div class="value">' + tSt + '</div><div class="label">Prob. Stale</div></div>' +
         '<div class="stat-card"><div class="value">' + sr + '%</div><div class="label">Success Rate</div></div>';
     const sorted = orgs.sort((a,b) => b[1].total - a[1].total);
-    let h = '<table style="table-layout:auto"><thead><tr><th>Organization</th><th>Total</th><th>Successful</th><th>Failed</th><th>Skipped</th><th>Pending</th><th>Prob. Stale</th><th>Success Rate</th><th>Resource Types</th></tr></thead><tbody>';
+    let h = '<table style="table-layout:auto"><thead><tr><th>Organization</th><th>Total</th><th>Successful</th><th>Failed</th><th>Skipped</th><th>Prob. Stale</th><th>Success Rate</th><th>Resource Types</th></tr></thead><tbody>';
     sorted.forEach(([n,s]) => {{
         const r = s.total>0?Math.round((s.completed/s.total)*100):0;
         const rc = r<50?'low':r<80?'medium':'high';
         const st = s.resources.filter(x=>x.resource_status==='Probably Stale').length;
-        const pn = s.pending || 0;
-        h += '<tr class="clickable" onclick="goToOrg(\\'' + n.replace(/'/g, "\\\\'") + '\\')" title="Click to view"><td><strong>' + escapeHtml(n) + '</strong></td><td>' + s.total + '</td><td><span class="status-completed">' + s.completed + '</span></td><td><span class="status-failed">' + s.failed + '</span></td><td><span class="status-skipped">' + s.skipped + '</span></td><td>' + (pn>0?'<span class="status-pending">'+pn+'</span>':'0') + '</td><td>' + (st>0?'<span class="resource-status-stale">'+st+'</span>':'0') + '</td><td><span class="success-rate '+rc+'">' + r + '%</span></td><td style="font-size:0.85em">' + s.resource_types.join(', ') + '</td></tr>';
+        const ne = n.replace(/'/g, "\\\\'");
+        h += '<tr class="clickable">' +
+            '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'complete\\')" title="View Org Summary"><strong>' + escapeHtml(n) + '</strong></td>' +
+            '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'complete\\')" title="View Org Summary">' + s.total + '</td>' +
+            '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'successful\\')" title="View Successful"><span class="status-completed">' + s.completed + '</span></td>' +
+            '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'failures\\')" title="View Failures"><span class="status-failed">' + s.failed + '</span></td>' +
+            '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'skipped\\')" title="View Skipped"><span class="status-skipped">' + s.skipped + '</span></td>' +
+            '<td>' + (st>0?'<span class="resource-status-stale">'+st+'</span>':'0') + '</td>' +
+            '<td><span class="success-rate '+rc+'">' + r + '%</span></td>' +
+            '<td style="font-size:0.85em">' + s.resource_types.join(', ') + '</td></tr>';
     }});
     h += '</tbody></table>'; document.getElementById('summaryContent').innerHTML = h; document.getElementById('paginationContainer').classList.add('hidden');
 }}
 
-function goToOrg(n) {{ document.getElementById('orgSelect').value = n; currentOrg = n; populateResourceTypeFilter(); populateErrorFilter(); switchTab('failures'); }}
+function goToOrgTab(n, tab) {{ document.getElementById('orgSelect').value = n; currentOrg = n; populateResourceTypeFilter(); populateErrorFilter(); switchTab(tab); }}
+function goToOrg(n) {{ goToOrgTab(n, 'complete'); }}
 
 function populateResourceTypeFilter() {{
     const s = document.getElementById('resourceTypeFilter');
@@ -1344,8 +1381,8 @@ function renderDetailTab() {{
     const st = document.getElementById('searchInput').value.toLowerCase();
     let msf = [];
     if (ms) msf=[ms];
-    else if (currentTab==='failures') msf=['failed','skipped'];
-    else if (currentTab==='pending') msf=['pending'];
+    else if (currentTab==='failures') msf=['failed'];
+    else if (currentTab==='skipped') msf=['skipped'];
     else if (currentTab==='successful') msf=['completed'];
     else msf=['completed','failed','skipped','pending'];
     filteredData = resources.filter(r => {{
@@ -1378,7 +1415,7 @@ function renderDetailTab() {{
         '<div class="stat-card stalled"><div class="value">' + stl + '</div><div class="label">Prob. Stale</div></div>' +
         '<div class="stat-card"><div class="value">' + rate + '%</div><div class="label">Success Rate</div></div>';
     applySortToFiltered();
-    if (viewMode === 'grouped' && (currentTab === 'failures' || currentTab === 'complete')) {{ renderGroupedView(); }}
+    if (viewMode === 'grouped' && (currentTab === 'failures' || currentTab === 'skipped' || currentTab === 'complete')) {{ renderGroupedView(); }}
     else {{ renderPage(); }}
 }}
 
@@ -1509,8 +1546,8 @@ function closeModal() {{ document.getElementById('errorModal').classList.remove(
 
 function exportCSV() {{
     if (filteredData.length===0) return;
-    const cols = ['source_id','source_name','org_name','resource_type','status','error_key','error_explanation','error_message','resource_status','modified','created_by','modified_by','created','last_job_run','last_job_failed','next_job_run','sync_status'];
-    const headers = ['Source ID','Name','Organization','Resource Type','Migration Status','Error','Error Explanation','Error Message','Resource Status in AAP','Modified','Created By','Last Modified By','Created','Last Run','Last Run Failed','Next Run','Sync Status'];
+    const cols = ['org_name','resource_type','source_id','source_name','status','error_key','error_explanation','error_message','resource_status','modified','created_by','modified_by','created','last_job_run','last_job_failed','next_job_run','sync_status'];
+    const headers = ['Organization','Resource Type','Source ID','Name','Migration Status','Error Classification','Error Explanation','Error Message','Resource Status in AAP','Last Modified','Created By','Last Modified By','Created','Last Job Run','Last Job Failed','Next Job Run','Sync Status'];
     let csv = headers.join(',') + '\\n';
     filteredData.forEach(r => {{
         csv += cols.map(c => {{
