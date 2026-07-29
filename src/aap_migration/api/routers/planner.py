@@ -648,6 +648,7 @@ async def _migrate_resource_type(
                 state=state,
                 performance_config=migration_config.performance,
                 resource_mappings=migration_config.resource_mappings,
+                name_prefix=name_prefix,
             )
 
             async for resource in exporter.export():
