@@ -3581,6 +3581,14 @@ class CredentialImporter(ResourceImporter):
         data.pop("_encrypted_fields", None)
         data.pop("_needs_vault_lookup", None)
 
+        # Capture before resolve — _resolve_dependencies pops _dependency_names.
+        dep_names = data.get("_dependency_names")
+        source_cred_type_name = None
+        if isinstance(dep_names, dict):
+            raw_type_name = dep_names.get("credential_type")
+            if isinstance(raw_type_name, str) and raw_type_name.strip():
+                source_cred_type_name = raw_type_name.strip()
+
         # Resolve dependencies BEFORE lookup to get target org/credential_type IDs
         # This ensures we can search by the complete composite key
         if resolve_dependencies:
@@ -3697,13 +3705,24 @@ class CredentialImporter(ResourceImporter):
 
             else:
                 # Credential does not exist - CREATE it
+                cred_type_id = data.get("credential_type")
+                cred_type_name = await self._lookup_credential_type_name(
+                    cred_type_id,
+                    {"credential_type": source_cred_type_name} if source_cred_type_name else None,
+                )
+                input_keys = sorted((data.get("inputs") or {}).keys())
                 logger.info(
                     "credential_creating",
                     name=name,
                     source_id=source_id,
                     organization=data.get("organization"),
-                    credential_type=data.get("credential_type"),
-                    message="Creating new credential - no match found for name/org/type composite key",
+                    credential_type=cred_type_id,
+                    credential_type_name=cred_type_name,
+                    input_fields=input_keys,
+                    message=(
+                        "Creating new credential - no match found for name/org/type "
+                        f"composite key (type={cred_type_name or cred_type_id})"
+                    ),
                 )
 
                 # Dependencies already resolved above before lookup
@@ -3720,6 +3739,8 @@ class CredentialImporter(ResourceImporter):
                     name=name,
                     source_id=source_id,
                     target_id=target_id,
+                    credential_type=cred_type_id,
+                    credential_type_name=cred_type_name,
                 )
 
             # Save mapping
@@ -3741,11 +3762,39 @@ class CredentialImporter(ResourceImporter):
             return result
 
         except Exception as e:
+            cred_type_id = data.get("credential_type") if isinstance(data, dict) else None
+            cred_type_name = None
+            failed_input_keys: list[str] = []
+            if isinstance(data, dict):
+                failed_input_keys = sorted((data.get("inputs") or {}).keys())
+                try:
+                    cred_type_name = await self._lookup_credential_type_name(
+                        cred_type_id,
+                        (
+                            {"credential_type": source_cred_type_name}
+                            if source_cred_type_name
+                            else None
+                        ),
+                    )
+                except Exception:  # nosec B110
+                    cred_type_name = source_cred_type_name
+            type_label = cred_type_name or cred_type_id or "unknown"
+            error_detail = (
+                f"{type(e).__name__}: {e} "
+                f"(credential_type={type_label}, input_fields={failed_input_keys})"
+            )
             logger.error(
                 "credential_import_failed",
                 source_id=source_id,
                 name=name,
+                credential_type=cred_type_id,
+                credential_type_name=cred_type_name,
+                input_fields=failed_input_keys,
                 error=str(e),
+                message=(
+                    f"Failed importing credential '{name}' with credential_type "
+                    f"'{type_label}' (id={cred_type_id}); inputs={failed_input_keys}"
+                ),
             )
             self.stats["error_count"] += 1
 
@@ -3753,7 +3802,7 @@ class CredentialImporter(ResourceImporter):
             self.state.mark_failed(
                 resource_type=resource_type,
                 source_id=source_id,
-                error_message=f"{type(e).__name__}: {str(e)}",
+                error_message=error_detail,
             )
 
             self.import_errors.append(
@@ -3761,11 +3810,61 @@ class CredentialImporter(ResourceImporter):
                     "resource_type": resource_type,
                     "source_id": source_id,
                     "name": name,
-                    "error": str(e),
+                    "error": error_detail,
                     "error_type": type(e).__name__,
+                    "credential_type": cred_type_id,
+                    "credential_type_name": cred_type_name,
                 }
             )
             return None
+
+    async def _lookup_credential_type_name(
+        self,
+        credential_type_id: Any,
+        dependency_names: Any = None,
+    ) -> str | None:
+        """Resolve a human-readable credential type name for logging.
+
+        Prefers stashed source summary names, then id_mappings, then a live
+        lookup of the target credential type by id.
+        """
+        if isinstance(dependency_names, dict):
+            name = dependency_names.get("credential_type")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+
+        if credential_type_id is None:
+            return None
+
+        try:
+            type_id = int(credential_type_id)
+        except (TypeError, ValueError):
+            return None
+
+        try:
+            mapping = self.state.get_id_mapping("credential_types", type_id)
+        except Exception:
+            mapping = None
+        if isinstance(mapping, dict):
+            for key in ("target_name", "source_name"):
+                raw = mapping.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+
+        # Target id may already be remapped — look it up directly on the target.
+        try:
+            resp = await self.client.get(f"credential_types/{type_id}/")
+            if isinstance(resp, dict):
+                name = resp.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+        except Exception as exc:
+            logger.debug(
+                "credential_type_name_lookup_failed",
+                credential_type_id=type_id,
+                error=str(exc),
+            )
+        return None
 
     async def _lookup_target_admin_user_id(self) -> int | None:
         """Return the target AAP builtin admin user id, cached per importer instance."""
@@ -3819,16 +3918,77 @@ class CredentialImporter(ResourceImporter):
         )
         return data
 
+    async def _resolve_credential_type_by_name(
+        self,
+        source_id: Any,
+        type_name: str | None,
+        credential_name: Any = None,
+    ) -> int | None:
+        """Resolve a credential type on the target by name and cache the mapping.
+
+        Managed/builtin type IDs differ across AAP versions (e.g. Source Control
+        is often 2 on Tower and 6 on AAP 2.7). Never assume source ID == target ID.
+        """
+        if not isinstance(type_name, str) or not type_name.strip():
+            return None
+        name = type_name.strip()
+        try:
+            existing = await self.client.find_resource_by_name("credential_types", name)
+        except Exception as exc:
+            logger.warning(
+                "credential_type_name_lookup_failed",
+                credential_name=credential_name,
+                credential_type_name=name,
+                source_id=source_id,
+                error=str(exc),
+            )
+            return None
+        if not existing or existing.get("id") is None:
+            logger.warning(
+                "credential_type_not_found_by_name",
+                credential_name=credential_name,
+                credential_type_name=name,
+                source_id=source_id,
+            )
+            return None
+
+        target_id = int(existing["id"])
+        try:
+            self.state.save_id_mapping(
+                resource_type="credential_types",
+                source_id=int(source_id),
+                target_id=target_id,
+                source_name=name,
+                target_name=existing.get("name") or name,
+            )
+        except Exception as exc:
+            logger.debug(
+                "credential_type_mapping_cache_failed",
+                source_id=source_id,
+                target_id=target_id,
+                error=str(exc),
+            )
+        logger.info(
+            "resolved_credential_type_by_name",
+            credential_name=credential_name,
+            credential_type_name=name,
+            source_id=source_id,
+            target_id=target_id,
+        )
+        return target_id
+
     async def _resolve_dependencies(
         self, resource_type: str, data: dict[str, Any]
     ) -> dict[str, Any]:
         """Override to handle built-in credential types.
 
-        Built-in credential types (IDs 1-27) are managed by AAP and not exported
-        because they already exist in both AAP 2.3 and AAP 2.6. We assume they
-        have consistent IDs between versions.
+        Built-in credential types are managed by AAP and not exported because
+        they already exist on source and target. Their IDs are **not** stable
+        across versions — resolve via id_mappings (from
+        ``map_managed_credential_types``) or by type name, never by assuming
+        the source ID is valid on the target.
 
-        Custom credential types (IDs 28+) use normal ID mapping resolution.
+        Custom credential types use normal ID mapping resolution.
 
         Args:
             resource_type: The resource type being imported
@@ -3838,49 +3998,51 @@ class CredentialImporter(ResourceImporter):
             Resource data with resolved target IDs
         """
         resolved = dict(data)
+        dependency_names = data.get("_dependency_names")
+        if not isinstance(dependency_names, dict):
+            dependency_names = {}
 
         # Handle credential_type field specially
         if "credential_type" in data and data["credential_type"]:
             source_id = data["credential_type"]
             target_id = self.state.get_mapped_id("credential_types", source_id)
+            type_name = dependency_names.get("credential_type")
 
             if target_id:
-                # Custom credential type - use mapping
                 resolved["credential_type"] = target_id
                 logger.debug(
-                    "resolved_custom_credential_type",
+                    "resolved_credential_type_from_mapping",
                     credential_name=data.get("name"),
                     source_id=source_id,
                     target_id=target_id,
+                    credential_type_name=type_name,
                 )
             else:
-                # No mapping found
-                if source_id <= self.BUILTIN_CREDENTIAL_TYPE_MAX_ID:
-                    # Built-in credential type - assume same ID in AAP 2.6
-                    logger.debug(
-                        "using_builtin_credential_type",
-                        credential_name=data.get("name"),
-                        credential_type_id=source_id,
-                        message="Assuming consistent ID for built-in credential type",
-                    )
-                    # Keep original ID (assumption: built-in types have same IDs)
-                    resolved["credential_type"] = source_id
+                # Prefer name lookup — builtin IDs differ across AAP versions
+                # (e.g. Source Control: Tower id=2 vs AAP 2.7 id=6).
+                recovered = await self._resolve_credential_type_by_name(
+                    source_id=source_id,
+                    type_name=type_name if isinstance(type_name, str) else None,
+                    credential_name=data.get("name"),
+                )
+                if recovered is not None:
+                    resolved["credential_type"] = recovered
                 else:
-                    # Custom type (ID > 27) but no mapping = ERROR
                     logger.error(
-                        "missing_custom_credential_type_mapping",
+                        "missing_credential_type_mapping",
                         credential_name=data.get("name"),
                         source_id=source_id,
-                        message="Custom credential type not found in ID mappings",
+                        credential_type_name=type_name,
+                        message=(
+                            "credential_type has no id mapping and could not be "
+                            "resolved by name; refusing to reuse source ID "
+                            "(builtin IDs differ across AAP versions)"
+                        ),
                     )
-                    # Remove field to allow partial import (existing behavior)
                     resolved.pop("credential_type", None)
 
         # Resolve other dependencies (organization, user, team) using base logic
         name_prefix = str(data.get("_name_prefix") or self.name_prefix or "")
-        dependency_names = data.get("_dependency_names")
-        if not isinstance(dependency_names, dict):
-            dependency_names = {}
 
         for field, dep_resource_type in self.DEPENDENCIES.items():
             # Skip credential_type - already handled above
