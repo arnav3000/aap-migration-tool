@@ -17,7 +17,6 @@ class ExclusionSets:
     computed_fields: int = 0
     related_collections: int = 0
     fk_fields_by_name: int = 0
-    version_gap_defaults: int = 0
     type_specific_overrides: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -26,7 +25,6 @@ class ExclusionSets:
             "computed_fields": self.computed_fields,
             "related_collections": self.related_collections,
             "fk_fields_by_name": self.fk_fields_by_name,
-            "version_gap_defaults": self.version_gap_defaults,
             "type_specific_overrides": self.type_specific_overrides,
         }
 
@@ -245,6 +243,8 @@ class PerInventoryCountParity:
 class T4HostSampling:
     total_hosts_source: int = 0
     total_hosts_target: int = 0
+    matched_hosts: int = 0
+    missing_hosts: int = 0
     inventories_checked: int = 0
     sample_size: int = 0
     sample_methodology: str = "stratified by inventory, fixed-seed reproducible"
@@ -259,6 +259,8 @@ class T4HostSampling:
         return {
             "total_hosts_source": self.total_hosts_source,
             "total_hosts_target": self.total_hosts_target,
+            "matched_hosts": self.matched_hosts,
+            "missing_hosts": self.missing_hosts,
             "inventories_checked": self.inventories_checked,
             "sample_size": self.sample_size,
             "sample_methodology": self.sample_methodology,
@@ -362,15 +364,18 @@ class OrgValidationSummary:
     extra: int = 0
     field_mismatches: int = 0
     unexplained: int = 0
+    explained_failures: int = 0
+    explained_skips: int = 0
     per_type: list[OrgTypeRollup] = field(default_factory=list)
     missing_details: list[MissingDetail] = field(default_factory=list)
     field_findings: list[FieldFinding] = field(default_factory=list)
 
     @property
     def health(self) -> str:
-        if self.unexplained > 0:
+        # Import failures are still failures even when explained by the DB
+        if self.unexplained > 0 or self.explained_failures > 0:
             return "red"
-        if self.missing > 0 or self.field_mismatches > 0:
+        if self.missing > 0 or self.field_mismatches > 0 or self.explained_skips > 0:
             return "amber"
         return "green"
 
@@ -385,6 +390,8 @@ class OrgValidationSummary:
             "extra": self.extra,
             "field_mismatches": self.field_mismatches,
             "unexplained": self.unexplained,
+            "explained_failures": self.explained_failures,
+            "explained_skips": self.explained_skips,
             "health": self.health,
             "per_type": [t.to_dict() for t in self.per_type],
             "missing_details": [d.to_dict() for d in self.missing_details],

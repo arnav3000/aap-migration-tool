@@ -76,7 +76,9 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
     orgs_red = sum(1 for o in result.per_org.values() if o.health == "red")
     orgs_amber = sum(1 for o in result.per_org.values() if o.health == "amber")
     orgs_green = n_orgs - orgs_red - orgs_amber
-
+    orgs_explained_failures = sum(
+        o.explained_failures for o in result.per_org.values()
+    )
     json_block = _safe_json_embed(d)
     inv_raw = json.dumps(result.inventory_to_dict(), separators=(",", ":"), default=str)
     inv_block = inv_raw.replace("</", "<\\/")
@@ -125,7 +127,11 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
             f'<td class="num" style="color:var(--fail);">{inv.delta:+d}</td></tr>'
         )
     inv_html = "\n".join(inv_rows) if inv_rows else (
-        '<tr><td colspan="4" class="empty-msg">All inventory counts match.</td></tr>'
+        '<tr><td colspan="4" class="empty-msg">'
+        + ("Host sampling not run for this validation."
+           if not (hs.total_hosts_source or hs.total_hosts_target or hs.inventories_checked)
+           else "All inventory counts match.")
+        + "</td></tr>"
     )
 
     # Server-render auditor (small fixed data)
@@ -146,7 +152,18 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
         '<tr><td colspan="4" class="empty-msg">No auditor data available.</td></tr>'
     )
 
-    host_missing = max(0, hs.total_hosts_source - hs.total_hosts_target)
+    is_live_validate = meta.mode == "validate-live"
+    host_missing = hs.missing_hosts
+    host_matched = hs.matched_hosts
+    host_issues = (
+        host_missing
+        + inv_parity.mismatching
+        + hs.field_mismatches_in_sample
+    )
+    host_tab_ran = bool(
+        hs.total_hosts_source or hs.total_hosts_target or hs.inventories_checked
+        or hs.sample_size
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -159,8 +176,12 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
   --bg:#f8f9fa;--card:#fff;--fg:#1a1a2e;--fg2:#57606a;
   --accent:#0f3460;--accent2:#16213e;--border:#d0d7de;
   --code-bg:#f6f8fa;--stripe:#f8f9fb;
-  --pass:#1a7f37;--pass-bg:#dafbe1;--fail:#cf222e;--fail-bg:#ffebe9;
-  --warn:#bf8700;--warn-bg:#fff8c5;--info:#0969da;--info-bg:#ddf4ff;
+  /* Ansible / PatternFly status colours */
+  --pass:#3e8635;--pass-bg:#f3faf2;
+  --warn:#f0ab00;--warn-bg:#fdf7e7;
+  --fail:#c9190b;--fail-bg:#faeae8;
+  --skip:#6a6e73;--skip-bg:#f0f0f0;
+  --info:#0066cc;--info-bg:#e7f1fa;
   --shadow:0 1px 3px rgba(0,0,0,.1);
 }}
 *{{box-sizing:border-box;margin:0;padding:0}}
@@ -189,14 +210,17 @@ nav{{background:var(--card);border-bottom:1px solid var(--border);padding:0 2rem
 /* ── Cards ── */
 .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.7rem;margin:.8rem 0}}
 .card{{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.8rem;text-align:center;box-shadow:var(--shadow)}}
-.card .v{{font-size:1.6rem;font-weight:700;color:var(--accent)}}.card .v.ok{{color:var(--pass)}}.card .v.bad{{color:var(--fail)}}.card .v.w{{color:var(--warn)}}
+.card .v{{font-size:1.6rem;font-weight:700;color:var(--accent)}}
+.card .v.ok{{color:var(--pass)}}.card .v.bad{{color:var(--fail)}}
+.card .v.warn{{color:var(--warn)}}.card .v.skip{{color:var(--skip)}}
 .card .l{{font-size:.75rem;color:var(--fg2);margin-top:1px}}
 
 /* ── Funnel ── */
-.funnel{{margin:1.2rem 0}}.funnel-step{{display:flex;align-items:center;margin:6px 0}}
-.funnel-bar{{height:32px;border-radius:6px;display:flex;align-items:center;padding:0 12px;font-weight:600;font-size:.82rem;color:#fff;min-width:60px;transition:width .4s}}
-.funnel-label{{width:120px;font-size:.82rem;color:var(--fg2);font-weight:500;text-align:right;padding-right:12px;flex-shrink:0}}
-.funnel-count{{font-size:.8rem;color:var(--fg2);margin-left:10px;white-space:nowrap}}
+.funnel{{margin:1.2rem 0}}.funnel-step{{display:flex;align-items:center;margin:6px 0;gap:10px}}
+.funnel-label{{width:120px;font-size:.82rem;color:var(--fg2);font-weight:500;text-align:right;flex-shrink:0}}
+.funnel-track{{flex:1;min-width:0;height:32px;background:#e9ecef;border-radius:6px;overflow:hidden}}
+.funnel-bar{{height:100%;border-radius:6px;box-sizing:border-box;min-width:0;max-width:100%;transition:width .4s}}
+.funnel-count{{font-size:.8rem;color:var(--fg2);white-space:nowrap;width:5.5rem;flex-shrink:0;font-variant-numeric:tabular-nums}}
 
 /* ── Progress bars (per-type) ── */
 .pbar-row{{display:flex;align-items:center;padding:5px 0;border-bottom:1px solid #eee}}
@@ -205,6 +229,25 @@ nav{{background:var(--card);border-bottom:1px solid var(--border);padding:0 2rem
 .pbar-seg{{height:100%;transition:width .3s}}
 .pbar-nums{{font-size:.78rem;color:var(--fg2);white-space:nowrap;width:180px;text-align:right;flex-shrink:0}}
 .pbar-row:hover{{background:rgba(15,52,96,.04);border-radius:6px}}
+
+/* ── T1 type cards: count parity + field object parity ── */
+.type-card{{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.8rem;margin:.5rem 0;box-shadow:var(--shadow);cursor:pointer}}
+.type-card:hover{{border-color:var(--accent);background:rgba(15,52,96,.02)}}
+.type-card-head{{display:flex;justify-content:space-between;align-items:center;gap:.5rem}}
+.type-card-head strong{{font-size:.9rem}}
+.type-card-meta{{font-size:.78rem;color:var(--fg2);flex-shrink:0}}
+.type-bar-row{{display:flex;align-items:center;gap:.6rem;margin-top:.45rem}}
+.type-bar-label{{width:4.2rem;font-size:.72rem;color:var(--fg2);flex-shrink:0}}
+.type-bar-track{{flex:1;min-width:0;height:14px;background:#e9ecef;border-radius:4px;overflow:hidden;display:flex}}
+.type-bar-seg{{height:100%;min-width:0}}
+.type-bar-seg.ok{{background:var(--pass)}}
+.type-bar-seg.bad{{background:var(--fail)}}
+.type-bar-seg.warn{{background:var(--warn)}}
+.type-bar-nums{{font-size:.72rem;color:var(--fg2);white-space:nowrap;width:9.5rem;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums}}
+.type-card-stats{{display:flex;flex-wrap:wrap;gap:1rem;margin-top:.45rem;font-size:.78rem;color:var(--fg2)}}
+.type-legend{{display:flex;flex-wrap:wrap;gap:1rem;font-size:.75rem;color:var(--fg2);margin:.4rem 0 .8rem}}
+.type-legend i{{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}}
+.type-legend .ok{{background:var(--pass)}}.type-legend .bad{{background:var(--fail)}}.type-legend .warn{{background:var(--warn)}}
 
 /* ── Dot grid ── */
 .dot-grid{{display:flex;flex-wrap:wrap;gap:3px;padding:8px;background:var(--card);border:1px solid var(--border);border-radius:8px;margin:.8rem 0;box-shadow:var(--shadow)}}
@@ -217,7 +260,7 @@ nav{{background:var(--card);border-bottom:1px solid var(--border);padding:0 2rem
 
 /* ── Stacked bar (org drill-in) ── */
 .sbar{{height:22px;display:flex;border-radius:4px;overflow:hidden;margin:2px 0}}
-.sbar-s{{background:var(--pass);height:100%}}.sbar-m{{background:var(--fail);height:100%}}.sbar-c{{background:var(--warn);height:100%}}.sbar-u{{background:#6c757d;height:100%}}
+.sbar-s{{background:var(--pass);height:100%}}.sbar-m{{background:var(--fail);height:100%}}.sbar-c{{background:var(--warn);height:100%}}.sbar-u{{background:var(--skip);height:100%}}
 
 /* ── Tables ── */
 table{{width:100%;border-collapse:collapse;margin:.5rem 0;font-size:.83rem;background:var(--card);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}}
@@ -252,7 +295,7 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 .finding-hd{{background:var(--code-bg);padding:.4rem .8rem;display:flex;justify-content:space-between;align-items:center;font-size:.82rem;border-bottom:1px solid var(--border)}}
 .finding-bd{{padding:.6rem .8rem}}.finding-bd table{{box-shadow:none;margin:0}}
 .finding-bd td{{border-bottom:1px solid #f0f0f0;padding:.25rem .4rem}}.finding-bd td:first-child{{font-weight:600;width:110px;color:var(--fg2);font-size:.8rem}}
-.src-val{{color:var(--pass)}}.tgt-val{{color:var(--fail)}}
+.src-val{{color:var(--pass);white-space:pre-wrap;word-break:break-word}}.tgt-val{{color:var(--fail);white-space:pre-wrap;word-break:break-word}}
 
 /* ── Collapsible groups ── */
 .grp-hd{{background:var(--code-bg);padding:.5rem .8rem;cursor:pointer;display:flex;align-items:center;gap:.5rem;border:1px solid var(--border);border-radius:6px;margin:.4rem 0;font-size:.85rem;font-weight:500;user-select:none}}
@@ -268,6 +311,9 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 .filter-bar{{display:flex;gap:.6rem;margin:.6rem 0;align-items:center}}
 .filter-bar input{{flex:1;padding:8px 12px;border:2px solid var(--border);border-radius:6px;font-size:13px}}.filter-bar input:focus{{outline:none;border-color:var(--accent)}}
 .filter-bar select{{padding:7px 10px;border:2px solid var(--border);border-radius:6px;font-size:13px;background:var(--card)}}
+.filter-bar button,.btn{{background:var(--accent);color:#fff;border:none;padding:.3rem .8rem;border-radius:4px;cursor:pointer;font-size:.8rem}}
+.filter-bar button:hover,.btn:hover{{filter:brightness(1.08)}}
+.filter-bar button:disabled,.btn:disabled{{opacity:.4;cursor:default}}
 
 /* ── Drill panel ── */
 .drill{{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;box-shadow:var(--shadow);margin:.6rem 0}}
@@ -276,7 +322,7 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 /* ── Status badges ── */
 .st{{display:inline-block;font-size:.68rem;font-weight:700;padding:2px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:.3px}}
 .st-c{{background:var(--pass-bg);color:var(--pass)}}.st-f{{background:var(--fail-bg);color:var(--fail)}}
-.st-s{{background:var(--warn-bg);color:var(--warn)}}.st-p{{background:#e1e4e8;color:#57606a}}
+.st-s{{background:var(--skip-bg);color:var(--skip)}}.st-p{{background:#e1e4e8;color:#57606a}}
 
 /* ── Object browser table ── */
 .obj-tbl td.err{{font-size:.78rem;color:var(--fail);max-width:350px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
@@ -317,12 +363,12 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 
 <nav>
   <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
-  <button class="tab-btn" data-tab="orgs">Org Health <span class="ct{' ok' if orgs_red == 0 else ''}">{orgs_red}</span></button>
-  <button class="tab-btn" data-tab="types">Resource Types</button>
-  <button class="tab-btn" data-tab="missing">Missing <span class="ct{' ok' if total_missing == 0 else ''}">{_fmt(total_missing)}</span></button>
-  <button class="tab-btn" data-tab="fields">Field Changes <span class="ct{' ok' if total_field_mm == 0 else ''}">{_fmt(total_field_mm)}</span></button>
-  <button class="tab-btn" data-tab="hosts">Hosts</button>
-  <button class="tab-btn" data-tab="auditor">Auditor</button>
+  <button class="tab-btn" data-tab="orgs">Org Health <span class="ct{' ok' if orgs_red == 0 else ''}" title="Organizations with unexplained gaps or import failures">{orgs_red}</span></button>
+  <button class="tab-btn" data-tab="types">Resource Types <span style="opacity:.55;font-weight:600">T1</span></button>
+  <button class="tab-btn" data-tab="missing">Missing <span style="opacity:.55;font-weight:600">T2</span> <span class="ct{' ok' if total_missing == 0 else ''}">{_fmt(total_missing)}</span></button>
+  <button class="tab-btn" data-tab="fields">Field Changes <span style="opacity:.55;font-weight:600">T3</span>{f' <span class="ct{" ok" if total_field_mm == 0 else ""}" title="Objects with ≥1 field mismatch">{_fmt(total_field_mm)}</span>' if is_live_validate else ''}</button>
+  <button class="tab-btn" data-tab="hosts">Hosts <span style="opacity:.55;font-weight:600">T4</span>{f' <span class="ct{" ok" if host_issues == 0 else ""}">{_fmt(host_issues)}</span>' if host_tab_ran else ""}</button>
+  <button class="tab-btn" data-tab="auditor">Auditor{f' <span class="ct{" ok" if ac.mismatches == 0 else ""}">{_fmt(ac.mismatches)}</span>' if meta.mode == "validate-live" else ""}</button>
   <button class="tab-btn" data-tab="method">Methodology</button>
 </nav>
 
@@ -341,14 +387,14 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 <div class="cards" style="grid-template-columns:repeat(4,1fr);">
   <div class="card"><div class="v">{_fmt(hs.total_hosts_source)}</div><div class="l">Source hosts</div></div>
   <div class="card"><div class="v">{_fmt(hs.total_hosts_target)}</div><div class="l">Target hosts</div></div>
-  <div class="card"><div class="v">{_fmt(hs.total_hosts_target)}</div><div class="l">Matched</div></div>
-  <div class="card"><div class="v">{_fmt(host_missing)}</div><div class="l">Missing</div></div>
+  <div class="card"><div class="v ok">{_fmt(host_matched)}</div><div class="l">Matched</div></div>
+  <div class="card"><div class="v{' ok' if host_missing == 0 else ' bad'}">{_fmt(host_missing)}</div><div class="l">Missing</div></div>
 </div>
 <h3>Per-Inventory Count Parity</h3>
 <div class="cards" style="grid-template-columns:repeat(3,1fr);">
   <div class="card"><div class="v">{_fmt(hs.inventories_checked)}</div><div class="l">Inventories</div></div>
   <div class="card"><div class="v ok">{_fmt(inv_parity.matching)}</div><div class="l">Count match</div></div>
-  <div class="card"><div class="v">{_fmt(inv_parity.mismatching)}</div><div class="l">Count mismatch</div></div>
+  <div class="card"><div class="v{' ok' if inv_parity.mismatching == 0 else ' bad'}">{_fmt(inv_parity.mismatching)}</div><div class="l">Count mismatch</div></div>
 </div>
 <table><thead><tr><th>Inventory</th><th class="num">Source</th><th class="num">Target</th><th class="num">Delta</th></tr></thead>
 <tbody>{inv_html}</tbody></table>
@@ -388,17 +434,16 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 <h3>Comparison Rules (v{escape(meta.comparison_rules_version)})</h3>
 <table>
   <tr><th>#</th><th>Rule</th><th>Effect</th></tr>
-  <tr><td>1</td><td>METADATA_FIELDS ({exc.metadata_fields})</td><td>Excluded: id, type, url, related, summary_fields</td></tr>
+  <tr><td>1</td><td>METADATA_FIELDS ({exc.metadata_fields})</td><td>Excluded: id, type, url, related, summary_fields, opa_query_path, local_path, client_id, capacity, jobs_total, inventory_sources_with_failures, …</td></tr>
   <tr><td>2</td><td>COMPUTED_FIELDS ({exc.computed_fields})</td><td>Excluded: next_run, status, last_job_run</td></tr>
   <tr><td>3</td><td>RELATED_COLLECTIONS ({exc.related_collections})</td><td>Excluded: credentials, schedules, survey_spec</td></tr>
   <tr><td>4</td><td>FK_FIELDS ({exc.fk_fields_by_name})</td><td>Compared by referent name, not raw ID</td></tr>
-  <tr><td>5</td><td>VERSION_GAP ({exc.version_gap_defaults})</td><td>Absent on source + default on target = equal</td></tr>
-  <tr><td>6</td><td>ENCRYPTED</td><td>$encrypted$ = not comparable</td></tr>
-  <tr><td>7</td><td>NONE_VS_DICT</td><td>None = {{key: None, ...}}</td></tr>
-  <tr><td>8</td><td>CRED_TYPE</td><td>inputs, injectors excluded</td></tr>
-  <tr><td>9</td><td>SCHED_ENABLED</td><td>enabled excluded</td></tr>
-  <tr><td>10</td><td>AUDITOR</td><td>Verified via Gateway role assignments</td></tr>
-  <tr><td>11</td><td>PRIVATE</td><td>_ prefixed fields excluded</td></tr>
+  <tr><td>5</td><td>ENCRYPTED</td><td>$encrypted$ = not comparable</td></tr>
+  <tr><td>6</td><td>NONE_VS_DICT</td><td>None = {{key: None, ...}}</td></tr>
+  <tr><td>7</td><td>CRED_TYPE</td><td>inputs, injectors excluded</td></tr>
+  <tr><td>8</td><td>SCHED_ENABLED</td><td>enabled excluded</td></tr>
+  <tr><td>9</td><td>AUDITOR</td><td>Verified via Gateway role assignments</td></tr>
+  <tr><td>10</td><td>PRIVATE</td><td>_ prefixed fields excluded</td></tr>
 </table>
 <h3>Run Parameters</h3>
 <div class="meta-grid">
@@ -410,6 +455,7 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
   <div class="k">API calls</div><div class="v">{_fmt(meta.total_api_calls)}</div>
   <div class="k">Mode</div><div class="v">{escape(meta.mode)}</div>
   <div class="k">Field data source</div><div class="v">{escape(fd_source_label)}</div>
+  <div class="k">Host sample</div><div class="v">{_fmt(meta.host_sample_size)} (seed {meta.host_sample_seed})</div>
   <div class="k">Overrides</div><div class="v">{escape(type_overrides_str)}</div>
 </div>
 </div>
@@ -428,9 +474,29 @@ let curTab='dashboard';
 /* ── Helpers ── */
 function esc(s){{if(s==null)return'';var d=document.createElement('div');d.textContent=String(s);return d.innerHTML}}
 function fmt(n){{return n.toLocaleString()}}
-function ids(s,t){{return'<span class="ids">[src:'+(s!=null?s:'—')+' → tgt:'+(t!=null?t:'—')+']</span>'}}
+function ids(s,t){{return'<span class="ids">[src:'+(s!=null?s:'N/A')+' → tgt:'+(t!=null?t:'N/A')+']</span>'}}
 function objD(n,o,s,t){{var h='<strong>'+esc(n)+'</strong>';if(o)h+=' &middot; '+esc(o);h+=' '+ids(s,t);return h}}
 function pct(n,d){{return d?Math.round(n/d*100):0}}
+/* Match/completion %: never round up to 100% when anything is still missing */
+function pctMatched(matched,source,gaps){{
+  if(!source)return 0;
+  if(gaps>0){{
+    if(matched<=0)return 0;
+    return Math.min(99,Math.floor(matched/source*100));
+  }}
+  return matched>=source?100:Math.floor(matched/source*100);
+}}
+/* Largest-remainder so parts always sum to 100 (or 0 if total is 0) */
+function pctParts(parts,total){{
+  if(!total)return parts.map(function(){{return 0}});
+  var exact=parts.map(function(p){{return p/total*100}});
+  var floors=exact.map(function(x){{return Math.floor(x)}});
+  var rem=100-floors.reduce(function(a,b){{return a+b}},0);
+  var order=exact.map(function(x,i){{return{{i:i,frac:x-floors[i]}}}})
+    .sort(function(a,b){{return b.frac-a.frac||a.i-b.i}});
+  for(var k=0;rem>k;k++)floors[order[k%order.length].i]++;
+  return floors;
+}}
 function hcls(h){{return h==='red'?'h-r':h==='amber'?'h-a':'h-g'}}
 function hlbl(h){{return h.toUpperCase()}}
 function allTypes(){{return D.per_type.map(function(t){{return t.resource_type}}).sort()}}
@@ -537,33 +603,45 @@ function renderDashboard(){{
 
   var h='<h2>Migration Overview</h2>';
 
-  // Funnel
+  // Partition bars: Matched + Explained Gaps + Unexplained Gaps always sum to 100%
   h+='<div class="funnel">';
+  var partTotal=mat+expl+unex;
+  if(!partTotal)partTotal=src;
+  var parts=pctParts([mat,expl,unex],partTotal);
   var steps=[
-    ['Source Objects',src,src,'var(--accent)'],
-    ['Matched',mat,src,'var(--pass)'],
-    ['Explained Gaps',expl,src,'var(--warn)'],
-    ['UNEXPLAINED',unex,src,'var(--fail)']
+    ['Source Objects',src,src?100:0,'var(--accent)'],
+    ['Matched',mat,parts[0],'var(--pass)'],
+    ['Explained Gaps',expl,parts[1],'var(--skip)'],
+    ['Unexplained Gaps',unex,parts[2],'var(--fail)']
   ];
   steps.forEach(function(s){{
-    var w=pct(s[1],s[2]);
-    if(s[1]>0&&w<3)w=3;
+    var count=s[1],w=s[2];
     h+='<div class="funnel-step">';
     h+='<div class="funnel-label">'+s[0]+'</div>';
-    h+='<div class="funnel-bar" style="width:'+w+'%;background:'+s[3]+'">'+fmt(s[1])+'</div>';
-    h+='<div class="funnel-count">'+pct(s[1],s[2])+'%</div>';
+    h+='<div class="funnel-track">';
+    if(count>0&&w>0){{
+      h+='<div class="funnel-bar" style="width:'+w+'%;background:'+s[3]+'" title="'+fmt(count)+' ('+w+'%)"></div>';
+    }}else if(count>0){{
+      // Non-zero count rounded to 0% — show a hairline so it is not invisible
+      h+='<div class="funnel-bar" style="width:1px;background:'+s[3]+'" title="'+fmt(count)+' (<1%)"></div>';
+    }}
+    h+='</div>';
+    h+='<div class="funnel-count">'+fmt(count)+' · '+w+'%</div>';
     h+='</div>';
   }});
   h+='</div>';
+  if(partTotal&&(mat+expl+unex)===partTotal){{
+    h+='<div style="font-size:.75rem;color:var(--fg2);margin:-.4rem 0 .6rem">Matched + Explained Gaps + Unexplained Gaps = 100% of source objects</div>';
+  }}
 
-  // Stat cards — clickable
+  // Stat cards — green=success, yellow=field changes, red=problems, grey=skip/zero-problems
   h+='<div class="cards">';
   h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'all\\')"><div class="v">'+fmt(src)+'</div><div class="l">Source objects &#8594;</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'all\\')"><div class="v">'+fmt(tgt)+'</div><div class="l">Target objects &#8594;</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'c\\')"><div class="v ok">'+fmt(mat)+'</div><div class="l">Matched &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="switchTab(\\'missing\\')"><div class="v bad">'+fmt(mis)+'</div><div class="l">Missing &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="switchTab(\\'fields\\')"><div class="v">'+fmt(fmm)+'</div><div class="l">Field changes &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="switchTab(\\'missing\\')"><div class="v'+(unex===0?' ok':' bad')+'">'+fmt(unex)+'</div><div class="l">UNEXPLAINED &#8594;</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="switchTab(\\'missing\\')"><div class="v'+(mis===0?' ok':' bad')+'">'+fmt(mis)+'</div><div class="l">Missing &#8594;</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="switchTab(\\'fields\\')"><div class="v'+(fmm===0?' ok':' warn')+'">'+fmt(fmm)+'</div><div class="l">Objects with field changes &#8594;</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="switchTab(\\'missing\\')"><div class="v'+(unex===0?' ok':' bad')+'">'+fmt(unex)+'</div><div class="l">Unexplained &#8594;</div></div>';
   h+='</div>';
 
   // Migration status cards — completed/failed/skipped
@@ -573,16 +651,16 @@ function renderDashboard(){{
   h+='<h3>Migration Status</h3>';
   h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr));">';
   h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'c\\')"><div class="v ok">'+fmt(stC)+'</div><div class="l">Completed &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'f\\')"><div class="v bad">'+fmt(stF)+'</div><div class="l">Failed &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'s\\')"><div class="v w">'+fmt(stS)+'</div><div class="l">Skipped &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'p\\')"><div class="v">'+fmt(stP)+'</div><div class="l">Pending &#8594;</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'f\\')"><div class="v'+(stF>0?' bad':' skip')+'">'+fmt(stF)+'</div><div class="l">Failed &#8594;</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'s\\')"><div class="v skip">'+fmt(stS)+'</div><div class="l">Skipped &#8594;</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'p\\')"><div class="v skip">'+fmt(stP)+'</div><div class="l">Pending &#8594;</div></div>';
   h+='</div>';
 
   // Org health summary — clickable
   h+='<h3>Organization Health ('+nOrgs+' orgs)</h3>';
   h+='<div class="cards" style="grid-template-columns:repeat(3,1fr);">';
   h+='<div class="card" style="cursor:pointer" onclick="orgFilter=\\'green\\';switchTab(\\'orgs\\')"><div class="v ok">'+oG+'</div><div class="l">GREEN &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="orgFilter=\\'amber\\';switchTab(\\'orgs\\')"><div class="v w">'+oA+'</div><div class="l">AMBER &#8594;</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="orgFilter=\\'amber\\';switchTab(\\'orgs\\')"><div class="v warn">'+oA+'</div><div class="l">AMBER &#8594;</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="orgFilter=\\'red\\';switchTab(\\'orgs\\')"><div class="v bad">'+oR+'</div><div class="l">RED &#8594;</div></div>';
   h+='</div>';
 
@@ -591,7 +669,8 @@ function renderDashboard(){{
   var sorted=pt.slice().sort(function(a,b){{return pct(a.t2_existence.matched,a.t1_counts.source)-pct(b.t2_existence.matched,b.t1_counts.source)}});
   sorted.forEach(function(t){{
     var s=t.t1_counts.source,m=t.t2_existence.matched,mi=t.t2_existence.missing_on_target,fm=t.t3_field_parity.mismatching;
-    var pm=pct(m,s),pmi=pct(mi,s),pfm=pct(fm,s);
+    var typeGaps=(t.t1_counts.explained_failures||0)+(t.t1_counts.explained_skips||0)+(t.t1_counts.unexplained||0);
+    var pm=pctMatched(m,s,typeGaps),pmi=pct(mi,s),pfm=pct(fm,s);
     h+='<div class="pbar-row" style="cursor:pointer" onclick="typeDrill=\\''+esc(t.resource_type)+'\\';switchTab(\\'types\\')">';
     h+='<div class="pbar-name" title="'+esc(t.resource_type)+'">'+esc(t.display_name||t.resource_type)+'</div>';
     h+='<div class="pbar-track">';
@@ -630,6 +709,9 @@ function renderOrgs(){{
   }});
 
   var h='<h2>Organization Health &mdash; '+okeys.length+' Organizations</h2>';
+  if({orgs_explained_failures}>0){{
+    h+='<div class="callout callout-fail"><strong>Import failures:</strong> '+fmt({orgs_explained_failures})+' object(s) failed import. These are explained by the migration DB but still mark organizations as RED.</div>';
+  }}
 
   // Dot grid
   h+='<div class="dot-legend"><span class="lg">Green ('+{orgs_green}+')</span><span class="la">Amber ('+{orgs_amber}+')</span><span class="lr">Red ('+{orgs_red}+')</span></div>';
@@ -655,12 +737,13 @@ function renderOrgs(){{
   if(orgPage>pages)orgPage=1;
   var start=(orgPage-1)*PER,slice=filtered.slice(start,start+PER);
 
-  h+='<table><thead><tr><th>Organization</th><th style="width:200px">Progress</th><th class="num">Objects</th><th class="num">Missing</th><th class="num">Changed</th><th class="num">Unexplained</th><th>Health</th></tr></thead><tbody>';
+  h+='<table><thead><tr><th>Organization</th><th style="width:200px">Progress</th><th class="num">Objects</th><th class="num">Missing</th><th class="num">Failed</th><th class="num">Changed</th><th class="num">Unexplained</th><th>Health</th></tr></thead><tbody>';
   if(!slice.length){{
-    h+='<tr><td colspan="7" class="empty-msg">No organizations match your filter.</td></tr>';
+    h+='<tr><td colspan="8" class="empty-msg">No organizations match your filter.</td></tr>';
   }}
   slice.forEach(function(o){{
     var pm=pct(o.matched,o.total_objects);
+    var fails=o.explained_failures||0;
     h+='<tr class="clickable" onclick="drillOrgByName(\\''+esc(o.org_name).replace(/'/g,"\\\\'")+'\\')">';
     h+='<td>'+objD(o.org_name,'',o.source_id,o.target_id)+'</td>';
     h+='<td><div class="pbar-track"><div class="pbar-seg" style="width:'+pm+'%;background:var(--pass)"></div>';
@@ -668,6 +751,7 @@ function renderOrgs(){{
     h+='</div></td>';
     h+='<td class="num">'+fmt(o.total_objects)+'</td>';
     h+='<td class="num">'+fmt(o.missing)+'</td>';
+    h+='<td class="num"'+(fails>0?' style="color:var(--fail);font-weight:700"':'')+'>'+fmt(fails)+'</td>';
     h+='<td class="num">'+fmt(o.field_mismatches)+'</td>';
     h+='<td class="num"'+(o.unexplained>0?' style="color:var(--fail);font-weight:700"':'')+'>'+fmt(o.unexplained)+'</td>';
     h+='<td><span class="health '+hcls(o.health)+'">'+hlbl(o.health)+'</span></td>';
@@ -690,7 +774,7 @@ function drillOrg(idx){{
   var okeys=Object.keys(D.per_org||{{}});
   var orgs=okeys.map(function(k){{return D.per_org[k]}});
   orgs.sort(function(a,b){{var ha=a.health==='red'?0:a.health==='amber'?1:2;var hb=b.health==='red'?0:b.health==='amber'?1:2;if(ha!==hb)return ha-hb;return b.total_objects-a.total_objects}});
-  if(idx>=0&&idx<orgs.length){{orgDrill=orgs[idx].org_name;switchTab('orgs')}}
+  if(idx>=0&&orgs.length>idx){{orgDrill=orgs[idx].org_name;switchTab('orgs')}}
 }}
 function drillOrgByName(name){{orgDrill=name;renderOrgs()}}
 
@@ -698,11 +782,14 @@ function renderOrgDrill(orgName){{
   if(orgObjType){{renderOrgObj(orgName,orgObjType);return}}
   var o=(D.per_org||{{}})[orgName];
   if(!o){{orgDrill=null;renderOrgs();return}}
-  var explained=o.total_objects-o.matched-o.missing-o.unexplained;
-  if(explained<0)explained=0;
+  var fails=o.explained_failures||0;
+  var skips=o.explained_skips||0;
   var h='<div class="drill">';
   h+='<button class="back-btn" onclick="orgDrill=null;renderOrgs()">&#9664; Back to all orgs</button>';
   h+='<h2>'+esc(o.org_name)+' '+ids(o.source_id,o.target_id)+' <span class="health '+hcls(o.health)+'">'+hlbl(o.health)+'</span></h2>';
+  if(fails>0){{
+    h+='<div class="callout callout-fail"><strong>Import failures:</strong> '+fmt(fails)+' object(s) failed import in this organization (explained by migration DB, still treated as failures).</div>';
+  }}
 
   // Summary cards — clickable where data exists
   h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">';
@@ -714,22 +801,21 @@ function renderOrgDrill(orgName){{
   }}else{{
     h+='<div class="card"><div class="v ok">0</div><div class="l">Missing</div></div>';
   }}
+  h+='<div class="card"><div class="v'+(fails>0?' bad':' ok')+'">'+fmt(fails)+'</div><div class="l">Failed imports</div></div>';
+  if(skips>0)h+='<div class="card"><div class="v skip">'+fmt(skips)+'</div><div class="l">Skipped gaps</div></div>';
   if(o.field_mismatches>0){{
     h+='<div class="card" style="cursor:pointer" onclick="orgDrillSection=\\'fields\\';renderOrgDrill(\\''+esc(o.org_name).replace(/'/g,"\\\\'")+'\\')">';
-    h+='<div class="v w">'+fmt(o.field_mismatches)+'</div><div class="l">Changed &#8594;</div></div>';
+    h+='<div class="v warn">'+fmt(o.field_mismatches)+'</div><div class="l">Changed &#8594;</div></div>';
   }}else{{
     h+='<div class="card"><div class="v ok">0</div><div class="l">Changed</div></div>';
   }}
-  if(explained>0)h+='<div class="card"><div class="v w">'+fmt(explained)+'</div><div class="l">Explained gaps</div></div>';
   h+='<div class="card"><div class="v'+(o.unexplained===0?' ok':' bad')+'">'+fmt(o.unexplained)+'</div><div class="l">Unexplained</div></div>';
   h+='</div>';
 
   // Accounting callout
-  if(explained>0){{
-    h+='<div class="callout callout-info">'+fmt(o.total_objects)+' source = '+fmt(o.matched)+' matched + '+fmt(o.missing)+' missing + '+fmt(explained)+' explained gaps';
-    if(o.unexplained>0)h+=' + '+fmt(o.unexplained)+' unexplained';
-    h+='</div>';
-  }}
+  h+='<div class="callout callout-info">'+fmt(o.total_objects)+' source = '+fmt(o.matched)+' matched + '+fmt(fails)+' failed + '+fmt(skips)+' skipped + '+fmt(o.unexplained)+' unexplained';
+  if(o.field_mismatches>0)h+=' &middot; '+fmt(o.field_mismatches)+' with field changes';
+  h+='</div>';
 
   // Per-type table — click any row to browse objects
   if(o.per_type&&o.per_type.length){{
@@ -826,15 +912,15 @@ function renderOrgObj(orgName,rt){{
   h+='<h2>'+esc(o.org_name)+' &rarr; '+esc(rt)+'</h2>';
 
   h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr));">';
-  h+='<div class="card"><div class="v">'+fmt(items.length)+'</div><div class="l">Total</div></div>';
+  h+='<div class="card"><div class="v">'+fmt(items.length)+'</div><div class="l">Total objects</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'c\\';objPage=1;renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')">';
-  h+='<div class="v ok">'+fmt(cC)+'</div><div class="l">Completed</div></div>';
+  h+='<div class="v ok">'+fmt(cC)+'</div><div class="l">Completed objects</div></div>';
   if(cF){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'f\\';objPage=1;renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')">';
-  h+='<div class="v bad">'+fmt(cF)+'</div><div class="l">Failed</div></div>';}}
+  h+='<div class="v bad">'+fmt(cF)+'</div><div class="l">Failed objects</div></div>';}}
   if(cS){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'s\\';objPage=1;renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')">';
-  h+='<div class="v w">'+fmt(cS)+'</div><div class="l">Skipped</div></div>';}}
+  h+='<div class="v skip">'+fmt(cS)+'</div><div class="l">Skipped objects</div></div>';}}
   if(cP){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'p\\';objPage=1;renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')">';
-  h+='<div class="v">'+fmt(cP)+'</div><div class="l">Pending</div></div>';}}
+  h+='<div class="v skip">'+fmt(cP)+'</div><div class="l">Pending objects</div></div>';}}
   h+='</div>';
 
   h+=renderObjectTable(items,filtered,'orgsContent','&#9664; Back','renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')',rt);
@@ -866,11 +952,11 @@ function renderAllObjects(){{
   h+='<button class="back-btn" onclick="objSt=\\'all\\';objOrg=\\'\\';objSearch=\\'\\';objPage=1;allObjType=\\'all\\';allObjView=null;renderTypes()">&#9664; Back to types</button>';
   h+='<h2>All Objects &mdash; '+fmt(items.length)+' total</h2>';
   h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr));">';
-  h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'all\\';objPage=1;renderAllObjects()"><div class="v">'+fmt(items.length)+'</div><div class="l">Total</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'c\\';objPage=1;renderAllObjects()"><div class="v ok">'+fmt(cC)+'</div><div class="l">Completed</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'f\\';objPage=1;renderAllObjects()"><div class="v bad">'+fmt(cF)+'</div><div class="l">Failed</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'s\\';objPage=1;renderAllObjects()"><div class="v w">'+fmt(cS)+'</div><div class="l">Skipped</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'p\\';objPage=1;renderAllObjects()"><div class="v">'+fmt(cP)+'</div><div class="l">Pending</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'all\\';objPage=1;renderAllObjects()"><div class="v">'+fmt(items.length)+'</div><div class="l">Total objects</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'c\\';objPage=1;renderAllObjects()"><div class="v ok">'+fmt(cC)+'</div><div class="l">Completed objects</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'f\\';objPage=1;renderAllObjects()"><div class="v'+(cF>0?' bad':' skip')+'">'+fmt(cF)+'</div><div class="l">Failed objects</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'s\\';objPage=1;renderAllObjects()"><div class="v skip">'+fmt(cS)+'</div><div class="l">Skipped objects</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'p\\';objPage=1;renderAllObjects()"><div class="v skip">'+fmt(cP)+'</div><div class="l">Pending objects</div></div>';
   h+='</div>';
 
   h+='<div class="filter-bar">';
@@ -888,7 +974,7 @@ function renderAllObjects(){{
   h+='</select>';
   h+='<input type="text" placeholder="Filter by org..." value="'+esc(objOrg)+'" oninput="objOrg=this.value;objPage=1;renderAllObjects()" style="max-width:200px">';
   h+='<input type="text" placeholder="Search by name..." value="'+esc(objSearch)+'" oninput="objSearch=this.value;objPage=1;renderAllObjects()">';
-  if(objSt!=='all'||allObjType!=='all'||objOrg||objSearch)h+='<button onclick="objSt=\\'all\\';allObjType=\\'all\\';objOrg=\\'\\';objSearch=\\'\\';objPage=1;renderAllObjects()" style="background:var(--fg2);font-size:.78rem">Clear</button>';
+  if(objSt!=='all'||allObjType!=='all'||objOrg||objSearch)h+='<button onclick="objSt=\\'all\\';allObjType=\\'all\\';objOrg=\\'\\';objSearch=\\'\\';objPage=1;renderAllObjects()">Clear</button>';
   h+='</div>';
 
   var PER=100,total=filtered.length,pages=Math.ceil(total/PER);
@@ -898,7 +984,7 @@ function renderAllObjects(){{
   h+='<table class="obj-tbl"><thead><tr><th>Object Name</th><th>Type</th><th>Organization</th><th class="num">Source ID</th><th class="num">Target ID</th><th>Status</th><th>Error / Notes</th></tr></thead><tbody>';
   if(!slice.length)h+='<tr><td colspan="7" class="empty-msg">No objects match your filters.</td></tr>';
   slice.forEach(function(e){{
-    var invArr=INV[e._rt]||[];var idx=invArr.indexOf(e._ref);if(idx<0)for(var ii=0;ii<invArr.length;ii++){{if(invArr[ii].s===e.s&&invArr[ii].n===e.n){{idx=ii;break}}}}
+    var invArr=INV[e._rt]||[];var idx=invArr.indexOf(e._ref);if(idx<0)for(var ii=0;invArr.length>ii;ii++){{if(invArr[ii].s===e.s&&invArr[ii].n===e.n){{idx=ii;break}}}}
     var oc=idx>=0?(' onclick="toggleObjectDetail(\\''+esc(e._rt)+'\\','+idx+',this)"'):' ';
     h+='<tr class="row-'+e.st+'"'+oc+' title="Click for details">';
     h+='<td><strong>'+esc(e.n)+'</strong></td>';
@@ -913,7 +999,7 @@ function renderAllObjects(){{
   h+='</tbody></table>';
   if(pages>1){{
     h+='<div class="pager">';
-    h+='<button onclick="objPage--;renderAllObjects()"'+(objPage<=1?' disabled':'')+'>&#9654; Prev</button>';
+    h+='<button onclick="objPage--;renderAllObjects()"'+(objPage<=1?' disabled':'')+'>&#9664; Prev</button>';
     h+='<span class="pg-info">Page '+objPage+' of '+pages+' ('+total+' objects)</span>';
     h+='<button onclick="objPage++;renderAllObjects()"'+(objPage>=pages?' disabled':'')+'>Next &#9654;</button>';
     h+='</div>';
@@ -925,54 +1011,96 @@ function renderTypes(){{
   if(allObjView){{renderAllObjects();return}}
   if(typeDrill){{renderTypeDrill(typeDrill);return}}
   var pt=D.per_type;
-  var maxSrc=0;pt.forEach(function(t){{if(t.t1_counts.source>maxSrc)maxSrc=t.t1_counts.source}});
 
   var allInv=allInvItems();
-  var gC=0,gF=0,gS=0,gP=0;
-  allInv.forEach(function(e){{if(e.st==='c')gC++;else if(e.st==='f')gF++;else if(e.st==='s')gS++;else gP++}});
+  var tC=0,tF=0,tS=0,tP=0;
+  pt.forEach(function(t){{
+    var items=INV[t.resource_type]||[];
+    if(!items.length){{tP++;return;}}
+    var hasF=false,hasS=false,hasP=false;
+    items.forEach(function(e){{
+      if(e.st==='f')hasF=true;
+      else if(e.st==='s')hasS=true;
+      else if(e.st==='p')hasP=true;
+    }});
+    if(hasF)tF++;
+    else if(hasS)tS++;
+    else if(hasP)tP++;
+    else tC++;
+  }});
 
-  var h='<h2>Resource Types &mdash; '+pt.length+' Types</h2>';
+  var h='<h2>Resource Types &mdash; T1 <span style="font-size:.78rem;color:var(--fg2);font-weight:400">('+pt.length+' types)</span></h2>';
   h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr));margin-bottom:.8rem">';
   h+='<div class="card" style="cursor:pointer" onclick="allObjView=true;objSt=\\'all\\';objPage=1;renderTypes()"><div class="v">'+fmt(allInv.length)+'</div><div class="l">All Objects &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="allObjView=true;objSt=\\'c\\';objPage=1;renderTypes()"><div class="v ok">'+fmt(gC)+'</div><div class="l">Completed &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="allObjView=true;objSt=\\'f\\';objPage=1;renderTypes()"><div class="v bad">'+fmt(gF)+'</div><div class="l">Failed &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="allObjView=true;objSt=\\'s\\';objPage=1;renderTypes()"><div class="v w">'+fmt(gS)+'</div><div class="l">Skipped &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="allObjView=true;objSt=\\'p\\';objPage=1;renderTypes()"><div class="v">'+fmt(gP)+'</div><div class="l">Pending &#8594;</div></div>';
+  h+='<div class="card"><div class="v ok">'+fmt(tC)+'</div><div class="l">Successful resource types</div></div>';
+  h+='<div class="card"><div class="v'+(tF>0?' bad':' skip')+'">'+fmt(tF)+'</div><div class="l">Failed resource types</div></div>';
+  h+='<div class="card"><div class="v skip">'+fmt(tS)+'</div><div class="l">Skipped resource types</div></div>';
+  h+='<div class="card"><div class="v skip">'+fmt(tP)+'</div><div class="l">Pending resource types</div></div>';
   h+='</div>';
-  h+='<div class="callout callout-info">Click status cards above to browse all objects, or click a type below to browse by type.</div>';
+  h+='<div class="callout callout-info">Status cards above summarize resource types. Use <strong>All Objects</strong> to browse object-level records, or click a type below to browse by type.</div>';
+  h+='<div class="type-legend">';
+  h+='<span><i class="ok"></i>Matched / field OK</span>';
+  h+='<span><i class="bad"></i>Missing on target</span>';
+  h+='<span><i class="warn"></i>Objects with field changes</span>';
+  h+='</div>';
 
   pt.forEach(function(t){{
     var c=t.t1_counts,e=t.t2_existence,fp=t.t3_field_parity;
-    var sw=pct(c.source,maxSrc),tw=pct(c.target,maxSrc);
     var expl=c.explained_failures+c.explained_skips;
     var invCount=(INV[t.resource_type]||[]).length;
+    var src=c.source||0;
+    var matched=e.matched||0;
+    var missing=e.missing_on_target||0;
+    // Scale bars via flex shares = object counts (exact proportions per type)
+    var fieldOk=fp.matching||0;
+    var fieldBad=fp.mismatching||0;
+    var fieldCompared=fp.compared||(fieldOk+fieldBad);
 
-    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.8rem;margin:.5rem 0;box-shadow:var(--shadow);cursor:pointer" onclick="typeDrill=\\''+esc(t.resource_type)+'\\';renderTypes()">';
-    h+='<div style="display:flex;justify-content:space-between;align-items:center">';
-    h+='<strong style="font-size:.9rem">'+esc(t.display_name||t.resource_type)+'</strong>';
-    h+='<span style="font-size:.78rem;color:var(--fg2)">'+fmt(invCount)+' objects &#8594;</span>';
-    h+='</div>';
-
-    h+='<div style="display:flex;gap:1rem;margin-top:.5rem;align-items:center">';
-    h+='<div style="flex:1">';
-    h+='<div style="font-size:.72rem;color:var(--fg2);margin-bottom:2px">Source: '+fmt(c.source)+'</div>';
-    h+='<div style="height:14px;background:#e9ecef;border-radius:3px;overflow:hidden">';
-    h+='<div style="width:'+sw+'%;height:100%;background:var(--accent);border-radius:3px"></div></div>';
-    h+='</div>';
-    h+='<div style="flex:1">';
-    h+='<div style="font-size:.72rem;color:var(--fg2);margin-bottom:2px">Target: '+fmt(c.target)+'</div>';
-    h+='<div style="height:14px;background:#e9ecef;border-radius:3px;overflow:hidden">';
-    h+='<div style="width:'+tw+'%;height:100%;background:var(--pass);border-radius:3px"></div></div>';
-    h+='</div>';
+    h+='<div class="type-card" onclick="typeDrill=\\''+esc(t.resource_type)+'\\';renderTypes()">';
+    h+='<div class="type-card-head">';
+    h+='<strong>'+esc(t.display_name||t.resource_type)+'</strong>';
+    h+='<span class="type-card-meta">'+fmt(src)+' source &middot; '+fmt(c.target)+' target &#8594;</span>';
     h+='</div>';
 
-    h+='<div style="display:flex;gap:1.5rem;margin-top:.4rem;font-size:.78rem;color:var(--fg2)">';
-    h+='<span>Matched: <strong style="color:var(--pass)">'+fmt(e.matched)+'</strong></span>';
-    h+='<span>Missing: <strong style="color:var(--fail)">'+fmt(e.missing_on_target)+'</strong></span>';
-    if(e.extra_on_target)h+='<span>Extra: <strong>'+fmt(e.extra_on_target)+'</strong></span>';
-    h+='<span>Field &#916;: <strong>'+fmt(fp.mismatching)+'</strong></span>';
+    // Count / existence bar (T1+T2)
+    h+='<div class="type-bar-row">';
+    h+='<div class="type-bar-label">Counts</div>';
+    h+='<div class="type-bar-track">';
+    if(src>0||matched>0||missing>0){{
+      if(matched>0)h+='<div class="type-bar-seg ok" style="flex:'+matched+'" title="Matched: '+fmt(matched)+'"></div>';
+      if(missing>0)h+='<div class="type-bar-seg bad" style="flex:'+missing+'" title="Missing: '+fmt(missing)+'"></div>';
+      // Pad remainder when matched+missing does not cover source count
+      var covered=matched+missing;
+      if(src>covered)h+='<div class="type-bar-seg" style="flex:'+(src-covered)+';background:#ced4da" title="Unaccounted"></div>';
+    }}
+    h+='</div>';
+    h+='<div class="type-bar-nums">'+fmt(matched)+' / '+fmt(src);
+    if(missing>0)h+=' <span style="color:var(--fail)">&minus;'+fmt(missing)+'</span>';
+    h+='</div></div>';
+
+    // Field parity by object (T3) — one object with N field diffs counts once
+    h+='<div class="type-bar-row">';
+    h+='<div class="type-bar-label">Fields</div>';
+    h+='<div class="type-bar-track">';
+    if(fieldCompared>0){{
+      if(fieldOk>0)h+='<div class="type-bar-seg ok" style="flex:'+fieldOk+'" title="Objects with matching fields: '+fmt(fieldOk)+'"></div>';
+      if(fieldBad>0)h+='<div class="type-bar-seg warn" style="flex:'+fieldBad+'" title="Objects with field changes: '+fmt(fieldBad)+'"></div>';
+    }}
+    h+='</div>';
+    if(fieldCompared>0){{
+      h+='<div class="type-bar-nums">'+fmt(fieldOk)+' matching';
+      if(fieldBad>0)h+=' <span style="color:var(--warn)">'+fmt(fieldBad)+' changed</span>';
+      h+='</div>';
+    }}else{{
+      h+='<div class="type-bar-nums" style="font-style:italic">not compared</div>';
+    }}
+    h+='</div>';
+
+    h+='<div class="type-card-stats">';
+    if(e.extra_on_target)h+='<span>Extra on target: <strong>'+fmt(e.extra_on_target)+'</strong></span>';
     h+='<span>Explained: '+fmt(expl)+'</span>';
-    if(c.unexplained>0)h+='<span><strong style="color:var(--fail)">'+c.unexplained+' UNEXPLAINED</strong></span>';
+    if(c.unexplained>0)h+='<span><strong style="color:var(--fail)">'+c.unexplained+' Unexplained</strong></span>';
+    if(invCount)h+='<span>'+fmt(invCount)+' object records</span>';
     h+='</div>';
     h+='</div>';
   }});
@@ -1001,15 +1129,15 @@ function renderTypeDrill(rt){{
   h+='<h2>'+esc(rt)+' &mdash; Object Inventory</h2>';
 
   h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr));">';
-  h+='<div class="card"><div class="v">'+fmt(items.length)+'</div><div class="l">Total</div></div>';
+  h+='<div class="card"><div class="v">'+fmt(items.length)+'</div><div class="l">Total objects</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'c\\';objPage=1;renderTypeDrill(\\''+esc(rt)+'\\')">';
-  h+='<div class="v ok">'+fmt(cC)+'</div><div class="l">Completed</div></div>';
+  h+='<div class="v ok">'+fmt(cC)+'</div><div class="l">Completed objects</div></div>';
   if(cF){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'f\\';objPage=1;renderTypeDrill(\\''+esc(rt)+'\\')">';
-  h+='<div class="v bad">'+fmt(cF)+'</div><div class="l">Failed</div></div>';}}
+  h+='<div class="v bad">'+fmt(cF)+'</div><div class="l">Failed objects</div></div>';}}
   if(cS){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'s\\';objPage=1;renderTypeDrill(\\''+esc(rt)+'\\')">';
-  h+='<div class="v w">'+fmt(cS)+'</div><div class="l">Skipped</div></div>';}}
+  h+='<div class="v skip">'+fmt(cS)+'</div><div class="l">Skipped objects</div></div>';}}
   if(cP){{h+='<div class="card" style="cursor:pointer" onclick="objSt=\\'p\\';objPage=1;renderTypeDrill(\\''+esc(rt)+'\\')">';
-  h+='<div class="v">'+fmt(cP)+'</div><div class="l">Pending</div></div>';}}
+  h+='<div class="v skip">'+fmt(cP)+'</div><div class="l">Pending objects</div></div>';}}
   h+='</div>';
 
   h+=renderObjectTable(items,filtered,'typesContent','&#9664; Back','renderTypeDrill(\\''+esc(rt)+'\\')',rt);
@@ -1038,7 +1166,7 @@ function renderObjectTable(items,filtered,targetEl,backLabel,renderSelf,rt){{
   h+='</select>';
   if(showOrg)h+='<input type="text" placeholder="Filter by org..." value="'+esc(objOrg)+'" oninput="objOrg=this.value;objPage=1;'+renderSelf+'" style="max-width:200px">';
   h+='<input type="text" placeholder="Search by name..." value="'+esc(objSearch)+'" oninput="objSearch=this.value;objPage=1;'+renderSelf+'">';
-  if(objSt!=='all'||objOrg||objSearch)h+='<button onclick="objSt=\\'all\\';objOrg=\\'\\';objSearch=\\'\\';objPage=1;'+renderSelf+'" style="background:var(--fg2);font-size:.78rem">Clear</button>';
+  if(objSt!=='all'||objOrg||objSearch)h+='<button onclick="objSt=\\'all\\';objOrg=\\'\\';objSearch=\\'\\';objPage=1;'+renderSelf+'">Clear</button>';
   h+='</div>';
 
   var PER=100,total=filtered.length,pages=Math.ceil(total/PER);
@@ -1058,7 +1186,7 @@ function renderObjectTable(items,filtered,targetEl,backLabel,renderSelf,rt){{
   }}
   var allItems=rt?(INV[rt]||[]):[];
   slice.forEach(function(e){{
-    var idx=allItems.indexOf(e);if(idx<0)for(var ii=0;ii<allItems.length;ii++){{if(allItems[ii].s===e.s&&allItems[ii].n===e.n){{idx=ii;break}}}}
+    var idx=allItems.indexOf(e);if(idx<0)for(var ii=0;allItems.length>ii;ii++){{if(allItems[ii].s===e.s&&allItems[ii].n===e.n){{idx=ii;break}}}}
     var oc=idx>=0?(' onclick="toggleObjectDetail(\\''+esc(rt)+'\\','+idx+',this)"'):' ';
     h+='<tr class="row-'+e.st+'"'+oc+' title="Click for details">';
     h+='<td><strong>'+esc(e.n)+'</strong></td>';
@@ -1073,7 +1201,7 @@ function renderObjectTable(items,filtered,targetEl,backLabel,renderSelf,rt){{
 
   if(pages>1){{
     h+='<div class="pager">';
-    h+='<button onclick="objPage--;'+renderSelf+'"'+(objPage<=1?' disabled':'')+'>&#9654; Prev</button>';
+    h+='<button onclick="objPage--;'+renderSelf+'"'+(objPage<=1?' disabled':'')+'>&#9664; Prev</button>';
     h+='<span class="pg-info">Page '+objPage+' of '+pages+' ('+total+' objects)</span>';
     h+='<button onclick="objPage++;'+renderSelf+'"'+(objPage>=pages?' disabled':'')+'>Next &#9654;</button>';
     h+='</div>';
@@ -1092,7 +1220,7 @@ function renderMissing(){{
     }});
   }});
 
-  var h='<h2>Missing Objects &mdash; '+fmt(all.length)+' total</h2>';
+  var h='<h2>Missing Objects &mdash; T2 <span style="font-size:.78rem;color:var(--fg2);font-weight:400">('+fmt(all.length)+' total)</span></h2>';
 
   if(!all.length){{
     h+='<div class="callout callout-pass">No missing objects detected.</div>';
@@ -1108,7 +1236,7 @@ function renderMissing(){{
   h+='</select>';
   h+='<input type="text" placeholder="Filter by organization..." value="'+esc(misOrg)+'" oninput="misOrg=this.value;misPage=1;renderMissing()" style="max-width:220px">';
   h+='<input type="text" placeholder="Search object name..." value="'+esc(misSearch)+'" oninput="misSearch=this.value;misPage=1;renderMissing()">';
-  if(misType!=='all'||misOrg||misSearch)h+='<button onclick="misType=\\'all\\';misOrg=\\'\\';misSearch=\\'\\';misPage=1;renderMissing()" style="background:var(--fg2);font-size:.78rem">Clear</button>';
+  if(misType!=='all'||misOrg||misSearch)h+='<button onclick="misType=\\'all\\';misOrg=\\'\\';misSearch=\\'\\';misPage=1;renderMissing()">Clear</button>';
   h+='</div>';
 
   // Apply filters
@@ -1176,10 +1304,30 @@ function renderFields(){{
     }});
   }});
 
-  var h='<h2>Field Mismatches &mdash; '+fmt(all.length)+' total</h2>';
+  var fmmObj=0;
+  D.per_type.forEach(function(t){{
+    fmmObj+=t.t3_field_parity.mismatching||0;
+  }});
+  var isLive = D.metadata && D.metadata.mode === 'validate-live';
+  var t3NotRun = !isLive;
+  var h='<h2>Field Parity &mdash; T3</h2>';
+  if(isLive){{
+    h+='<div class="cards" style="grid-template-columns:repeat(2,minmax(140px,1fr));max-width:420px">';
+    h+='<div class="card"><div class="v'+(all.length===0?' ok':' warn')+'">'+fmt(all.length)+'</div><div class="l">Mismatched fields</div></div>';
+    h+='<div class="card"><div class="v'+(fmmObj===0?' ok':' warn')+'">'+fmt(fmmObj)+'</div><div class="l">Mismatched objects</div></div>';
+    h+='</div>';
+  }}
+
+  if(t3NotRun){{
+    h+='<div class="callout callout-warn"><strong>Not run:</strong> Field changes (T3) are only available with <code>--live</code>.</div>';
+  }}
 
   if(!all.length){{
-    h+='<div class="callout callout-pass">No field mismatches detected.</div>';
+    if(!isLive){{
+      // In DB-only validation we don't have a comparable field dataset (T3 wasn't executed).
+    }}else{{
+      h+='<div class="callout callout-pass">No field mismatches detected.</div>';
+    }}
     document.getElementById('fieldsContent').innerHTML=h;return;
   }}
 
@@ -1192,7 +1340,7 @@ function renderFields(){{
   h+='</select>';
   h+='<input type="text" placeholder="Filter by organization..." value="'+esc(fldOrg)+'" oninput="fldOrg=this.value;fldPage=1;renderFields()" style="max-width:220px">';
   h+='<input type="text" placeholder="Search name or field..." value="'+esc(fldSearch)+'" oninput="fldSearch=this.value;fldPage=1;renderFields()">';
-  if(fldType!=='all'||fldOrg||fldSearch)h+='<button onclick="fldType=\\'all\\';fldOrg=\\'\\';fldSearch=\\'\\';fldPage=1;renderFields()" style="background:var(--fg2);font-size:.78rem">Clear</button>';
+  if(fldType!=='all'||fldOrg||fldSearch)h+='<button onclick="fldType=\\'all\\';fldOrg=\\'\\';fldSearch=\\'\\';fldPage=1;renderFields()">Clear</button>';
   h+='</div>';
 
   // Apply filters
