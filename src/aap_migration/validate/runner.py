@@ -1817,6 +1817,20 @@ def build_validation_result(
                 ))
         object_inventory[rtype] = entries
 
+    # Mark inventory entries that have field differences (status stays completed/etc.)
+    changed_sids: dict[str, set[int]] = defaultdict(set)
+    for rtype, findings in per_type_findings.items():
+        for ff in findings:
+            if ff.source_id is not None:
+                changed_sids[rtype].add(ff.source_id)
+    for rtype, entries in object_inventory.items():
+        sid_set = changed_sids.get(rtype)
+        if not sid_set:
+            continue
+        for entry in entries:
+            if entry.source_id is not None and entry.source_id in sid_set:
+                entry.field_changed = True
+
     total_unexplained = sum(t.t1_counts.unexplained for t in per_type_results)
     verdict = "PASS" if total_unexplained == 0 and total_field_mm == 0 else "REVIEW REQUIRED"
 
