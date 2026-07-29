@@ -251,3 +251,70 @@ async def assign_auditor_roles(
             )
 
     return summary
+
+
+async def list_platform_auditor_user_ids(
+    client: Any,
+) -> tuple[int | None, set[int], str | None]:
+    """Read-only: resolve Platform Auditor role and list assigned user IDs.
+
+    Returns:
+        (role_definition_id, set_of_gateway_user_ids, error_or_None)
+    """
+    try:
+        role_def_id = await preflight_gateway_access(client)
+    except Exception as exc:
+        logger.warning("gateway_auditor_list_preflight_failed", error=str(exc))
+        return None, set(), str(exc)
+
+    gateway_base = _gateway_url(client.base_url)
+    endpoint = f"{gateway_base}/{GATEWAY_ASSIGNMENTS_ENDPOINT}"
+    headers = {"Authorization": f"Bearer {client.token}"}
+    user_ids: set[int] = set()
+    page = 1
+
+    try:
+        while True:
+            response = await client.client.get(
+                endpoint,
+                params={
+                    "role_definition": role_def_id,
+                    "page_size": 200,
+                    "page": page,
+                },
+                headers=headers,
+            )
+            if response.status_code in (401, 403):
+                err = (
+                    f"Gateway API returned {response.status_code} listing "
+                    f"Platform Auditor assignments"
+                )
+                logger.warning("gateway_auditor_list_denied", error=err)
+                return role_def_id, set(), err
+            response.raise_for_status()
+            data = response.json()
+            for row in data.get("results", []) or []:
+                user = row.get("user")
+                if isinstance(user, dict):
+                    uid = user.get("id")
+                else:
+                    uid = user
+                if uid is None:
+                    continue
+                try:
+                    user_ids.add(int(uid))
+                except (TypeError, ValueError):
+                    continue
+            if not data.get("next"):
+                break
+            page += 1
+    except Exception as exc:
+        logger.warning("gateway_auditor_list_failed", error=str(exc))
+        return role_def_id, set(), str(exc)
+
+    logger.info(
+        "gateway_auditor_list_ok",
+        role_definition_id=role_def_id,
+        assigned_users=len(user_ids),
+    )
+    return role_def_id, user_ids, None
