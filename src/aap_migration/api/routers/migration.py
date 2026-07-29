@@ -210,6 +210,7 @@ async def migration_run(
 
         totals = {"created": 0, "skipped": 0, "failed": 0, "updated": 0}
         created_creds: list[dict[str, str]] = []
+        CRED_PAUSE_AFTER = {"credentials", "credential_input_sources"}
 
         for phase_num, rtype in enumerate(resource_order, 1):
             emit(
@@ -234,6 +235,27 @@ async def migration_run(
             totals["created"] += created
             totals["skipped"] += skipped
             totals["failed"] += failed
+
+            # Same pause-and-patch workflow as planner: credentials are created
+            # with temporary secrets; projects/JTs need real secrets on the target
+            # before they can attach and sync.
+            if rtype in CRED_PAUSE_AFTER:
+                remaining = CRED_PAUSE_AFTER - set(
+                    resource_order[: resource_order.index(rtype) + 1]
+                )
+                if not remaining and created_creds:
+                    from aap_migration.api.routers.planner import _handle_credential_pause
+
+                    await _handle_credential_pause(
+                        job,
+                        svc,
+                        created_creds,
+                        sources,
+                        "",  # non-planner: in-memory resume only
+                        "",
+                        emit,
+                        log,
+                    )
 
         log("CaC pass: re-patching organizations with final references...")
         totals["updated"] += await _run_cac_org_update(

@@ -14,6 +14,7 @@ class FakeState:
         self.saved: list[dict] = []
         self.source_mappings: set[tuple[str, int]] = set()
         self.migrated = set(migrated or set())
+        self.mapping_meta: dict[tuple[str, int], dict] = {}
 
     def is_migrated(self, resource_type, source_id):
         return (resource_type, source_id) in self.migrated
@@ -33,6 +34,16 @@ class FakeState:
     def save_id_mapping(self, **kwargs):
         self.saved.append(kwargs)
         self.mapped_ids[(kwargs["resource_type"], kwargs["source_id"])] = kwargs["target_id"]
+        self.mapping_meta[(kwargs["resource_type"], kwargs["source_id"])] = {
+            "source_id": kwargs["source_id"],
+            "target_id": kwargs["target_id"],
+            "source_name": kwargs.get("source_name"),
+            "target_name": kwargs.get("target_name"),
+            "resource_type": kwargs["resource_type"],
+        }
+
+    def get_id_mapping(self, resource_type, source_id):
+        return self.mapping_meta.get((resource_type, source_id))
 
     def mark_in_progress(self, **kwargs):
         return None
@@ -166,5 +177,76 @@ async def test_project_importer_attaches_recovered_prefixed_credential() -> None
 
     assert result is not None
     assert result["_already_migrated"] is True
+    assert "credential attached" in result["_skip_reason"]
+    assert client.update_calls == [("projects", 310, {"credential": 209})]
+
+
+@pytest.mark.asyncio
+async def test_recover_dependency_by_name_uses_id_mapping_name_when_missing() -> None:
+    """Sparse project payloads still recover credentials via stored mapping names."""
+    state = FakeState()
+    state.mapping_meta[("credentials", 9)] = {
+        "source_id": 9,
+        "target_id": None,
+        "source_name": "dev_scm-cred",
+        "target_name": "dev_scm-cred",
+        "resource_type": "credentials",
+    }
+    client = FakeClient(
+        find_results={
+            ("credentials", "dev_scm-cred", 1): None,  # org-scoped miss
+            ("credentials", "dev_scm-cred", None): {"id": 209, "name": "dev_scm-cred"},
+        }
+    )
+    importer = WidgetImporter(client, state, PerformanceConfig(), name_prefix="dev_")
+
+    recovered = await importer._recover_dependency_by_name(
+        dep_resource_type="credentials",
+        dep_source_id=9,
+        dep_name=None,
+        name_prefix="dev_",
+        organization_id=1,
+    )
+
+    assert recovered == 209
+    assert ("credentials", "dev_scm-cred", 1) in client.find_calls
+    assert ("credentials", "dev_scm-cred", None) in client.find_calls
+    assert state.mapped_ids[("credentials", 9)] == 209
+
+
+@pytest.mark.asyncio
+async def test_resolve_project_credential_retries_global_lookup_for_admin_owned_cred() -> None:
+    state = FakeState(migrated={("projects", 10)})
+    state.mapped_ids[("projects", 10)] = 310
+    state.mapped_ids[("organizations", 1)] = 1
+    # Credential ID map intentionally missing — force name recovery
+    client = FakeClient(
+        find_results={
+            ("credentials", "dev_scm-cred", 1): None,
+            ("credentials", "dev_scm-cred", None): {"id": 209, "name": "dev_scm-cred"},
+        }
+    )
+    client.get_results[("projects/310/", ())] = {
+        "id": 310,
+        "name": "dev_My Project",
+        "credential": None,
+    }
+    importer = ProjectImporter(client, state, PerformanceConfig(), name_prefix="dev_")
+
+    result = await importer.import_resource(
+        "projects",
+        10,
+        {
+            "name": "dev_My Project",
+            "organization": 1,
+            "credential": 9,
+            "_name_prefix": "dev_",
+            "_dependency_names": {"credential": "scm-cred"},
+            "scm_type": "git",
+            "scm_url": "https://example.com/repo.git",
+        },
+    )
+
+    assert result is not None
     assert "credential attached" in result["_skip_reason"]
     assert client.update_calls == [("projects", 310, {"credential": 209})]

@@ -1023,8 +1023,10 @@ async def _handle_credential_pause(
     log("Paused — waiting for user to update credential secrets on the target and resume.")
     job.result = job.result or {}
     job.result["credential_review"] = cred_review
-    job.result["_paused_plan_id"] = plan_id
-    job.result["_paused_phase_id"] = phase_id
+    if plan_id:
+        job.result["_paused_plan_id"] = plan_id
+    if phase_id:
+        job.result["_paused_phase_id"] = phase_id
     job.status = JobStatus.WAITING_FOR_INPUT
     svc.persist_job(job)
     await job.wait_for_resume()

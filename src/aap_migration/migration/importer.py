@@ -750,14 +750,43 @@ class ResourceImporter:
 
         Tries the prefixed name first (when ``name_prefix`` is set), then the
         original source name. On success, persists an ID mapping for later use.
+
+        When ``dep_name`` is missing (sparse summary_fields), fall back to the
+        name recorded in migration progress / id_mappings from the dependency's
+        own import — critical for attaching project SCM credentials after a
+        name-prefixed credential import.
         """
+        if not dep_name:
+            try:
+                sid = int(dep_source_id)
+            except (TypeError, ValueError):
+                sid = None
+            if sid is not None:
+                dep_name = self._get_dependency_name(dep_resource_type, sid)
+                if not dep_name:
+                    try:
+                        mapping = self.state.get_id_mapping(dep_resource_type, sid)
+                    except Exception:
+                        mapping = None
+                    if isinstance(mapping, dict):
+                        raw = mapping.get("source_name") or mapping.get("target_name")
+                        if isinstance(raw, str) and raw.strip():
+                            dep_name = raw.strip()
         if not dep_name:
             return None
 
+        # Prefer prefixed name when configured. If the recorded name already has
+        # the prefix (from credential import), try it first then the bare name.
         candidates: list[str] = []
-        if name_prefix:
+        if name_prefix and dep_name.startswith(name_prefix):
+            candidates.append(dep_name)
+            bare = dep_name[len(name_prefix) :]
+            if bare:
+                candidates.append(bare)
+        elif name_prefix:
             candidates.append(f"{name_prefix}{dep_name}")
-        if dep_name not in candidates:
+            candidates.append(dep_name)
+        else:
             candidates.append(dep_name)
 
         org_id = None
@@ -767,45 +796,53 @@ class ResourceImporter:
             except (TypeError, ValueError):
                 org_id = None
 
+        # Try org-scoped lookup first, then global — credentials may be
+        # admin/user-owned (organization=null) after ownership fallback.
+        org_attempts: list[int | None] = [org_id] if org_id is not None else [None]
+        if org_id is not None:
+            org_attempts.append(None)
+
         for candidate in candidates:
-            try:
-                existing = await self.client.find_resource_by_name(
-                    dep_resource_type,
-                    candidate,
-                    organization_id=org_id,
-                    parent_id=parent_id,
-                    parent_field=parent_field,
-                )
-            except Exception as exc:
-                logger.debug(
-                    "dependency_name_lookup_failed",
-                    dep_resource_type=dep_resource_type,
-                    name=candidate,
-                    error=str(exc),
-                )
-                continue
+            for attempt_org in org_attempts:
+                try:
+                    existing = await self.client.find_resource_by_name(
+                        dep_resource_type,
+                        candidate,
+                        organization_id=attempt_org,
+                        parent_id=parent_id,
+                        parent_field=parent_field,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "dependency_name_lookup_failed",
+                        dep_resource_type=dep_resource_type,
+                        name=candidate,
+                        organization_id=attempt_org,
+                        error=str(exc),
+                    )
+                    continue
 
-            if not existing or existing.get("id") is None:
-                continue
+                if not existing or existing.get("id") is None:
+                    continue
 
-            target_id = int(existing["id"])
-            try:
-                self.state.save_id_mapping(
-                    resource_type=dep_resource_type,
-                    source_id=int(dep_source_id),
-                    target_id=target_id,
-                    source_name=dep_name,
-                    target_name=existing.get("name") or candidate,
-                )
-            except Exception as exc:
-                logger.debug(
-                    "dependency_name_mapping_persist_failed",
-                    dep_resource_type=dep_resource_type,
-                    dep_source_id=dep_source_id,
-                    target_id=target_id,
-                    error=str(exc),
-                )
-            return target_id
+                target_id = int(existing["id"])
+                try:
+                    self.state.save_id_mapping(
+                        resource_type=dep_resource_type,
+                        source_id=int(dep_source_id),
+                        target_id=target_id,
+                        source_name=dep_name,
+                        target_name=existing.get("name") or candidate,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "dependency_name_mapping_persist_failed",
+                        dep_resource_type=dep_resource_type,
+                        dep_source_id=dep_source_id,
+                        target_id=target_id,
+                        error=str(exc),
+                    )
+                return target_id
 
         return None
 
@@ -4356,6 +4393,23 @@ class JobTemplateImporter(ResourceImporter):
         # Extract credentials before import (they're not valid API fields)
         credentials = data.pop("credentials", [])
         template_name = data.get("name")
+        credential_names = data.get("_credential_names")
+        if not isinstance(credential_names, dict):
+            credential_names = {}
+        # Exporter often stores credentials as IDs only — restore names for
+        # prefix-aware association when ID mappings are missing.
+        if credentials and credential_names:
+            enriched: list[dict[str, Any]] = []
+            for cred in credentials:
+                if not isinstance(cred, dict):
+                    continue
+                item = dict(cred)
+                if not item.get("name") and item.get("id") is not None:
+                    name = credential_names.get(str(item["id"]))
+                    if name:
+                        item["name"] = name
+                enriched.append(item)
+            credentials = enriched
 
         # Already-migrated templates still need credential associations (re-runs
         # after credentials become available, or after name-prefixed cred import).
@@ -4752,6 +4806,7 @@ class JobTemplateImporter(ResourceImporter):
 
             if not target_cred_id:
                 # Name/prefix fallback — same pattern as FK resolve for projects etc.
+                # Prefer explicit name, then progress/id_mapping via recover helper.
                 target_cred_id = await self._recover_dependency_by_name(
                     dep_resource_type="credentials",
                     dep_source_id=source_cred_id,
