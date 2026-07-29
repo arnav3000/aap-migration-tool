@@ -71,6 +71,7 @@ def validate(
         aap-bridge validate --live --skip-hosts
         aap-bridge validate --live -r credentials
         aap-bridge validate -o /tmp/reports
+        # With -r, writes validation_report_<resource>.html/.json
     """
     if skip_hosts and resource_type == "hosts":
         raise click.ClickException("--skip-hosts conflicts with -r hosts")
@@ -103,8 +104,21 @@ def validate(
         )
     )
 
+    json_filename = "validation_report.json"
+    html_filename = "validation_report.html"
+    if resource_type:
+        # Safe single-segment suffix for filenames (e.g. credentials → validation_report_credentials.html)
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in resource_type.strip())
+        safe = safe.strip("_") or "resource"
+        json_filename = f"validation_report_{safe}.json"
+        html_filename = f"validation_report_{safe}.html"
+
     json_path, html_path = write_validation_report(
-        result, str(output), field_data=field_data,
+        result,
+        str(output),
+        json_filename=json_filename,
+        html_filename=html_filename,
+        field_data=field_data,
     )
 
     echo_success(f"Validation report: {html_path}")

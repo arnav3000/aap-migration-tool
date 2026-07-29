@@ -150,6 +150,112 @@ def _get_org_info(obj: dict) -> tuple[str, int | None]:
     return org_name, org_id
 
 
+# Child types that inherit organization from an inventory parent
+_INVENTORY_CHILD_TYPES = {"hosts", "inventory_groups", "inventory_sources"}
+
+
+def _inventory_id_from_obj(obj: dict) -> int | None:
+    """Best-effort inventory FK id from a child object."""
+    sf = (obj.get("summary_fields") or {}).get("inventory")
+    if isinstance(sf, dict) and sf.get("id") is not None:
+        try:
+            return int(sf["id"])
+        except (TypeError, ValueError):
+            pass
+    raw = obj.get("inventory")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.isdigit():
+        return int(raw)
+    return None
+
+
+def _build_inventory_org_maps(
+    exports: dict[str, list[dict]],
+) -> tuple[dict[str, tuple[str, Optional[int]]], dict[int, tuple[str, Optional[int]]]]:
+    """inventory name/id → (org_name, org_id) for parent-org resolution."""
+    by_name: dict[str, tuple[str, Optional[int]]] = {}
+    by_id: dict[int, tuple[str, Optional[int]]] = {}
+    for inv in exports.get("inventories", []):
+        org_name, org_id = _get_org_info(inv)
+        if not org_name:
+            continue
+        name = _object_display_name(inv)
+        iid = _object_source_id(inv)
+        if name:
+            by_name[name] = (org_name, org_id)
+        if iid is not None:
+            by_id[iid] = (org_name, org_id)
+    return by_name, by_id
+
+
+def _org_from_inventory_parent(
+    obj: dict,
+    inv_org_by_name: dict[str, tuple[str, Optional[int]]],
+    inv_org_by_id: dict[int, tuple[str, Optional[int]]],
+) -> tuple[str, Optional[int]]:
+    inv_name = _parent_ref_name(obj, "inventory")
+    if inv_name and inv_name in inv_org_by_name:
+        return inv_org_by_name[inv_name]
+    iid = _inventory_id_from_obj(obj)
+    if iid is not None and iid in inv_org_by_id:
+        return inv_org_by_id[iid]
+    return "", None
+
+
+def _build_ujt_org_map(
+    exports: dict[str, list[dict]],
+    inv_org_by_name: dict[str, tuple[str, Optional[int]]],
+    inv_org_by_id: dict[int, tuple[str, Optional[int]]],
+) -> dict[str, tuple[str, Optional[int]]]:
+    """unified_job_template name → org (JT / WJT / project / inventory source)."""
+    ujt: dict[str, tuple[str, Optional[int]]] = {}
+    for rtype in ("job_templates", "workflow_job_templates", "projects"):
+        for obj in exports.get(rtype, []):
+            org_name, org_id = _get_org_info(obj)
+            name = _object_display_name(obj)
+            if org_name and name:
+                ujt[name] = (org_name, org_id)
+    for obj in exports.get("inventory_sources", []):
+        name = _object_display_name(obj)
+        if not name:
+            continue
+        org_name, org_id = _org_from_inventory_parent(obj, inv_org_by_name, inv_org_by_id)
+        if org_name:
+            ujt[name] = (org_name, org_id)
+    return ujt
+
+
+def _resolve_object_org(
+    rtype: str,
+    obj: dict,
+    inv_org_by_name: dict[str, tuple[str, Optional[int]]],
+    inv_org_by_id: dict[int, tuple[str, Optional[int]]],
+    ujt_org_by_name: dict[str, tuple[str, Optional[int]]],
+) -> tuple[str, Optional[int]]:
+    """Resolve organization, including via inventory / unified_job_template parents."""
+    org_name, org_id = _get_org_info(obj)
+    if org_name:
+        return org_name, org_id
+
+    if rtype in _INVENTORY_CHILD_TYPES:
+        return _org_from_inventory_parent(obj, inv_org_by_name, inv_org_by_id)
+
+    if rtype == "schedules":
+        parent = _parent_ref_name(obj, "unified_job_template")
+        if parent and parent in ujt_org_by_name:
+            return ujt_org_by_name[parent]
+        return "", None
+
+    if rtype == "workflow_job_template_nodes":
+        parent = _parent_ref_name(obj, "workflow_job_template")
+        if parent and parent in ujt_org_by_name:
+            return ujt_org_by_name[parent]
+        return "", None
+
+    return "", None
+
+
 def _object_display_name(obj: dict) -> str:
     return (
         obj.get("name")
@@ -229,6 +335,50 @@ def _object_source_id(obj: dict) -> int | None:
         return int(sid)
     except (TypeError, ValueError):
         return None
+
+
+def _classify_unmatched_gap(
+    status_by_id: dict[tuple[str, int], tuple[str, str]],
+    rtype: str,
+    sid: int,
+    *,
+    live_mode: bool,
+) -> tuple[str, str, str]:
+    """Classify an unmatched source object for gap accounting and object inventory.
+
+    Returns (bucket, object_status, explanation) where:
+      bucket: "failed" | "skipped" | "unexplained"
+      object_status: ObjectEntry status (failed/skipped/pending) — never conflates
+        unexplained live gaps with import failures
+    """
+    status_info = status_by_id.get((rtype, sid))
+    if status_info:
+        status_val, err_msg = status_info
+        if status_val == "failed":
+            explanation = f"Failed: {err_msg}" if err_msg else "Failed"
+            if live_mode:
+                explanation = f"Not found on live target ({explanation})"
+            return "failed", "failed", explanation
+        if status_val == "skipped":
+            explanation = f"Skipped: {err_msg}" if err_msg else "Skipped"
+            if live_mode:
+                explanation = f"Not found on live target ({explanation})"
+            return "skipped", "skipped", explanation
+        if status_val == "pending":
+            explanation = "Pending migration"
+            if live_mode:
+                explanation = f"Not found on live target ({explanation})"
+            return "unexplained", "pending", explanation
+        explanation = (
+            f"Status: {status_val}" if status_val else "Not tracked in migration DB"
+        )
+        if live_mode:
+            explanation = f"Not found on live target ({explanation})"
+        return "unexplained", "pending", explanation
+
+    if live_mode:
+        return "unexplained", "pending", "Not found on live target"
+    return "unexplained", "pending", "Not tracked in migration DB"
 
 
 def _build_id_to_name_maps(
@@ -1363,12 +1513,16 @@ def build_validation_result(
     )
 
     obj_to_org: dict[tuple[str, int], tuple[str, Optional[int]]] = {}
+    inv_org_by_name, inv_org_by_id = _build_inventory_org_maps(exports)
+    ujt_org_by_name = _build_ujt_org_map(exports, inv_org_by_name, inv_org_by_id)
     for rtype, objects in exports.items():
         for obj in objects:
             sid = _object_source_id(obj)
             if sid is None:
                 continue
-            org_name, org_id = _get_org_info(obj)
+            org_name, org_id = _resolve_object_org(
+                rtype, obj, inv_org_by_name, inv_org_by_id, ujt_org_by_name,
+            )
             if org_name:
                 obj_to_org[(rtype, sid)] = (org_name, org_id)
 
@@ -1430,31 +1584,14 @@ def build_validation_result(
                 obj_name = _object_display_name(obj) or str(sid)
                 org_info = obj_to_org.get((rtype, sid))
                 org_name = org_info[0] if org_info else ""
-                status_info = status_by_id.get((rtype, sid))
-                if status_info:
-                    status_val, err_msg = status_info
-                    if status_val == "failed":
-                        explanation = f"Failed: {err_msg}" if err_msg else "Failed"
-                        explained_failures += 1
-                    elif status_val == "skipped":
-                        explanation = f"Skipped: {err_msg}" if err_msg else "Skipped"
-                        explained_skips += 1
-                    elif status_val == "pending":
-                        explanation = "Pending migration"
-                        unexplained += 1
-                    else:
-                        explanation = (
-                            f"Status: {status_val}" if status_val
-                            else "Not tracked in migration DB"
-                        )
-                        unexplained += 1
-                    if live_mode:
-                        explanation = f"Not found on live target ({explanation})"
-                elif live_mode:
-                    explanation = "Not found on live target"
-                    unexplained += 1
+                bucket, _obj_status, explanation = _classify_unmatched_gap(
+                    status_by_id, rtype, sid, live_mode=live_mode,
+                )
+                if bucket == "failed":
+                    explained_failures += 1
+                elif bucket == "skipped":
+                    explained_skips += 1
                 else:
-                    explanation = "Not tracked in migration DB"
                     unexplained += 1
                 missing_details.append(MissingDetail(
                     name=obj_name,
@@ -1606,38 +1743,18 @@ def build_validation_result(
                         error="",
                     ))
                 else:
-                    # Prefer import DB status for gap classification when present
-                    status_info = status_by_id.get((rtype, sid))
-                    if status_info:
-                        status_val, err_msg = status_info
-                        if status_val in ("failed", "skipped", "pending"):
-                            err = err_msg or "Not found on live target"
-                            if err_msg:
-                                err = f"Not found on live target ({err_msg})"
-                            entries.append(ObjectEntry(
-                                name=obj_name,
-                                organization=org_name,
-                                source_id=sid,
-                                status=status_val,
-                                error=err[:200],
-                            ))
-                        else:
-                            label = status_val or "unknown"
-                            entries.append(ObjectEntry(
-                                name=obj_name,
-                                organization=org_name,
-                                source_id=sid,
-                                status="failed",
-                                error=f"Not found on live target (DB: {label})"[:200],
-                            ))
-                    else:
-                        entries.append(ObjectEntry(
-                            name=obj_name,
-                            organization=org_name,
-                            source_id=sid,
-                            status="failed",
-                            error="Not found on live target",
-                        ))
+                    # Same classification as T1/T2 gap accounting (do not mix
+                    # unexplained live gaps into Failed)
+                    _bucket, obj_status, explanation = _classify_unmatched_gap(
+                        status_by_id, rtype, sid, live_mode=True,
+                    )
+                    entries.append(ObjectEntry(
+                        name=obj_name,
+                        organization=org_name,
+                        source_id=sid,
+                        status=obj_status,
+                        error=explanation[:200],
+                    ))
         else:
             inv_sids: set[int] = set()
             for sid, sname, status, err, tid in obj_inventory.get(rtype, []):
