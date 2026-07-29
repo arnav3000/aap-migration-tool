@@ -364,15 +364,18 @@ class OrgValidationSummary:
     extra: int = 0
     field_mismatches: int = 0
     unexplained: int = 0
+    explained_failures: int = 0
+    explained_skips: int = 0
     per_type: list[OrgTypeRollup] = field(default_factory=list)
     missing_details: list[MissingDetail] = field(default_factory=list)
     field_findings: list[FieldFinding] = field(default_factory=list)
 
     @property
     def health(self) -> str:
-        if self.unexplained > 0:
+        # Import failures are still failures even when explained by the DB
+        if self.unexplained > 0 or self.explained_failures > 0:
             return "red"
-        if self.missing > 0 or self.field_mismatches > 0:
+        if self.missing > 0 or self.field_mismatches > 0 or self.explained_skips > 0:
             return "amber"
         return "green"
 
@@ -387,6 +390,8 @@ class OrgValidationSummary:
             "extra": self.extra,
             "field_mismatches": self.field_mismatches,
             "unexplained": self.unexplained,
+            "explained_failures": self.explained_failures,
+            "explained_skips": self.explained_skips,
             "health": self.health,
             "per_type": [t.to_dict() for t in self.per_type],
             "missing_details": [d.to_dict() for d in self.missing_details],

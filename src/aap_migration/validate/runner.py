@@ -1554,20 +1554,22 @@ def build_validation_result(
                     if org_key in org_type_counts and rtype in org_type_counts[org_key]:
                         org_type_counts[org_key][rtype]["field_mismatches"] += 1
 
-    # Build OrgTypeRollup and compute unexplained per org
-    # (unexplained = missing − unmatched failed/skipped from import DB)
+    # Build OrgTypeRollup and compute unexplained / explained gap counts per org.
+    # Explained failures still mark org health red (they are import failures).
     for org_key, org_summary in per_org_data.items():
-        explained_in_org = 0
+        explained_failures = 0
+        explained_skips = 0
         for md in org_summary.missing_details:
             expl = md.explanation or ""
-            if (
-                expl.startswith("Failed")
-                or expl.startswith("Skipped")
-                or "(Failed" in expl
-                or "(Skipped" in expl
-            ):
-                explained_in_org += 1
-        org_summary.unexplained = max(0, org_summary.missing - explained_in_org)
+            if expl.startswith("Failed") or "(Failed" in expl:
+                explained_failures += 1
+            elif expl.startswith("Skipped") or "(Skipped" in expl:
+                explained_skips += 1
+        org_summary.explained_failures = explained_failures
+        org_summary.explained_skips = explained_skips
+        org_summary.unexplained = max(
+            0, org_summary.missing - explained_failures - explained_skips
+        )
         for rtype, counts in sorted(org_type_counts.get(org_key, {}).items()):
             org_summary.per_type.append(OrgTypeRollup(
                 resource_type=rtype,

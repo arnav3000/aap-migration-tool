@@ -76,7 +76,9 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
     orgs_red = sum(1 for o in result.per_org.values() if o.health == "red")
     orgs_amber = sum(1 for o in result.per_org.values() if o.health == "amber")
     orgs_green = n_orgs - orgs_red - orgs_amber
-
+    orgs_explained_failures = sum(
+        o.explained_failures for o in result.per_org.values()
+    )
     json_block = _safe_json_embed(d)
     inv_raw = json.dumps(result.inventory_to_dict(), separators=(",", ":"), default=str)
     inv_block = inv_raw.replace("</", "<\\/")
@@ -217,8 +219,8 @@ nav{{background:var(--card);border-bottom:1px solid var(--border);padding:0 2rem
 .funnel{{margin:1.2rem 0}}.funnel-step{{display:flex;align-items:center;margin:6px 0;gap:10px}}
 .funnel-label{{width:120px;font-size:.82rem;color:var(--fg2);font-weight:500;text-align:right;flex-shrink:0}}
 .funnel-track{{flex:1;min-width:0;height:32px;background:#e9ecef;border-radius:6px;overflow:hidden}}
-.funnel-bar{{height:100%;border-radius:6px;display:flex;align-items:center;padding:0 12px;font-weight:600;font-size:.82rem;color:#fff;box-sizing:border-box;min-width:0;transition:width .4s;white-space:nowrap}}
-.funnel-count{{font-size:.8rem;color:var(--fg2);white-space:nowrap;width:4.5rem;flex-shrink:0}}
+.funnel-bar{{height:100%;border-radius:6px;box-sizing:border-box;min-width:0;max-width:100%;transition:width .4s}}
+.funnel-count{{font-size:.8rem;color:var(--fg2);white-space:nowrap;width:5.5rem;flex-shrink:0;font-variant-numeric:tabular-nums}}
 
 /* ── Progress bars (per-type) ── */
 .pbar-row{{display:flex;align-items:center;padding:5px 0;border-bottom:1px solid #eee}}
@@ -361,7 +363,7 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 
 <nav>
   <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
-  <button class="tab-btn" data-tab="orgs">Org Health <span class="ct{' ok' if orgs_red == 0 else ''}">{orgs_red}</span></button>
+  <button class="tab-btn" data-tab="orgs">Org Health <span class="ct{' ok' if orgs_red == 0 else ''}" title="Organizations with unexplained gaps or import failures">{orgs_red}</span></button>
   <button class="tab-btn" data-tab="types">Resource Types <span style="opacity:.55;font-weight:600">T1</span></button>
   <button class="tab-btn" data-tab="missing">Missing <span style="opacity:.55;font-weight:600">T2</span> <span class="ct{' ok' if total_missing == 0 else ''}">{_fmt(total_missing)}</span></button>
   <button class="tab-btn" data-tab="fields">Field Changes <span style="opacity:.55;font-weight:600">T3</span>{f' <span class="ct{" ok" if total_field_mm == 0 else ""}" title="Objects with ≥1 field mismatch">{_fmt(total_field_mm)}</span>' if is_live_validate else ''}</button>
@@ -484,6 +486,17 @@ function pctMatched(matched,source,gaps){{
   }}
   return matched>=source?100:Math.floor(matched/source*100);
 }}
+/* Largest-remainder so parts always sum to 100 (or 0 if total is 0) */
+function pctParts(parts,total){{
+  if(!total)return parts.map(function(){{return 0}});
+  var exact=parts.map(function(p){{return p/total*100}});
+  var floors=exact.map(function(x){{return Math.floor(x)}});
+  var rem=100-floors.reduce(function(a,b){{return a+b}},0);
+  var order=exact.map(function(x,i){{return{{i:i,frac:x-floors[i]}}}})
+    .sort(function(a,b){{return b.frac-a.frac||a.i-b.i}});
+  for(var k=0;rem>k;k++)floors[order[k%order.length].i]++;
+  return floors;
+}}
 function hcls(h){{return h==='red'?'h-r':h==='amber'?'h-a':'h-g'}}
 function hlbl(h){{return h.toUpperCase()}}
 function allTypes(){{return D.per_type.map(function(t){{return t.resource_type}}).sort()}}
@@ -590,28 +603,36 @@ function renderDashboard(){{
 
   var h='<h2>Migration Overview</h2>';
 
-  // Funnel — Matched % never reads 100% while explained/unexplained gaps remain
+  // Partition bars: Matched + Explained Gaps + Unexplained Gaps always sum to 100%
   h+='<div class="funnel">';
-  var gaps=expl+unex;
+  var partTotal=mat+expl+unex;
+  if(!partTotal)partTotal=src;
+  var parts=pctParts([mat,expl,unex],partTotal);
   var steps=[
     ['Source Objects',src,src?100:0,'var(--accent)'],
-    ['Matched',mat,pctMatched(mat,src,gaps),'var(--pass)'],
-    ['Explained Gaps',expl,pct(expl,src),'var(--skip)'],
-    ['Unexplained Gaps',unex,pct(unex,src),'var(--fail)']
+    ['Matched',mat,parts[0],'var(--pass)'],
+    ['Explained Gaps',expl,parts[1],'var(--skip)'],
+    ['Unexplained Gaps',unex,parts[2],'var(--fail)']
   ];
   steps.forEach(function(s){{
     var count=s[1],w=s[2];
     h+='<div class="funnel-step">';
     h+='<div class="funnel-label">'+s[0]+'</div>';
     h+='<div class="funnel-track">';
-    if(count>0){{
-      h+='<div class="funnel-bar" style="width:'+w+'%;background:'+s[3]+'">'+fmt(count)+'</div>';
+    if(count>0&&w>0){{
+      h+='<div class="funnel-bar" style="width:'+w+'%;background:'+s[3]+'" title="'+fmt(count)+' ('+w+'%)"></div>';
+    }}else if(count>0){{
+      // Non-zero count rounded to 0% — show a hairline so it is not invisible
+      h+='<div class="funnel-bar" style="width:1px;background:'+s[3]+'" title="'+fmt(count)+' (<1%)"></div>';
     }}
     h+='</div>';
-    h+='<div class="funnel-count">'+w+'%</div>';
+    h+='<div class="funnel-count">'+fmt(count)+' · '+w+'%</div>';
     h+='</div>';
   }});
   h+='</div>';
+  if(partTotal&&(mat+expl+unex)===partTotal){{
+    h+='<div style="font-size:.75rem;color:var(--fg2);margin:-.4rem 0 .6rem">Matched + Explained Gaps + Unexplained Gaps = 100% of source objects</div>';
+  }}
 
   // Stat cards — green=success, yellow=field changes, red=problems, grey=skip/zero-problems
   h+='<div class="cards">';
@@ -688,6 +709,9 @@ function renderOrgs(){{
   }});
 
   var h='<h2>Organization Health &mdash; '+okeys.length+' Organizations</h2>';
+  if({orgs_explained_failures}>0){{
+    h+='<div class="callout callout-fail"><strong>Import failures:</strong> '+fmt({orgs_explained_failures})+' object(s) failed import. These are explained by the migration DB but still mark organizations as RED.</div>';
+  }}
 
   // Dot grid
   h+='<div class="dot-legend"><span class="lg">Green ('+{orgs_green}+')</span><span class="la">Amber ('+{orgs_amber}+')</span><span class="lr">Red ('+{orgs_red}+')</span></div>';
@@ -713,12 +737,13 @@ function renderOrgs(){{
   if(orgPage>pages)orgPage=1;
   var start=(orgPage-1)*PER,slice=filtered.slice(start,start+PER);
 
-  h+='<table><thead><tr><th>Organization</th><th style="width:200px">Progress</th><th class="num">Objects</th><th class="num">Missing</th><th class="num">Changed</th><th class="num">Unexplained</th><th>Health</th></tr></thead><tbody>';
+  h+='<table><thead><tr><th>Organization</th><th style="width:200px">Progress</th><th class="num">Objects</th><th class="num">Missing</th><th class="num">Failed</th><th class="num">Changed</th><th class="num">Unexplained</th><th>Health</th></tr></thead><tbody>';
   if(!slice.length){{
-    h+='<tr><td colspan="7" class="empty-msg">No organizations match your filter.</td></tr>';
+    h+='<tr><td colspan="8" class="empty-msg">No organizations match your filter.</td></tr>';
   }}
   slice.forEach(function(o){{
     var pm=pct(o.matched,o.total_objects);
+    var fails=o.explained_failures||0;
     h+='<tr class="clickable" onclick="drillOrgByName(\\''+esc(o.org_name).replace(/'/g,"\\\\'")+'\\')">';
     h+='<td>'+objD(o.org_name,'',o.source_id,o.target_id)+'</td>';
     h+='<td><div class="pbar-track"><div class="pbar-seg" style="width:'+pm+'%;background:var(--pass)"></div>';
@@ -726,6 +751,7 @@ function renderOrgs(){{
     h+='</div></td>';
     h+='<td class="num">'+fmt(o.total_objects)+'</td>';
     h+='<td class="num">'+fmt(o.missing)+'</td>';
+    h+='<td class="num"'+(fails>0?' style="color:var(--fail);font-weight:700"':'')+'>'+fmt(fails)+'</td>';
     h+='<td class="num">'+fmt(o.field_mismatches)+'</td>';
     h+='<td class="num"'+(o.unexplained>0?' style="color:var(--fail);font-weight:700"':'')+'>'+fmt(o.unexplained)+'</td>';
     h+='<td><span class="health '+hcls(o.health)+'">'+hlbl(o.health)+'</span></td>';
@@ -756,11 +782,14 @@ function renderOrgDrill(orgName){{
   if(orgObjType){{renderOrgObj(orgName,orgObjType);return}}
   var o=(D.per_org||{{}})[orgName];
   if(!o){{orgDrill=null;renderOrgs();return}}
-  var explained=o.total_objects-o.matched-o.missing-o.unexplained;
-  if(explained<0)explained=0;
+  var fails=o.explained_failures||0;
+  var skips=o.explained_skips||0;
   var h='<div class="drill">';
   h+='<button class="back-btn" onclick="orgDrill=null;renderOrgs()">&#9664; Back to all orgs</button>';
   h+='<h2>'+esc(o.org_name)+' '+ids(o.source_id,o.target_id)+' <span class="health '+hcls(o.health)+'">'+hlbl(o.health)+'</span></h2>';
+  if(fails>0){{
+    h+='<div class="callout callout-fail"><strong>Import failures:</strong> '+fmt(fails)+' object(s) failed import in this organization (explained by migration DB, still treated as failures).</div>';
+  }}
 
   // Summary cards — clickable where data exists
   h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">';
@@ -772,22 +801,21 @@ function renderOrgDrill(orgName){{
   }}else{{
     h+='<div class="card"><div class="v ok">0</div><div class="l">Missing</div></div>';
   }}
+  h+='<div class="card"><div class="v'+(fails>0?' bad':' ok')+'">'+fmt(fails)+'</div><div class="l">Failed imports</div></div>';
+  if(skips>0)h+='<div class="card"><div class="v skip">'+fmt(skips)+'</div><div class="l">Skipped gaps</div></div>';
   if(o.field_mismatches>0){{
     h+='<div class="card" style="cursor:pointer" onclick="orgDrillSection=\\'fields\\';renderOrgDrill(\\''+esc(o.org_name).replace(/'/g,"\\\\'")+'\\')">';
     h+='<div class="v warn">'+fmt(o.field_mismatches)+'</div><div class="l">Changed &#8594;</div></div>';
   }}else{{
     h+='<div class="card"><div class="v ok">0</div><div class="l">Changed</div></div>';
   }}
-  if(explained>0)h+='<div class="card"><div class="v skip">'+fmt(explained)+'</div><div class="l">Explained gaps</div></div>';
   h+='<div class="card"><div class="v'+(o.unexplained===0?' ok':' bad')+'">'+fmt(o.unexplained)+'</div><div class="l">Unexplained</div></div>';
   h+='</div>';
 
   // Accounting callout
-  if(explained>0){{
-    h+='<div class="callout callout-info">'+fmt(o.total_objects)+' source = '+fmt(o.matched)+' matched + '+fmt(o.missing)+' missing + '+fmt(explained)+' explained gaps';
-    if(o.unexplained>0)h+=' + '+fmt(o.unexplained)+' unexplained';
-    h+='</div>';
-  }}
+  h+='<div class="callout callout-info">'+fmt(o.total_objects)+' source = '+fmt(o.matched)+' matched + '+fmt(fails)+' failed + '+fmt(skips)+' skipped + '+fmt(o.unexplained)+' unexplained';
+  if(o.field_mismatches>0)h+=' &middot; '+fmt(o.field_mismatches)+' with field changes';
+  h+='</div>';
 
   // Per-type table — click any row to browse objects
   if(o.per_type&&o.per_type.length){{
