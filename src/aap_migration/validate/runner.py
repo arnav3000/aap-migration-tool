@@ -275,6 +275,9 @@ def _parent_ref_name(obj: dict, field: str) -> str:
     alt = obj.get(f"{field}_name")
     if alt:
         return str(alt)
+    details = obj.get(f"{field}_details")
+    if isinstance(details, dict) and details.get("name"):
+        return str(details["name"])
     return ""
 
 
@@ -282,6 +285,7 @@ def _object_identity_key(rtype: str, obj: dict) -> tuple:
     """Stable identity for matching export objects to live target objects.
 
     Uses names (and parent names) — never remapped primary-key IDs.
+    Credentials use (org, credential_type, name) to match AAP uniqueness.
     """
     name = _object_display_name(obj)
     org_name, _ = _get_org_info(obj)
@@ -308,6 +312,14 @@ def _object_identity_key(rtype: str, obj: dict) -> tuple:
         return (
             "workflow_job_template_nodes",
             _parent_ref_name(obj, "workflow_job_template"),
+            name,
+        )
+    if rtype == "credentials":
+        # AAP uniqueness: (name, organization, credential_type)
+        return (
+            "credentials",
+            org_name,
+            _parent_ref_name(obj, "credential_type"),
             name,
         )
     if rtype in _ORG_SCOPED_TYPES:
