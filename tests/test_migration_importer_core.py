@@ -5,6 +5,7 @@ from aap_migration.config import PerformanceConfig
 from aap_migration.migration.importer import (
     CredentialImporter,
     CredentialTypeImporter,
+    InstanceImporter,
     ProjectImporter,
     ResourceImporter,
     UserImporter,
@@ -33,6 +34,8 @@ class FakeState:
     def mark_completed(self, **kwargs):
         self.completed.append(kwargs)
         self.migrated.add((kwargs["resource_type"], kwargs["source_id"]))
+        if "target_id" in kwargs and kwargs["target_id"] is not None:
+            self.mapped_ids[(kwargs["resource_type"], kwargs["source_id"])] = kwargs["target_id"]
 
     def mark_failed(self, **kwargs):
         self.failed.append(kwargs)
@@ -88,6 +91,9 @@ class FakeTargetClient:
         if isinstance(result, Exception):
             raise result
         return result
+
+    async def list_resources(self, resource_type, **kwargs):
+        return list(self.get_results.get(("list", resource_type), []))
 
     async def post(self, endpoint, json_data=None):
         self.post_calls.append((endpoint, dict(json_data or {})))
@@ -326,6 +332,94 @@ async def test_specialized_importers_cover_credential_type_user_and_credential_p
         {"name": "Create Me", "organization": 7, "credential_type": 30},
     )
     assert created_credential["id"] == 500
+
+
+@pytest.mark.asyncio
+async def test_credential_importer_defaults_owner_to_admin_when_missing():
+    performance = PerformanceConfig()
+    state = FakeState(mapped_ids={("credential_types", 30): 330})
+    client = FakeTargetClient()
+    client.get_results[("users/", (("username", "admin"),))] = {
+        "results": [{"id": 1, "username": "admin"}]
+    }
+    # Lookup by name+type with no org (owner will be admin user)
+    client.get_results[("credentials/", (("credential_type", 330), ("name", "Orphan Cred")))] = {
+        "results": []
+    }
+    importer = CredentialImporter(client, state, performance)
+
+    created = await importer.import_resource(
+        "credentials",
+        50,
+        {"name": "Orphan Cred", "credential_type": 30},
+    )
+
+    assert created["id"] == 500
+    # create_resource should have been called with user=admin
+    assert ("users/", {"username": "admin"}) in client.get_calls
+
+
+@pytest.mark.asyncio
+async def test_team_importer_reports_unmapped_organization_clearly():
+    from aap_migration.migration.importer import TeamImporter
+
+    performance = PerformanceConfig()
+    state = FakeState()  # no org mapping
+    client = FakeTargetClient()
+    importer = TeamImporter(client, state, performance)
+    result = await importer.import_resource(
+        "teams",
+        25,
+        {"name": "Ops", "organization": 5},
+    )
+    assert result is None
+    assert "source id 5" in importer.import_errors[-1]["error"]
+    assert importer.import_errors[-1]["error_type"] == "ValidationError"
+
+
+@pytest.mark.asyncio
+async def test_instance_importer_maps_by_hostname_instead_of_create():
+    performance = PerformanceConfig()
+    state = FakeState()
+    client = FakeTargetClient()
+    client.get_results[("list", "instances")] = [
+        {"id": 9, "hostname": "controller.example.com"},
+    ]
+    importer = InstanceImporter(client, state, performance, resource_mappings={})
+
+    mapped = await importer.import_resource(
+        "instances",
+        1,
+        {"id": 1, "hostname": "controller.example.com"},
+    )
+    assert mapped["id"] == 9
+    assert state.get_mapped_id("instances", 1) == 9
+    assert client.create_error is None
+
+
+@pytest.mark.asyncio
+async def test_user_importer_maps_existing_username_on_400():
+    performance = PerformanceConfig()
+    state = FakeState()
+    client = FakeTargetClient()
+    client.create_error = APIError(
+        "already exists",
+        status_code=400,
+        response={"username": ["A user with that username already exists."]},
+    )
+    client.get_results[("users/", (("username", "alice"),))] = {
+        "results": [{"id": 42, "username": "alice"}]
+    }
+    importer = UserImporter(client, state, performance)
+
+    result = await importer.import_resource(
+        "users",
+        10,
+        {"username": "alice", "is_superuser": False},
+    )
+    assert result["id"] == 42
+    assert state.get_mapped_id("users", 10) == 42
+    assert importer.stats["conflict_count"] == 1
 
 
 @pytest.mark.asyncio
