@@ -221,7 +221,7 @@ describe('Migrate', () => {
     fireEvent.click(screen.getByText('Preview Migration'));
 
     await waitFor(() =>
-      expect(api.migrationPreview).toHaveBeenCalledWith('src-1', 'dst-1', [1])
+      expect(api.migrationPreview).toHaveBeenCalledWith('src-1', 'dst-1', [1], undefined)
     );
 
     await waitFor(
