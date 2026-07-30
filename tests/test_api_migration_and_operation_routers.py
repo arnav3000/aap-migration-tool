@@ -218,3 +218,47 @@ async def test_operations_router_cleanup_and_export(monkeypatch: pytest.MonkeyPa
     assert export_result["status"] == "completed"
     assert export_result["exported"]["organizations"] == 2
     assert any("Export complete" in line for line in export_logs)
+
+
+@pytest.mark.asyncio
+async def test_resolve_jt_dependencies_includes_inventory_sources() -> None:
+    logs: list[str] = []
+
+    class FakeClient:
+        async def get_resource_by_id(self, resource_type: str, resource_id: int) -> dict:
+            if resource_type == "job_templates":
+                return {
+                    "id": 1,
+                    "name": "Demo JT",
+                    "inventory": 10,
+                    "project": 20,
+                    "organization": 1,
+                }
+            if resource_type == "projects":
+                return {"id": 20, "organization": 1}
+            if resource_type == "inventories":
+                return {"id": 10, "organization": 1}
+            raise AssertionError(f"unexpected fetch {resource_type}/{resource_id}")
+
+        async def get_job_template_credentials(self, job_template_id: int) -> list:
+            return []
+
+        async def get_inventory_sources(self, params: dict | None = None) -> list:
+            if params and params.get("inventory") == 10:
+                return [
+                    {
+                        "id": 100,
+                        "name": "scm-source",
+                        "inventory": 10,
+                        "source_project": 20,
+                        "credential": 30,
+                    }
+                ]
+            return []
+
+    deps, jt_data = await operations._resolve_jt_dependencies(FakeClient(), [1], logs.append)
+
+    assert len(jt_data) == 1
+    assert deps["inventory_sources"] == {100}
+    assert deps["inventories"] == {10}
+    assert deps["projects"] == {20}

@@ -248,6 +248,24 @@ async def _resolve_jt_dependencies(
         except Exception as exc:  # nosec B110
             log(f"  Warning: could not fetch inventory/{inv_id}: {exc}")
 
+    for inv_id in list(deps.get("inventories", set())):
+        try:
+            sources = await client.get_inventory_sources(params={"inventory": inv_id})
+            for src in sources:
+                src_id = src.get("id")
+                if src_id is not None:
+                    _add("inventory_sources", src_id)
+                _add("inventories", _fk_id(src, "inventory") or src.get("inventory"))
+                _add("projects", _fk_id(src, "source_project") or src.get("source_project"))
+                _add("credentials", _fk_id(src, "credential") or src.get("credential"))
+                _add(
+                    "execution_environments",
+                    _fk_id(src, "execution_environment") or src.get("execution_environment"),
+                )
+                _add("organizations", _fk_id(src, "organization"))
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not list inventory_sources for inventory/{inv_id}: {exc}")
+
     cred_ids = list(deps.get("credentials", set()))
     for cred_id in cred_ids:
         try:
@@ -298,11 +316,12 @@ async def selective_migrate(
 
     async def _do_selective(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
         import time
+        from typing import cast
 
         from aap_migration.client.aap_source_client import AAPSourceClient
         from aap_migration.client.aap_target_client import AAPTargetClient
         from aap_migration.config import MigrationConfig, StateConfig
-        from aap_migration.migration.importer import create_importer
+        from aap_migration.migration.importer import InventorySourceImporter, create_importer
         from aap_migration.migration.state import MigrationState
         from aap_migration.migration.transformer import SkipResourceError, create_transformer
         from aap_migration.resources import RESOURCE_REGISTRY, get_migration_order
@@ -408,6 +427,19 @@ async def selective_migrate(
                     for sid in source_ids:
                         try:
                             res = await src_client.get_resource_by_id(rtype, sid)
+                            if rtype == "inventory_sources":
+                                try:
+                                    sched_resp = await src_client.get(
+                                        f"inventory_sources/{sid}/schedules/"
+                                    )
+                                    schedules = sched_resp.get("results", [])
+                                    if schedules:
+                                        res["schedules"] = schedules
+                                except Exception as exc:  # nosec B110
+                                    log(
+                                        "  Warning: could not fetch schedules for "
+                                        f"inventory_sources/{sid}: {exc}"
+                                    )
                             resources_to_import.append(res)
                         except Exception as exc:
                             log(f"  Warning: failed to fetch {rtype}/{sid}: {exc}")
@@ -423,6 +455,93 @@ async def selective_migrate(
                     if info.has_transformer
                     else None
                 )
+
+                if rtype == "inventory_sources":
+                    batch: list[dict[str, Any]] = []
+                    for resource in resources_to_import:
+                        source_id = resource.get("id")
+                        if source_id is None:
+                            continue
+
+                        if state.is_migrated(rtype, int(source_id)) and state.has_source_mapping(
+                            rtype, int(source_id)
+                        ):
+                            skipped += 1
+                            res_name = resource.get("name", str(source_id))
+                            log(
+                                f"  Skipping {rtype}/{source_id} ({res_name}): "
+                                "already migrated (enable Force update to re-import)"
+                            )
+                            continue
+
+                        schedules = resource.get("schedules")
+                        try:
+                            if transformer:
+                                resource = transformer.transform_resource(
+                                    resource_type=rtype,
+                                    data=resource,
+                                    validate=True,
+                                )
+                            if schedules:
+                                resource["schedules"] = schedules
+                            batch.append(resource)
+                            exported += 1
+                        except SkipResourceError as exc:
+                            skipped += 1
+                            res_name = resource.get("name", str(source_id))
+                            log(f"  Skipping {rtype}/{source_id} ({res_name}): {exc}")
+                        except Exception:
+                            failed += 1
+
+                    if batch:
+                        inv_src_importer = cast(
+                            InventorySourceImporter,
+                            create_importer(
+                                resource_type="inventory_sources",
+                                client=target_client,
+                                state=state,
+                                performance_config=migration_config.performance,
+                                resource_mappings=migration_config.resource_mappings,
+                            ),
+                        )
+                        try:
+                            results = await inv_src_importer.import_inventory_sources(batch)
+                            created += len(results)
+                            for inv_result in results:
+                                emit(
+                                    {
+                                        "_event": "resource_result",
+                                        "phase_num": phase_num,
+                                        "name": inv_result.get("name", "unknown"),
+                                        "resource_type": rtype,
+                                        "result": "created",
+                                        "detail": "",
+                                    }
+                                )
+                        except Exception as exc:
+                            failed += len(batch)
+                            log(f"  Error importing inventory_sources batch: {exc}")
+
+                    duration = f"{time.monotonic() - phase_start:.1f}s"
+                    emit(
+                        {
+                            "_event": "phase_complete",
+                            "phase_num": phase_num,
+                            "description": info.description,
+                            "created": created,
+                            "updated": 0,
+                            "skipped": skipped,
+                            "failed": failed,
+                            "exported": exported,
+                            "duration": duration,
+                            "warnings": {},
+                        }
+                    )
+                    totals["created"] += created
+                    totals["skipped"] += skipped
+                    totals["failed"] += failed
+                    continue
+
                 importer = create_importer(
                     resource_type=rtype,
                     client=target_client,
