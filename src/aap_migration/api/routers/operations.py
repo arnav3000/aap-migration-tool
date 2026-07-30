@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -184,6 +184,85 @@ def _fk_id(data: dict[str, Any], field: str) -> int | None:
     return None
 
 
+def _clear_selective_resource_state(
+    state: Any,
+    resource_type: str,
+    source_id: int,
+) -> None:
+    """Drop stale progress/mapping so a missing target resource can be re-imported."""
+    from aap_migration.migration.database import get_session
+    from aap_migration.migration.models import IDMapping, MigrationProgress
+
+    with state._lock:
+        with get_session(state.database_url) as session:
+            session.query(MigrationProgress).filter(
+                MigrationProgress.resource_type == resource_type,
+                MigrationProgress.source_id == source_id,
+            ).delete(synchronize_session=False)
+            session.query(IDMapping).filter(
+                IDMapping.resource_type == resource_type,
+                IDMapping.source_id == source_id,
+            ).update(
+                {"target_id": None, "target_name": None},
+                synchronize_session=False,
+            )
+            session.commit()
+
+
+async def _should_skip_migrated_resource(
+    state: Any,
+    target_client: Any,
+    resource_type: str,
+    source_id: int,
+    log: Callable[[str], None],
+) -> bool:
+    """Return True only when state and target AAP both confirm the resource exists."""
+    if not state.is_migrated(resource_type, source_id):
+        return False
+
+    target_id = state.get_mapped_id(resource_type, source_id)
+    if target_id is None:
+        _clear_selective_resource_state(state, resource_type, source_id)
+        return False
+
+    try:
+        await target_client.get(f"{resource_type}/{target_id}/")
+        return True
+    except Exception:
+        log(
+            f"  {resource_type}/{source_id}: recorded as migrated but target "
+            f"{target_id} is missing — re-importing"
+        )
+        _clear_selective_resource_state(state, resource_type, source_id)
+        return False
+
+
+async def _list_inventory_sources_for_inventory(
+    client: Any,
+    inv_id: int,
+    log: Callable[[str], None],
+) -> list[dict[str, Any]]:
+    """List inventory sources for an inventory, with nested-endpoint fallback."""
+    try:
+        sources = await client.get_inventory_sources(params={"inventory": inv_id})
+        if sources:
+            return cast(list[dict[str, Any]], sources)
+    except Exception as exc:  # nosec B110
+        log(f"  Warning: inventory_sources query failed for inventory/{inv_id}: {exc}")
+
+    try:
+        sources = await client.get_paginated(f"inventories/{inv_id}/inventory_sources/")
+        if sources:
+            log(
+                f"  Found {len(sources)} inventory_sources via nested endpoint "
+                f"for inventory/{inv_id}"
+            )
+        return cast(list[dict[str, Any]], sources)
+    except Exception as exc:  # nosec B110
+        log(f"  Warning: could not list inventory_sources for inventory/{inv_id}: {exc}")
+        return []
+
+
 async def _resolve_jt_dependencies(
     client: Any,
     jt_ids: list[int],
@@ -249,22 +328,19 @@ async def _resolve_jt_dependencies(
             log(f"  Warning: could not fetch inventory/{inv_id}: {exc}")
 
     for inv_id in list(deps.get("inventories", set())):
-        try:
-            sources = await client.get_inventory_sources(params={"inventory": inv_id})
-            for src in sources:
-                src_id = src.get("id")
-                if src_id is not None:
-                    _add("inventory_sources", src_id)
-                _add("inventories", _fk_id(src, "inventory") or src.get("inventory"))
-                _add("projects", _fk_id(src, "source_project") or src.get("source_project"))
-                _add("credentials", _fk_id(src, "credential") or src.get("credential"))
-                _add(
-                    "execution_environments",
-                    _fk_id(src, "execution_environment") or src.get("execution_environment"),
-                )
-                _add("organizations", _fk_id(src, "organization"))
-        except Exception as exc:  # nosec B110
-            log(f"  Warning: could not list inventory_sources for inventory/{inv_id}: {exc}")
+        sources = await _list_inventory_sources_for_inventory(client, inv_id, log)
+        for src in sources:
+            src_id = src.get("id")
+            if src_id is not None:
+                _add("inventory_sources", src_id)
+            _add("inventories", _fk_id(src, "inventory") or src.get("inventory"))
+            _add("projects", _fk_id(src, "source_project") or src.get("source_project"))
+            _add("credentials", _fk_id(src, "credential") or src.get("credential"))
+            _add(
+                "execution_environments",
+                _fk_id(src, "execution_environment") or src.get("execution_environment"),
+            )
+            _add("organizations", _fk_id(src, "organization"))
 
     cred_ids = list(deps.get("credentials", set()))
     for cred_id in cred_ids:
@@ -463,14 +539,14 @@ async def selective_migrate(
                         if source_id is None:
                             continue
 
-                        if state.is_migrated(rtype, int(source_id)) and state.has_source_mapping(
-                            rtype, int(source_id)
+                        if await _should_skip_migrated_resource(
+                            state, target_client, rtype, int(source_id), log
                         ):
                             skipped += 1
                             res_name = resource.get("name", str(source_id))
                             log(
                                 f"  Skipping {rtype}/{source_id} ({res_name}): "
-                                "already migrated (enable Force update to re-import)"
+                                "already exists on target"
                             )
                             continue
 
@@ -555,14 +631,13 @@ async def selective_migrate(
                     if source_id is None:
                         continue
 
-                    if state.is_migrated(rtype, int(source_id)) and state.has_source_mapping(
-                        rtype, int(source_id)
+                    if await _should_skip_migrated_resource(
+                        state, target_client, rtype, int(source_id), log
                     ):
                         skipped += 1
                         res_name = resource.get("name", resource.get("username", str(source_id)))
                         log(
-                            f"  Skipping {rtype}/{source_id} ({res_name}): "
-                            "already migrated (enable Force update to re-import)"
+                            f"  Skipping {rtype}/{source_id} ({res_name}): already exists on target"
                         )
                         emit(
                             {
