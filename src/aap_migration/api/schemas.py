@@ -122,6 +122,13 @@ class ConcurrencySettingUpdate(BaseModel):
     max_concurrent: int = Field(ge=1, le=100)
 
 
+class SelectiveMigrateRequest(BaseModel):
+    source_id: str
+    destination_id: str
+    job_template_ids: list[int] = Field(min_length=1)
+    force_update: bool = False
+
+
 # --- Migration Planner Schemas ---
 
 

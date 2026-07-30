@@ -2076,6 +2076,54 @@ class InventorySourceTransformer(DataTransformer):
     # Inventory is required; source_project/credential/EE are optional
     REQUIRED_DEPENDENCIES = {"inventory"}
 
+    def _extract_fk_fields(self, data: dict[str, Any]) -> None:
+        """Populate FK fields from summary_fields before dependency validation."""
+        if "summary_fields" not in data:
+            return
+        sf = data["summary_fields"]
+        for field, sf_key in (
+            ("inventory", "inventory"),
+            ("source_project", "source_project"),
+            ("credential", "credential"),
+            ("execution_environment", "execution_environment"),
+        ):
+            if field not in data and sf_key in sf:
+                info = sf[sf_key]
+                if isinstance(info, dict) and "id" in info:
+                    data[field] = info["id"]
+
+    def _validate_dependencies(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> None:
+        """Validate inventory sources and SCM project mappings are import-ready."""
+        self._extract_fk_fields(data)
+        super()._validate_dependencies(data, resource_type)
+
+        if not self.state:
+            return
+
+        source_id = coerce_source_id(data)
+        inventory_id = data.get("inventory")
+        if inventory_id and self.state.get_mapped_id("inventories", inventory_id) is None:
+            raise SkipResourceError(
+                f"inventory_sources {source_id} references unmapped inventories {inventory_id}",
+                resource_type=resource_type,
+                source_id=source_id,
+                missing_dependency=f"inventories:{inventory_id}",
+            )
+
+        if data.get("source") == "scm":
+            project_id = data.get("source_project")
+            if project_id and self.state.get_mapped_id("projects", project_id) is None:
+                raise SkipResourceError(
+                    f"inventory_sources {source_id} references unmapped projects {project_id}",
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    missing_dependency=f"projects:{project_id}",
+                )
+
     def _apply_specific_transformations(
         self, data: dict[str, Any], resource_type: str
     ) -> dict[str, Any]:
@@ -2089,28 +2137,15 @@ class InventorySourceTransformer(DataTransformer):
             Transformed inventory source data
         """
         source_id = data.get("_source_id") or data.get("id")
-
-        # Extract inventory ID from summary_fields if not already set
-        if "inventory" not in data and "summary_fields" in data:
-            if "inventory" in data["summary_fields"]:
-                inv_info = data["summary_fields"]["inventory"]
-                if isinstance(inv_info, dict) and "id" in inv_info:
-                    data["inventory"] = inv_info["id"]
-                    logger.debug(
-                        "extracted_inventory_from_summary",
-                        resource_type="inventory_sources",
-                        source_id=source_id,
-                        source_name=data.get("name"),
-                        inventory_id=inv_info["id"],
-                    )
-
-        # Extract source_project ID from summary_fields
-        if "source_project" not in data and "summary_fields" in data:
-            if "source_project" in data["summary_fields"]:
-                proj_info = data["summary_fields"]["source_project"]
-                if isinstance(proj_info, dict) and "id" in proj_info:
-                    data["source_project"] = proj_info["id"]
-
+        self._extract_fk_fields(data)
+        if data.get("inventory") is not None:
+            logger.debug(
+                "extracted_inventory_from_summary",
+                resource_type="inventory_sources",
+                source_id=source_id,
+                source_name=data.get("name"),
+                inventory_id=data.get("inventory"),
+            )
         return data
 
 

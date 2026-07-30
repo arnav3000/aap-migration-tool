@@ -10,7 +10,7 @@ vi.mock('@patternfly/react-core', () => ({
     onClick,
     isDisabled,
     ...props
-  }: ButtonHTMLAttributes<HTMLButtonElement> & { isDisabled?: boolean }) => (
+  }: ButtonHTMLAttributes<HTMLButtonElement> & { isDisabled?: boolean; isLoading?: boolean }) => (
     <button type="button" disabled={isDisabled} onClick={onClick} {...props}>
       {children}
     </button>
@@ -36,9 +36,13 @@ vi.mock('@patternfly/react-core', () => ({
       />
     </label>
   ),
+  Divider: () => <hr />,
   Title: ({ children }: { children: ReactNode }) => <h1>{children}</h1>,
   TextContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   Text: ({ children }: { children: ReactNode }) => <p>{children}</p>,
+  TextInput: ({ value, onChange, ...props }: { value: string; onChange: (_e: unknown, v: string) => void; [key: string]: unknown }) => (
+    <input type="text" value={value} onChange={(e) => onChange(e, (e.target as HTMLInputElement).value)} {...props} />
+  ),
   Alert: ({ title, children }: { title: string; children?: ReactNode }) => (
     <div>
       {title}
@@ -73,6 +77,13 @@ vi.mock('@patternfly/react-core', () => ({
   CardBody: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   CardHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   CardTitle: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  MenuToggle: ({ children, onClick }: { children: ReactNode; onClick: () => void }) => (
+    <button type="button" onClick={onClick}>{children}</button>
+  ),
+  Select: ({ children, isOpen }: { children: ReactNode; isOpen: boolean }) => isOpen ? <div>{children}</div> : null,
+  SelectOption: ({ children, value }: { children: ReactNode; value: string }) => <div data-value={value}>{children}</div>,
+  SelectList: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  Spinner: () => <span>loading...</span>,
 }));
 
 vi.mock('@patternfly/react-icons/dist/esm/icons/times-icon', () => ({ default: () => <span>x</span> }));
@@ -95,6 +106,8 @@ vi.mock('../api/client', () => ({
     listConnections: vi.fn(),
     runCleanup: vi.fn(),
     runExport: vi.fn(),
+    listResources: vi.fn(),
+    selectiveMigrate: vi.fn(),
   },
 }));
 
@@ -134,15 +147,17 @@ describe('Operations', () => {
 
     render(<Operations />);
 
-    expect(await screen.findByText('Source')).toBeInTheDocument();
+    const sourceButtons = await screen.findAllByText('Source');
+    expect(sourceButtons.length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByText('Source'));
-    fireEvent.click(screen.getByText('Destination'));
+    fireEvent.click(sourceButtons[0]);
+    const destButtons = screen.getAllByText('Destination');
+    fireEvent.click(destButtons[0]);
     expect(
       screen.getByText((content) => content.includes('authentication failed') && content.includes('bad token'))
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Source'));
+    fireEvent.click(sourceButtons[0]);
     fireEvent.click(screen.getByText('Browse'));
     expect(navigate).toHaveBeenCalledWith('/browse?conn=src-1');
 
@@ -193,7 +208,8 @@ describe('Operations', () => {
 
     render(<Operations />);
 
-    fireEvent.click(await screen.findByText('Source'));
+    const srcButtons = await screen.findAllByText('Source');
+    fireEvent.click(srcButtons[0]);
     fireEvent.click(screen.getByText('Export'));
 
     expect(await screen.findByText('export failed')).toBeInTheDocument();

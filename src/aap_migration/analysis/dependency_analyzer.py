@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from aap_migration.analysis.quality import QualityReport, generate_quality_report
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.utils.logging import get_logger
 
@@ -33,13 +36,10 @@ RESOURCE_DEPENDENCIES: dict[str, list[tuple[str, str | None, str]]] = {
         ("project", "projects", "single"),
         ("inventory", "inventories", "single"),
         ("execution_environment", "execution_environments", "single"),
-        # The legacy singular `credential` field is deprecated on modern
-        # AAP — the full credential set lives at summary_fields.credentials
-        # and legitimately spans multiple organizations (e.g. machine cred
-        # from Org A + vault cred from Org B + cloud cred from Org C).
-        # Reading only the singular field is why one JT was previously
-        # never able to surface deps on more than one other org through
-        # its credentials.
+        # Legacy singular credential (older AAP / partial exports).
+        ("credential", "credentials", "single"),
+        # Modern AAP stores the full M2M credential set here; a single JT
+        # can legitimately depend on credentials from multiple orgs.
         ("summary_fields.credentials", "credentials", "many"),
     ],
     "projects": [
@@ -128,7 +128,7 @@ class ResourceDependency:
     org_name: str
     required_by: list[dict[str, Any]] = field(default_factory=list)
 
-    def add_usage(self, resource_type: str, resource_id: int, resource_name: str):
+    def add_usage(self, resource_type: str, resource_id: int, resource_name: str) -> None:
         """Add a resource that requires this dependency."""
         self.required_by.append(
             {
@@ -151,6 +151,7 @@ class OrgDependencyReport:
     can_migrate_standalone: bool
     required_migrations_before: list[str]
     resources: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    quality_report: QualityReport | None = None
 
     def get_total_cross_org_resources(self) -> int:
         """Count total cross-org resource dependencies."""
@@ -171,24 +172,110 @@ class GlobalDependencyReport:
     migration_order: list[str]
     migration_phases: list[dict[str, Any]]
     cycles: list[list[str]] = field(default_factory=list)
+    global_resources: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    total_duplicates: int = 0
+    average_quality_score: float = 100.0
+
+    def get_quality_summary(self) -> dict[str, Any]:
+        """Get aggregated quality statistics across all organizations."""
+        total_dups = 0
+        total_errors = 0
+        total_warnings = 0
+        org_count = 0
+        total_score = 0.0
+
+        for report in self.org_reports.values():
+            if report.quality_report:
+                org_count += 1
+                total_dups += report.quality_report.duplicate_count
+                total_score += report.quality_report.quality_score
+
+                severity_counts = report.quality_report.get_severity_counts()
+                total_errors += severity_counts.get("error", 0)
+                total_warnings += severity_counts.get("warning", 0)
+
+        avg_score = total_score / org_count if org_count > 0 else 100.0
+
+        return {
+            "total_duplicates": total_dups,
+            "total_errors": total_errors,
+            "total_warnings": total_warnings,
+            "average_quality_score": round(avg_score, 1),
+            "orgs_analyzed": org_count,
+        }
 
 
 class CrossOrgDependencyAnalyzer:
     """Analyzes cross-organization dependencies in AAP."""
 
-    def __init__(self, source_client: AAPSourceClient):
-        """Initialize analyzer."""
+    def __init__(
+        self,
+        source_client: AAPSourceClient,
+        max_concurrent_orgs: int = 5,
+        max_concurrent_resources: int = 20,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+        db_service: Any = None,
+        use_cache: bool = True,
+        cache_ttl_hours: int = 24,
+    ):
+        """Initialize analyzer.
+
+        Args:
+            source_client: AAP source client
+            max_concurrent_orgs: Max orgs to analyze in parallel
+            max_concurrent_resources: Max resource fetches in parallel
+            progress_callback: Optional callback(current, total, message)
+            db_service: Optional DatabaseService for caching
+            use_cache: Whether to use database cache
+            cache_ttl_hours: Cache TTL in hours
+        """
         self.client = source_client
+        self.max_concurrent_orgs = max_concurrent_orgs
+        self.max_concurrent_resources = max_concurrent_resources
+        self.progress_callback = progress_callback
+        self.db_service = db_service
+        self.use_cache = use_cache and db_service is not None
+        self.cache_ttl_hours = cache_ttl_hours
         self._org_cache: dict[int, str] = {}
         self._resource_cache: dict[str, dict[int, dict]] = {}
+        self._org_semaphore = asyncio.Semaphore(max_concurrent_orgs)
+        self._resource_semaphore = asyncio.Semaphore(max_concurrent_resources)
+        self._job_id: int | None = None
 
-    async def analyze_organization(self, org_name: str) -> OrgDependencyReport:
+    async def analyze_organization(
+        self, org_name: str, force_refresh: bool = False
+    ) -> OrgDependencyReport:
         """Analyze dependencies for a single organization."""
         logger.info(
             "dependency_analysis_start",
             org_name=org_name,
+            use_cache=self.use_cache,
+            force_refresh=force_refresh,
             message=f"Analyzing organization: {org_name}",
         )
+
+        if self.use_cache and not force_refresh:
+            if not self.db_service.needs_analysis(org_name, self.cache_ttl_hours):
+                logger.info(
+                    "cache_hit",
+                    org_name=org_name,
+                    message=f"Using cached data for {org_name}",
+                )
+                cached = self.db_service.get_cached_analysis(org_name)
+                if cached:
+                    resources = cached["resources"]
+                    org_id = cached["org_id"]
+                    cross_org_deps = await self._analyze_resources(org_name, resources)
+                    return OrgDependencyReport(
+                        org_name=org_name,
+                        org_id=org_id,
+                        resource_count=cached["resource_count"],
+                        has_cross_org_deps=len(cross_org_deps) > 0,
+                        dependencies=cross_org_deps,
+                        can_migrate_standalone=len(cross_org_deps) == 0,
+                        required_migrations_before=sorted(cross_org_deps.keys()),
+                        resources=resources,
+                    )
 
         org = await self._get_organization(org_name)
         org_id = org["id"]
@@ -205,6 +292,7 @@ class CrossOrgDependencyAnalyzer:
         )
 
         cross_org_deps = await self._analyze_resources(org_name, resources)
+        quality_report = generate_quality_report(resources, org_name)
 
         report = OrgDependencyReport(
             org_name=org_name,
@@ -215,7 +303,33 @@ class CrossOrgDependencyAnalyzer:
             can_migrate_standalone=len(cross_org_deps) == 0,
             required_migrations_before=sorted(cross_org_deps.keys()),
             resources=resources,
+            quality_report=quality_report,
         )
+
+        if self.use_cache:
+            try:
+                db_org = self.db_service.upsert_organization(
+                    aap_id=org_id,
+                    name=org_name,
+                    resource_count=total_resources,
+                    has_dependencies=len(cross_org_deps) > 0,
+                    can_migrate_standalone=len(cross_org_deps) == 0,
+                    last_modified_at=org.get("modified"),
+                )
+                for resource_type, items in resources.items():
+                    if items:
+                        self.db_service.bulk_upsert_resources(
+                            org_id=db_org.id,
+                            resource_type=resource_type,
+                            resources=items,
+                        )
+            except Exception as e:
+                logger.warning(
+                    "cache_update_failed",
+                    org_name=org_name,
+                    error=str(e),
+                    message=f"Failed to cache data for {org_name}: {e}",
+                )
 
         logger.info(
             "dependency_analysis_complete",
@@ -227,27 +341,87 @@ class CrossOrgDependencyAnalyzer:
 
         return report
 
-    async def analyze_all_organizations(self) -> GlobalDependencyReport:
+    async def _analyze_org_with_progress(
+        self, org_name: str, current: int, total: int
+    ) -> tuple[str, OrgDependencyReport]:
+        """Analyze a single org with concurrency and progress tracking."""
+        async with self._org_semaphore:
+            if self.progress_callback is not None:
+                self.progress_callback(current, total, f"Analyzing {org_name}")
+
+            logger.info(
+                "dependency_analysis_progress",
+                org_name=org_name,
+                progress=f"{current}/{total}",
+                message=f"Analyzing {org_name} ({current}/{total})",
+            )
+
+            try:
+                report = await self.analyze_organization(org_name)
+                return (org_name, report)
+            except Exception as e:
+                logger.error(
+                    "dependency_analysis_org_failed",
+                    org_name=org_name,
+                    error=str(e),
+                    message=f"Failed to analyze {org_name}: {e}",
+                )
+                return (
+                    org_name,
+                    OrgDependencyReport(
+                        org_name=org_name,
+                        org_id=-1,
+                        resource_count=0,
+                        has_cross_org_deps=False,
+                        dependencies={},
+                        can_migrate_standalone=True,
+                        required_migrations_before=[],
+                        resources={},
+                    ),
+                )
+
+    async def analyze_all_organizations(
+        self, force_refresh: bool = False
+    ) -> GlobalDependencyReport:
         """Analyze all organizations in source AAP."""
         orgs = await self.client.get_paginated("organizations/")
         org_names = sorted([org["name"] for org in orgs])
 
+        if self.use_cache:
+            self._job_id = self.db_service.create_analysis_job(
+                job_type="full" if force_refresh else "auto",
+                total_orgs=len(org_names),
+            )
+
         logger.info(
             "dependency_analysis_all_start",
             total_orgs=len(org_names),
+            max_concurrent=self.max_concurrent_orgs,
             message=f"Analyzing {len(org_names)} organizations",
         )
 
-        org_reports = {}
-        for i, org_name in enumerate(org_names, 1):
-            logger.info(
-                "dependency_analysis_progress",
-                org_name=org_name,
-                progress=f"{i}/{len(org_names)}",
-                message=f"Analyzing {org_name} ({i}/{len(org_names)})",
-            )
-            report = await self.analyze_organization(org_name)
+        if self.progress_callback is not None:
+            self.progress_callback(0, len(org_names), "Starting analysis...")
+
+        tasks = [
+            self._analyze_org_with_progress(org_name, i + 1, len(org_names))
+            for i, org_name in enumerate(org_names)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        org_reports: dict[str, OrgDependencyReport] = {}
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error(
+                    "dependency_analysis_task_exception",
+                    error=str(result),
+                    message=f"Task failed with exception: {result}",
+                )
+                continue
+            org_name, report = result
             org_reports[org_name] = report
+
+        global_resources = await self._fetch_global_resources()
 
         independent = sorted([name for name, r in org_reports.items() if not r.has_cross_org_deps])
         dependent = sorted([name for name, r in org_reports.items() if r.has_cross_org_deps])
@@ -277,6 +451,20 @@ class CrossOrgDependencyAnalyzer:
                     ),
                 )
 
+        total_duplicates = sum(
+            report.quality_report.duplicate_count
+            for report in org_reports.values()
+            if report.quality_report
+        )
+        quality_scores = [
+            report.quality_report.quality_score
+            for report in org_reports.values()
+            if report.quality_report
+        ]
+        average_quality_score = (
+            sum(quality_scores) / len(quality_scores) if quality_scores else 100.0
+        )
+
         logger.info(
             "dependency_analysis_all_complete",
             total_orgs=len(org_names),
@@ -298,6 +486,9 @@ class CrossOrgDependencyAnalyzer:
             migration_order=migration_order,
             migration_phases=migration_phases,
             cycles=cycles,
+            global_resources=global_resources,
+            total_duplicates=total_duplicates,
+            average_quality_score=round(average_quality_score, 1),
         )
 
     async def _get_organization(self, org_name: str) -> dict:
@@ -344,6 +535,39 @@ class CrossOrgDependencyAnalyzer:
                 logger.warning(
                     "dependency_analysis_resource_fetch_failed",
                     org_name=org_name,
+                    resource_type=rtype,
+                    error=str(e),
+                )
+                resources[rtype] = []
+
+        return resources
+
+    async def _fetch_global_resources(self) -> dict[str, list[dict[str, Any]]]:
+        """Fetch resources not tied to any organization."""
+        global_resource_types = [
+            "credential_types",
+            "execution_environments",
+            "instance_groups",
+            "notification_templates",
+        ]
+
+        resources: dict[str, list[dict[str, Any]]] = {}
+        for rtype in global_resource_types:
+            try:
+                endpoint = f"{rtype}/"
+                try:
+                    items = await self.client.get_paginated(
+                        endpoint, params={"organization__isnull": "true"}
+                    )
+                except Exception:
+                    all_items = await self.client.get_paginated(endpoint)
+                    items = [item for item in all_items if item.get("organization") is None]
+
+                resources[rtype] = items
+                logger.debug("global_resource_fetch", resource_type=rtype, count=len(items))
+            except Exception as e:
+                logger.warning(
+                    "global_resource_fetch_failed",
                     resource_type=rtype,
                     error=str(e),
                 )
@@ -482,14 +706,15 @@ class CrossOrgDependencyAnalyzer:
 
         if resource_type in self._resource_cache:
             if resource_id in self._resource_cache[resource_type]:
-                return self._resource_cache[resource_type][resource_id].get(
+                cached_name = self._resource_cache[resource_type][resource_id].get(
                     "name", f"{resource_type}_{resource_id}"
                 )
+                return str(cached_name)
 
         try:
             endpoint = f"{resource_type}/{resource_id}/"
             resource = await self.client.get(endpoint)
-            return resource.get("name", f"{resource_type}_{resource_id}")
+            return str(resource.get("name", f"{resource_type}_{resource_id}"))
         except Exception:
             return f"{resource_type}_{resource_id}"
 
@@ -501,7 +726,8 @@ class CrossOrgDependencyAnalyzer:
         try:
             endpoint = f"organizations/{org_id}/"
             org = await self.client.get(endpoint)
-            self._org_cache[org_id] = org["name"]
-            return org["name"]
+            org_name = str(org["name"])
+            self._org_cache[org_id] = org_name
+            return org_name
         except Exception:
             return f"org_{org_id}"

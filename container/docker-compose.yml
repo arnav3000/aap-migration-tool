@@ -1,5 +1,8 @@
 version: '3.8'
 
+# Stable compose project name (independent of the container/ directory name).
+name: aap-bridge
+
 networks:
   app:
     driver: bridge
@@ -38,6 +41,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    env_file:
+    - .env
     environment:
       MIGRATION_STATE_DB_PATH: ${MIGRATION_STATE_DB_PATH:?set MIGRATION_STATE_DB_PATH in container/.env}
       AAP_TOKEN_ENCRYPTION_KEY: ${AAP_TOKEN_ENCRYPTION_KEY:?set AAP_TOKEN_ENCRYPTION_KEY in container/.env}
@@ -117,13 +122,23 @@ services:
       retries: 3
 
 volumes:
+  # Pinned name so rebuilds and compose project renames do not create a fresh DB.
+  # Existing installs may already have container_postgres-data from the default
+  # compose project name; keep that volume to preserve migration state.
   postgres-data:
+    name: container_postgres-data
     driver: local
 
 # Usage:
 # ======
 # 1. Copy .env.container to .env and customize your credentials
 # 2. Create volumes: mkdir -p volumes/{database,logs,exports,xformed,config,auth}
+#
+# Persistence:
+# - Migration state, saved connections, and job history live in the
+#   container_postgres-data Podman volume (or container/volumes/* bind mounts).
+# - make down / make build / make up keep that data.
+# - make destroy (or compose down -v) deletes volumes and wipes all state.
 #
 # Full stack (UI + API + DB + CLI):
 #   podman-compose up -d

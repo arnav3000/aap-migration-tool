@@ -303,5 +303,5 @@ def group_into_phases_with_cycles(
     return plan.order, plan.phases
 
 
-# Alias retained for callers predating the find_cycles rename.
+# Backward-compatible alias used by API serializers and older callers.
 detect_cycles = find_cycles

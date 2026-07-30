@@ -236,6 +236,28 @@ podman-compose up -d ui
 
 ## Persistent Data
 
+Migration state is **not** stored inside container images. It lives in:
+
+| Data | Location |
+|------|----------|
+| Connections, job history, ID mappings | Podman volume `container_postgres-data` (default PostgreSQL DSN) |
+| Exports / transforms / logs | Host bind mounts under `container/volumes/` |
+
+```bash
+make down          # Stop containers — data is preserved
+make build && make up   # Rebuild images — data is preserved
+
+make down-images   # Stop and remove images — data is still preserved
+make destroy       # Deletes volumes — wipes all migration state
+```
+
+**Do not** run `podman compose down -v` unless you intend to start fresh. Podman Desktop's
+"delete images" option during teardown may also offer to remove volumes — decline that if you
+want to keep migration progress.
+
+Keep `AAP_TOKEN_ENCRYPTION_KEY` stable in `container/.env`. Changing it invalidates saved
+connection tokens even if the database volume is intact.
+
 All migration data persists on the host via volume mounts:
 
 ```

@@ -218,3 +218,139 @@ async def test_operations_router_cleanup_and_export(monkeypatch: pytest.MonkeyPa
     assert export_result["status"] == "completed"
     assert export_result["exported"]["organizations"] == 2
     assert any("Export complete" in line for line in export_logs)
+
+
+@pytest.mark.asyncio
+async def test_resolve_jt_dependencies_includes_inventory_sources() -> None:
+    logs: list[str] = []
+
+    class FakeClient:
+        async def get_resource_by_id(self, resource_type: str, resource_id: int) -> dict:
+            if resource_type == "job_templates":
+                return {
+                    "id": 1,
+                    "name": "Demo JT",
+                    "inventory": 10,
+                    "project": 20,
+                    "organization": 1,
+                }
+            if resource_type == "projects":
+                return {"id": 20, "organization": 1}
+            if resource_type == "inventories":
+                return {"id": 10, "organization": 1}
+            raise AssertionError(f"unexpected fetch {resource_type}/{resource_id}")
+
+        async def get_job_template_credentials(self, job_template_id: int) -> list:
+            return []
+
+        async def get_inventory_sources(self, params: dict | None = None) -> list:
+            if params and params.get("inventory") == 10:
+                return [
+                    {
+                        "id": 100,
+                        "name": "scm-source",
+                        "inventory": 10,
+                        "source_project": 20,
+                        "credential": 30,
+                    }
+                ]
+            return []
+
+    deps, jt_data = await operations._resolve_jt_dependencies(FakeClient(), [1], logs.append)
+
+    assert len(jt_data) == 1
+    assert deps["inventory_sources"] == {100}
+    assert deps["inventories"] == {10}
+    assert deps["projects"] == {20}
+
+
+@pytest.mark.asyncio
+async def test_resolve_jt_dependencies_inventory_sources_nested_fallback() -> None:
+    logs: list[str] = []
+
+    class FakeClient:
+        async def get_resource_by_id(self, resource_type: str, resource_id: int) -> dict:
+            if resource_type == "job_templates":
+                return {"id": 1, "inventory": 10, "project": 20, "organization": 1}
+            if resource_type == "projects":
+                return {"id": 20, "organization": 1}
+            if resource_type == "inventories":
+                return {"id": 10, "organization": 1}
+            raise AssertionError(f"unexpected fetch {resource_type}/{resource_id}")
+
+        async def get_job_template_credentials(self, job_template_id: int) -> list:
+            return []
+
+        async def get_inventory_sources(self, params: dict | None = None) -> list:
+            return []
+
+        async def get_paginated(self, endpoint: str, **kwargs) -> list:
+            if endpoint == "inventories/10/inventory_sources/":
+                return [{"id": 100, "inventory": 10, "source_project": 20}]
+            return []
+
+    deps, _ = await operations._resolve_jt_dependencies(FakeClient(), [1], logs.append)
+
+    assert deps["inventory_sources"] == {100}
+    assert any("nested endpoint" in line for line in logs)
+
+
+@pytest.mark.asyncio
+async def test_should_skip_migrated_resource_reimports_when_target_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs: list[str] = []
+    cleared: list[tuple[str, int]] = []
+
+    monkeypatch.setattr(
+        operations,
+        "_clear_selective_resource_state",
+        lambda state, rt, sid: cleared.append((rt, sid)),
+    )
+
+    class FakeState:
+        def is_migrated(self, resource_type: str, source_id: int) -> bool:
+            return resource_type == "inventory_sources" and source_id == 100
+
+        def get_mapped_id(self, resource_type: str, source_id: int) -> int | None:
+            return 999
+
+    class MissingTargetClient:
+        async def get(self, endpoint: str) -> dict:
+            raise RuntimeError("not found")
+
+    should_skip = await operations._should_skip_migrated_resource(
+        FakeState(),
+        MissingTargetClient(),
+        "inventory_sources",
+        100,
+        logs.append,
+    )
+
+    assert should_skip is False
+    assert cleared == [("inventory_sources", 100)]
+    assert any("re-importing" in line for line in logs)
+
+
+@pytest.mark.asyncio
+async def test_should_skip_migrated_resource_when_target_exists() -> None:
+    class FakeState:
+        def is_migrated(self, resource_type: str, source_id: int) -> bool:
+            return True
+
+        def get_mapped_id(self, resource_type: str, source_id: int) -> int | None:
+            return 42
+
+    class TargetClient:
+        async def get(self, endpoint: str) -> dict:
+            return {"id": 42}
+
+    should_skip = await operations._should_skip_migrated_resource(
+        FakeState(),
+        TargetClient(),
+        "inventory_sources",
+        100,
+        lambda _msg: None,
+    )
+
+    assert should_skip is True

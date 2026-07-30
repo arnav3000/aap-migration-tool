@@ -635,3 +635,44 @@ def test_schedule_misc_transformers_and_factory_helpers():
         {"id": 70, "name": "IG", "policy_instance_list": ["old-a", "keep-b"]},
     )
     assert instance_group_payload["policy_instance_list"] == ["new-a", "keep-b"]
+
+
+def test_inventory_source_transformer_requires_target_mappings_for_scm():
+    from aap_migration.migration.transformer import InventorySourceTransformer
+
+    state = FakeState(
+        source_mappings={("inventories", 10), ("projects", 20)},
+        mapped_ids={("inventories", 10): 100},
+    )
+    transformer = InventorySourceTransformer(state=state)
+    payload = {
+        "id": 1,
+        "name": "scm-src",
+        "source": "scm",
+        "summary_fields": {
+            "inventory": {"id": 10},
+            "source_project": {"id": 20},
+        },
+    }
+
+    with pytest.raises(SkipResourceError, match="unmapped projects 20"):
+        transformer.transform_resource("inventory_sources", payload)
+
+    state.mapped_ids[("projects", 20)] = 200
+    transformed = transformer.transform_resource("inventory_sources", payload)
+    assert transformed["inventory"] == 10
+    assert transformed["source_project"] == 20
+    assert "id" not in transformed
+
+    state_no_target = FakeState(source_mappings={("inventories", 10)})
+    with pytest.raises(SkipResourceError, match="unmapped inventories 10"):
+        InventorySourceTransformer(state=state_no_target).transform_resource(
+            "inventory_sources",
+            {
+                "id": 2,
+                "name": "no-target-inv",
+                "source": "scm",
+                "inventory": 10,
+                "source_project": 20,
+            },
+        )
