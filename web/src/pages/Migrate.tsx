@@ -56,6 +56,9 @@ export function Migrate() {
   const [selectedOrgIds, setSelectedOrgIds] = useState<number[]>([]);
   const [orgsLoading, setOrgsLoading] = useState(false);
   const [namePrefix, setNamePrefix] = useState('');
+  const [resuming, setResuming] = useState(false);
+  const [runJobStatus, setRunJobStatus] = useState('');
+  const [credentialCount, setCredentialCount] = useState(0);
   const navigate = useNavigate();
 
   const jobLogs = useJobLogs(runJobId);
@@ -66,6 +69,44 @@ export function Migrate() {
   }, []);
 
   useEffect(() => { loadConnections(); }, [loadConnections]);
+
+  // Poll job status so we detect credential pause (waiting_for_input)
+  useEffect(() => {
+    if (!runJobId || migrationDone) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const job = await api.getJob(runJobId) as {
+          status?: string;
+          result?: { credential_review?: unknown[] };
+        };
+        if (cancelled) return;
+        if (job.status) setRunJobStatus(job.status);
+        const review = job.result?.credential_review;
+        if (Array.isArray(review)) setCredentialCount(review.length);
+        if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+          setMigrationDone(true);
+        }
+      } catch {
+        // ignore transient poll errors
+      }
+    };
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [runJobId, migrationDone]);
+
+  useEffect(() => {
+    if (jobLogs.status === 'completed' || jobLogs.status === 'failed' || jobLogs.status === 'cancelled') {
+      setMigrationDone(true);
+      setRunJobStatus(jobLogs.status);
+    } else if (jobLogs.status === 'waiting_for_input') {
+      setRunJobStatus('waiting_for_input');
+    }
+  }, [jobLogs.status]);
 
   useEffect(() => {
     if (!sourceId) {
@@ -164,6 +205,19 @@ export function Migrate() {
     }
   };
 
+  const handleResume = async () => {
+    if (!runJobId || resuming) return;
+    setResuming(true);
+    try {
+      await api.resumeJob(runJobId);
+      setRunJobStatus('running');
+    } catch {
+      // ignore — job may have already resumed
+    } finally {
+      setResuming(false);
+    }
+  };
+
   const handleBack = () => {
     setStep('select');
     setPreviewJobId('');
@@ -172,9 +226,12 @@ export function Migrate() {
     setPreviewError('');
     setExclude({});
     setCancelling(false);
+    setResuming(false);
     setMigrationDone(false);
     setRunActiveTab('output');
     setNamePrefix('');
+    setRunJobStatus('');
+    setCredentialCount(0);
   };
 
   const handleLogClose = (status: string) => {
@@ -424,7 +481,16 @@ export function Migrate() {
                   <Title headingLevel="h3">Migration Output</Title>
                 </SplitItem>
                 <SplitItem>
-                  {!migrationDone && (
+                  {runJobStatus === 'waiting_for_input' ? (
+                    <Button
+                      variant="primary"
+                      onClick={handleResume}
+                      isDisabled={resuming}
+                      isLoading={resuming}
+                    >
+                      {resuming ? 'Resuming...' : 'Continue Migration'}
+                    </Button>
+                  ) : !migrationDone ? (
                     <Button
                       variant="danger"
                       onClick={handleCancel}
@@ -433,7 +499,7 @@ export function Migrate() {
                     >
                       {cancelling ? 'Cancelling...' : 'Cancel Migration'}
                     </Button>
-                  )}
+                  ) : null}
                 </SplitItem>
                 <SplitItem>
                   <Button
@@ -450,6 +516,23 @@ export function Migrate() {
                   </Button>
                 </SplitItem>
               </Split>
+              {runJobStatus === 'waiting_for_input' && (
+                <Alert
+                  variant="warning"
+                  isInline
+                  title="Paused — update credential secrets on the target"
+                  style={{ marginBottom: 12 }}
+                >
+                  Credentials were created with temporary secrets
+                  {credentialCount > 0 ? ` (${credentialCount} credentials)` : ''}.
+                  Update their secrets on the destination AAP, then click Continue Migration
+                  so projects and job templates can attach credentials and sync.
+                  {' '}
+                  <Button variant="link" isInline onClick={() => navigate(`/jobs/${runJobId}`)}>
+                    View credential list
+                  </Button>
+                </Alert>
+              )}
               <Tabs activeKey={runActiveTab} onSelect={(_e, k) => setRunActiveTab(k as string)} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                 <Tab eventKey="output" title={<TabTitleText>Output</TabTitleText>} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                   <div style={{ padding: '16px 0', flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
