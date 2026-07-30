@@ -674,6 +674,20 @@ async def _migrate_resource_type(
                     )
                     continue
 
+                excluded_for_type = (src.get("excluded_ids") or {}).get(rtype) or []
+                if excluded_for_type and str(source_id) in {str(x) for x in excluded_for_type}:
+                    skipped += 1
+                    _emit_resource_result(
+                        emit,
+                        log,
+                        phase_num=phase_num,
+                        name=_resource_display_name(resource, source_id),
+                        rtype=rtype,
+                        result="skipped",
+                        detail="Excluded by user",
+                    )
+                    continue
+
                 raw_summary = resource.get("summary_fields", {})
                 res_name = _resource_display_name(resource, source_id)
 

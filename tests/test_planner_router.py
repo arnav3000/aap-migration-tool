@@ -983,6 +983,75 @@ async def test_migrate_skips_name_prefix_for_managed_credentials(
     assert imported_names == ["Ansible Galaxy", "dev_My SCM Cred"]
 
 
+@pytest.mark.asyncio
+async def test_migrate_resource_type_honors_excluded_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_ids: list[int] = []
+
+    class FakeExporter:
+        async def export(self):
+            yield {"id": 1, "name": "Keep", "organization": 1}
+            yield {"id": 2, "name": "Drop", "organization": 1}
+
+    class FakeImporter:
+        async def import_resource(self, resource_type, source_id, data):
+            imported_ids.append(source_id)
+            return True
+
+    monkeypatch.setattr(
+        "aap_migration.migration.exporter.create_exporter", lambda **kwargs: FakeExporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.importer.create_importer", lambda **kwargs: FakeImporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.transformer.create_transformer", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "aap_migration.resources.RESOURCE_REGISTRY",
+        {
+            "inventories": SimpleNamespace(
+                description="Inventories",
+                has_transformer=False,
+            )
+        },
+    )
+
+    events: list[dict] = []
+    sources = [
+        {
+            "src_client": object(),
+            "state": object(),
+            "migration_config": SimpleNamespace(performance=None, resource_mappings={}),
+            "name_prefix": "",
+            "connection_name": "Dev AAP",
+            "org_ids": [1],
+            "url": "https://dev.example.com",
+            "excluded_ids": {"inventories": [2]},
+        }
+    ]
+
+    created, skipped, failed, exported = await planner._migrate_resource_type(
+        "inventories",
+        sources,
+        object(),
+        1,
+        events.append,
+        lambda _line: None,
+        [],
+    )
+
+    assert (created, skipped, failed, exported) == (1, 1, 0, 1)
+    assert imported_ids == [1]
+    assert any(
+        e.get("name") == "Drop"
+        and e.get("result") == "skipped"
+        and "Excluded" in e.get("detail", "")
+        for e in events
+    )
+
+
 def test_resource_in_orgs_tightened_filter() -> None:
     # Org-scoped inventory outside selected orgs is excluded
     assert (
