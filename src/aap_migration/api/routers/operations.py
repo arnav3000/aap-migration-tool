@@ -560,6 +560,8 @@ async def selective_migrate(
                                 )
                             if schedules:
                                 resource["schedules"] = schedules
+                            # transform strips read-only "id"; importer needs _source_id
+                            resource["_source_id"] = int(source_id)
                             batch.append(resource)
                             exported += 1
                         except SkipResourceError as exc:
@@ -594,6 +596,27 @@ async def selective_migrate(
                                         "detail": "",
                                     }
                                 )
+                            batch_failed = len(batch) - len(results)
+                            if batch_failed:
+                                failed += batch_failed
+                                for err in inv_src_importer.import_errors:
+                                    err_name = err.get("name", "unknown")
+                                    err_sid = err.get("source_id", "?")
+                                    err_detail = str(err.get("error", "import failed"))[:200]
+                                    log(
+                                        f"  Failed inventory_sources/{err_sid} "
+                                        f"({err_name}): {err_detail}"
+                                    )
+                                    emit(
+                                        {
+                                            "_event": "resource_result",
+                                            "phase_num": phase_num,
+                                            "name": err_name,
+                                            "resource_type": rtype,
+                                            "result": "failed",
+                                            "detail": err_detail,
+                                        }
+                                    )
                         except Exception as exc:
                             failed += len(batch)
                             log(f"  Error importing inventory_sources batch: {exc}")
