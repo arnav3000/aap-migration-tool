@@ -26,6 +26,11 @@ from aap_migration.api.schemas import (
 )
 from aap_migration.api.services.connection_service import ConnectionService
 from aap_migration.api.services.job_service import Job, JobStatus, PhaseStatus
+from aap_migration.resources import (
+    excluded_preview_count,
+    is_host_inventory_membership_excluded,
+    is_resource_type_fully_excluded,
+)
 
 router = APIRouter()
 
@@ -457,10 +462,14 @@ async def _build_credential_review(
                 "name": cred["name"],
                 "credential_type": cred["credential_type"],
                 "organization": cred["organization"],
+                "source": cred.get("source", ""),
+                "name_prefix": cred.get("name_prefix", ""),
                 "used_by": used_by.get(sid, []),
             }
         )
-    result.sort(key=lambda c: (len(c["used_by"]) == 0, c["credential_type"], c["name"]))
+    result.sort(
+        key=lambda c: (len(c["used_by"]) == 0, c["source"], c["credential_type"], c["name"])
+    )
     return result
 
 
@@ -510,13 +519,63 @@ def _build_source_contexts(
                     src_config,
                     auth_scheme=src_cfg.get("auth_scheme", "Bearer"),
                 ),
-                "state": MigrationState(migration_config.state),
+                "state": MigrationState(
+                    migration_config.state,
+                    source_key=str(src_cfg.get("source_key") or src_cfg.get("connection_id") or ""),
+                ),
                 "name_prefix": src_cfg.get("name_prefix", ""),
+                "connection_name": src_cfg.get("connection_name", "") or src_cfg["url"],
                 "org_ids": src_cfg["org_ids"],
                 "url": src_cfg["url"],
             }
         )
     return target_config, target_client, sources
+
+
+def _resource_display_name(resource: dict[str, Any], source_id: Any) -> str:
+    return str(resource.get("name") or resource.get("username") or source_id)
+
+
+def _import_result_detail(result: Any) -> str:
+    """Human-readable reason from importer marker fields."""
+    if not isinstance(result, dict):
+        return ""
+    reason = result.get("_skip_reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    if result.get("_already_migrated"):
+        return "Already migrated in state — update secrets if needed"
+    if result.get("_skipped"):
+        return "Matched existing managed resource on target — mapped only"
+    return ""
+
+
+def _emit_resource_result(
+    emit: Callable[[dict[str, Any]], None],
+    log: Callable[[str], None],
+    *,
+    phase_num: int,
+    name: str,
+    rtype: str,
+    result: str,
+    detail: str = "",
+) -> None:
+    """Emit a resource_result event and a plain-text log line for skips/fails."""
+    detail = (detail or "")[:300]
+    emit(
+        {
+            "_event": "resource_result",
+            "phase_num": phase_num,
+            "name": name,
+            "resource_type": rtype,
+            "result": result,
+            "detail": detail,
+        }
+    )
+    if result in ("skipped", "exists", "failed") and detail:
+        log(f"  {result.capitalize()} {rtype}/{name}: {detail}")
+    elif result in ("skipped", "exists", "failed"):
+        log(f"  {result.capitalize()} {rtype}/{name}")
 
 
 async def _migrate_resource_type(
@@ -548,14 +607,92 @@ async def _migrate_resource_type(
     last_progress = time.monotonic()
     PROGRESS_INTERVAL = 2.0
 
+    # Fast-path: every source fully excluded this type — skip without exporting.
+    if sources and all(
+        is_resource_type_fully_excluded(
+            rtype, src.get("excluded_ids"), src.get("preview_resources")
+        )
+        for src in sources
+    ):
+        for src in sources:
+            skipped += excluded_preview_count(
+                rtype, src.get("excluded_ids"), src.get("preview_resources")
+            )
+        log(f"Skipping {info.description}: all {skipped} resource(s) excluded by user")
+        emit(
+            {
+                "_event": "phase_complete",
+                "phase_num": phase_num,
+                "description": info.description,
+                "created": 0,
+                "updated": 0,
+                "skipped": skipped,
+                "failed": 0,
+                "exported": 0,
+                "duration": "0.0s",
+                "warnings": {},
+            }
+        )
+        return 0, skipped, 0, 0
+
+    # Credentials depend on built-in credential types that may never be
+    # "migrated". Map them by name onto the target before export/transform.
+    if rtype in ("credentials", "credential_types"):
+        from aap_migration.migration.credential_type_utils import map_managed_credential_types
+
+        for src in sources:
+            try:
+                mapped = await map_managed_credential_types(
+                    src["src_client"], target_client, src["state"]
+                )
+                if mapped:
+                    log(
+                        f"  Mapped {mapped} managed credential type(s) "
+                        f"for {src.get('connection_name') or src['url']}"
+                    )
+            except Exception as exc:
+                log(f"  Warning: could not map managed credential types: {exc}")
+
     for src in sources:
         src_client = src["src_client"]
         state = src["state"]
         migration_config = src["migration_config"]
         name_prefix: str = src["name_prefix"]
+        connection_name: str = src.get("connection_name") or src["url"]
         org_ids: list[int] = src["org_ids"]
+        bulk_skipped_excluded = 0
+        bulk_skipped_org = 0
+        bulk_skipped_host_cascade = 0
+
+        # Per-source fast-path when preview proves full exclusion.
+        if is_resource_type_fully_excluded(
+            rtype, src.get("excluded_ids"), src.get("preview_resources")
+        ):
+            n = excluded_preview_count(rtype, src.get("excluded_ids"), src.get("preview_resources"))
+            skipped += n
+            log(
+                f"  Skipping {info.description} from {connection_name}: "
+                f"all {n} resource(s) excluded by user"
+            )
+            continue
 
         try:
+            from aap_migration.migration.target_bootstrap import bootstrap_mappings_for_type
+
+            bootstrap = await bootstrap_mappings_for_type(
+                rtype,
+                src_client,
+                target_client,
+                state,
+                name_prefix=name_prefix,
+                org_ids=org_ids or None,
+            )
+            if bootstrap.mapped:
+                log(
+                    f"  Bootstrapped {bootstrap.mapped} existing {info.description} "
+                    f"from target ({bootstrap.unmatched} not on target)"
+                )
+
             exporter = create_exporter(
                 resource_type=rtype,
                 client=src_client,
@@ -575,7 +712,10 @@ async def _migrate_resource_type(
                 state=state,
                 performance_config=migration_config.performance,
                 resource_mappings=migration_config.resource_mappings,
+                name_prefix=name_prefix,
             )
+
+            excluded_for_type = {str(x) for x in ((src.get("excluded_ids") or {}).get(rtype) or [])}
 
             async for resource in exporter.export():
                 source_id = resource.get("id")
@@ -588,25 +728,61 @@ async def _migrate_resource_type(
                         continue
 
                 if org_ids and not _resource_in_orgs(rtype, resource, source_id, org_ids):
+                    skipped += 1
+                    bulk_skipped_org += 1
+                    continue
+
+                if excluded_for_type and str(source_id) in excluded_for_type:
+                    skipped += 1
+                    bulk_skipped_excluded += 1
+                    continue
+
+                if rtype == "host_inventory_memberships" and is_host_inventory_membership_excluded(
+                    resource, src.get("excluded_ids")
+                ):
+                    skipped += 1
+                    bulk_skipped_host_cascade += 1
                     continue
 
                 raw_summary = resource.get("summary_fields", {})
+                res_name = _resource_display_name(resource, source_id)
 
                 if transformer:
                     try:
                         resource = transformer.transform_resource(
                             resource_type=rtype, data=resource, validate=True
                         )
-                    except SkipResourceError:
+                        res_name = _resource_display_name(resource, source_id)
+                    except SkipResourceError as skip_exc:
                         skipped += 1
+                        _emit_resource_result(
+                            emit,
+                            log,
+                            phase_num=phase_num,
+                            name=res_name,
+                            rtype=rtype,
+                            result="skipped",
+                            detail=str(skip_exc),
+                        )
                         continue
-                    except Exception:
+                    except Exception as exc:
                         failed += 1
+                        _emit_resource_result(
+                            emit,
+                            log,
+                            phase_num=phase_num,
+                            name=res_name,
+                            rtype=rtype,
+                            result="failed",
+                            detail=f"Transform error: {exc}",
+                        )
                         continue
 
-                if name_prefix and rtype not in ("users", "settings", "host_inventory_memberships"):
-                    if "name" in resource:
-                        resource["name"] = f"{name_prefix}{resource['name']}"
+                if name_prefix:
+                    from aap_migration.utils.naming import apply_name_prefix
+
+                    apply_name_prefix(rtype, resource, name_prefix)
+                    res_name = _resource_display_name(resource, source_id)
 
                 exported += 1
 
@@ -619,45 +795,117 @@ async def _migrate_resource_type(
                             source_id=int(source_id),
                             data=resource,
                         )
-                    res_name = resource.get("name", resource.get("username", str(source_id)))
+                    res_name = _resource_display_name(resource, source_id)
+                    import_err = None
+                    outcome = "created"
+                    detail = ""
+
                     if result:
-                        created += 1
-                        emit(
-                            {
-                                "_event": "resource_result",
-                                "phase_num": phase_num,
-                                "name": res_name,
-                                "resource_type": rtype,
-                                "result": "created",
-                                "detail": "",
-                            }
+                        already_present = isinstance(result, dict) and bool(
+                            result.get("_already_migrated") or result.get("_skipped")
                         )
-                        if rtype == "credentials":
-                            created_creds.append(
+                        if already_present:
+                            outcome = "exists"
+                            detail = _import_result_detail(result)
+                            skipped += 1
+                            _emit_resource_result(
+                                emit,
+                                log,
+                                phase_num=phase_num,
+                                name=res_name,
+                                rtype=rtype,
+                                result=outcome,
+                                detail=detail,
+                            )
+                        else:
+                            created += 1
+                            emit(
                                 {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
                                     "name": res_name,
-                                    "credential_type": raw_summary.get("credential_type", {}).get(
-                                        "name", "Unknown"
-                                    ),
-                                    "organization": raw_summary.get("organization", {}).get(
-                                        "name", ""
-                                    ),
-                                    "source_id": str(source_id),
+                                    "resource_type": rtype,
+                                    "result": "created",
+                                    "detail": "",
                                 }
                             )
                     else:
-                        skipped += 1
+                        # Importers often return None for both skips and handled failures.
+                        # Prefer import_errors / state so the UI shows the real reason.
+                        for err in getattr(importer, "import_errors", []) or []:
+                            if err.get("source_id") == int(source_id):
+                                import_err = err
+                        if import_err:
+                            outcome = "failed"
+                            detail = import_err.get("error") or "Import failed"
+                            if import_err.get("error_type"):
+                                detail = f"{import_err['error_type']}: {detail}"
+                            failed += 1
+                            _emit_resource_result(
+                                emit,
+                                log,
+                                phase_num=phase_num,
+                                name=res_name,
+                                rtype=rtype,
+                                result=outcome,
+                                detail=detail,
+                            )
+                        elif state.is_migrated(rtype, int(source_id)):
+                            outcome = "exists"
+                            detail = "Already migrated in state — update secrets if needed"
+                            skipped += 1
+                            _emit_resource_result(
+                                emit,
+                                log,
+                                phase_num=phase_num,
+                                name=res_name,
+                                rtype=rtype,
+                                result=outcome,
+                                detail=detail,
+                            )
+                        else:
+                            outcome = "skipped"
+                            detail = (
+                                "Import returned no result (already migrated, "
+                                "filtered, or failed — check server logs)"
+                            )
+                            skipped += 1
+                            _emit_resource_result(
+                                emit,
+                                log,
+                                phase_num=phase_num,
+                                name=res_name,
+                                rtype=rtype,
+                                result=outcome,
+                                detail=detail,
+                            )
+
+                    # Track every credential we touched for the post-cred secret pause,
+                    # including already-migrated ones — secrets are never exported and
+                    # must still be filled in before dependent resources run.
+                    if rtype == "credentials" and outcome != "failed":
+                        created_creds.append(
+                            {
+                                "name": res_name,
+                                "credential_type": raw_summary.get("credential_type", {}).get(
+                                    "name", "Unknown"
+                                ),
+                                "organization": raw_summary.get("organization", {}).get("name", ""),
+                                "source_id": str(source_id),
+                                "source": connection_name,
+                                "name_prefix": name_prefix,
+                            }
+                        )
                 except Exception as exc:
                     failed += 1
-                    emit(
-                        {
-                            "_event": "resource_result",
-                            "phase_num": phase_num,
-                            "name": resource.get("name", resource.get("username", str(source_id))),
-                            "resource_type": rtype,
-                            "result": "failed",
-                            "detail": str(exc)[:200],
-                        }
+                    _emit_resource_result(
+                        emit,
+                        log,
+                        phase_num=phase_num,
+                        name=_resource_display_name(resource, source_id),
+                        rtype=rtype,
+                        result="failed",
+                        detail=str(exc),
                     )
 
                 now = time.monotonic()
@@ -675,6 +923,37 @@ async def _migrate_resource_type(
                         }
                     )
                     last_progress = now
+
+            if bulk_skipped_excluded:
+                _emit_resource_result(
+                    emit,
+                    log,
+                    phase_num=phase_num,
+                    name=f"({bulk_skipped_excluded} resources)",
+                    rtype=rtype,
+                    result="skipped",
+                    detail="Excluded by user",
+                )
+            if bulk_skipped_org:
+                _emit_resource_result(
+                    emit,
+                    log,
+                    phase_num=phase_num,
+                    name=f"({bulk_skipped_org} resources)",
+                    rtype=rtype,
+                    result="skipped",
+                    detail="Not in selected organizations for this phase",
+                )
+            if bulk_skipped_host_cascade:
+                _emit_resource_result(
+                    emit,
+                    log,
+                    phase_num=phase_num,
+                    name=f"({bulk_skipped_host_cascade} resources)",
+                    rtype=rtype,
+                    result="skipped",
+                    detail="Host excluded by user",
+                )
 
         except Exception as exc:
             failed += 1
@@ -703,16 +982,43 @@ async def _migrate_resource_type(
 def _resource_in_orgs(
     rtype: str, resource: dict[str, Any], source_id: Any, org_ids: list[int]
 ) -> bool:
-    """Check whether a resource belongs to one of the selected orgs."""
+    """Check whether a resource belongs to one of the selected orgs.
+
+    Global resource types (settings, instances, instance_groups, credential_types,
+    users) are intentionally included in every phase. Org-scoped types must match
+    an selected org id via ``organization`` or ``summary_fields.organization.id``.
+    """
     if rtype == "organizations":
-        return source_id in org_ids
-    if rtype in ("settings", "host_inventory_memberships"):
+        try:
+            return int(source_id) in org_ids
+        except (TypeError, ValueError):
+            return False
+    # Truly global / infrastructure types — always in scope for a phase
+    if rtype in (
+        "settings",
+        "instances",
+        "instance_groups",
+        "credential_types",
+        "users",
+        "system_job_templates",
+    ):
         return True
+    # Memberships are filtered by their inventory's org during export; allow through
+    # here and let import resolve inventory mapping (missing → skip/fail with reason).
+    if rtype == "host_inventory_memberships":
+        return True
+
     res_org = resource.get("organization")
     sf_org = resource.get("summary_fields", {}).get("organization", {}).get("id")
     if res_org in org_ids or sf_org in org_ids:
         return True
-    return res_org is None and sf_org is None
+    # Credentials/EEs may be user-owned or global (organization=null). Include them
+    # when they have no org so they are not silently dropped from every phase.
+    if rtype in ("credentials", "execution_environments", "applications") and (
+        res_org is None and sf_org is None
+    ):
+        return True
+    return False
 
 
 async def _handle_credential_pause(
@@ -727,37 +1033,87 @@ async def _handle_credential_pause(
 ) -> None:
     """Pause migration for credential secret review, wait for user to resume."""
     import asyncio
+    import logging
 
-    all_org_ids: list[int] = []
-    all_src_clients = []
+    logger = logging.getLogger(__name__)
+
+    if not created_creds:
+        return
+
+    # Review each source's credentials against that source only — credential
+    # IDs are not comparable across AAP instances.
+    review_tasks = []
+    matched: set[str] = set()
     for s in sources:
-        all_org_ids.extend(s["org_ids"])
-        all_src_clients.append(s["src_client"])
+        source_label = s.get("connection_name") or s["url"]
+        source_creds = [c for c in created_creds if c.get("source") == source_label]
+        if not source_creds:
+            continue
+        for c in source_creds:
+            matched.add(f"{c.get('source', '')}:{c.get('source_id', '')}:{c.get('name', '')}")
+        review_tasks.append(_build_credential_review(s["src_client"], source_creds, s["org_ids"]))
 
-    reviews = await asyncio.gather(
-        *[_build_credential_review(sc, created_creds, all_org_ids) for sc in all_src_clients]
-    )
+    reviews = await asyncio.gather(*review_tasks) if review_tasks else []
     cred_review: list[dict[str, Any]] = []
     for r in reviews:
         cred_review.extend(r)
 
-    seen: set[str] = set()
-    deduped: list[dict[str, Any]] = []
-    for cr in cred_review:
-        if cr["name"] not in seen:
-            seen.add(cr["name"])
-            deduped.append(cr)
-    cred_review = deduped
+    # Never skip the pause because of source-label mismatches — secrets still
+    # need to be filled in before dependent resources migrate.
+    unmatched = [
+        c
+        for c in created_creds
+        if f"{c.get('source', '')}:{c.get('source_id', '')}:{c.get('name', '')}" not in matched
+    ]
+    if unmatched:
+        logger.warning(
+            "credential_pause_unmatched_sources count=%s sources=%s",
+            len(unmatched),
+            sorted({c.get("source", "") for c in unmatched}),
+        )
+        for c in unmatched:
+            cred_review.append(
+                {
+                    "name": c["name"],
+                    "credential_type": c.get("credential_type", ""),
+                    "organization": c.get("organization", ""),
+                    "source": c.get("source", ""),
+                    "name_prefix": c.get("name_prefix", ""),
+                    "used_by": [],
+                }
+            )
 
     if not cred_review:
-        return
+        # Last-resort fallback so a review-builder failure cannot skip the pause.
+        cred_review = [
+            {
+                "name": c["name"],
+                "credential_type": c.get("credential_type", ""),
+                "organization": c.get("organization", ""),
+                "source": c.get("source", ""),
+                "name_prefix": c.get("name_prefix", ""),
+                "used_by": [],
+            }
+            for c in created_creds
+        ]
+
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for cr in cred_review:
+        key = (cr.get("source", ""), cr["name"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(cr)
+    cred_review = deduped
 
     emit({"_event": "credential_pause", "credentials": cred_review})
     log("Paused — waiting for user to update credential secrets on the target and resume.")
     job.result = job.result or {}
     job.result["credential_review"] = cred_review
-    job.result["_paused_plan_id"] = plan_id
-    job.result["_paused_phase_id"] = phase_id
+    if plan_id:
+        job.result["_paused_plan_id"] = plan_id
+    if phase_id:
+        job.result["_paused_phase_id"] = phase_id
     job.status = JobStatus.WAITING_FOR_INPUT
     svc.persist_job(job)
     await job.wait_for_resume()
@@ -886,8 +1242,11 @@ async def execute_phase(
                 "verify_ssl": cfg.verify_ssl,
                 "timeout": cfg.timeout,
                 "name_prefix": ps.name_prefix or "",
+                "connection_name": getattr(conn, "name", None) or cfg.url,
                 "org_ids": org_ids,
                 "auth_scheme": ConnectionService._auth_scheme(conn),
+                "source_key": ps.connection_id or ps.id,
+                "connection_id": ps.connection_id,
             }
         )
 
@@ -897,8 +1256,11 @@ async def execute_phase(
     phase_name = phase.name or f"Phase {phase.phase_number}"
     db_url = get_db_url()
 
-    phase.status = PhaseStatus.RUNNING
-    db.flush()
+    # Optional per-phase resource-type filter (empty = all fully supported types)
+    phase_resource_types = [
+        row.resource_type
+        for row in db.query(MigrationPlanPhaseResourceType).filter_by(phase_id=phase_id).all()
+    ]
 
     svc = get_job_service()
     session_factory = get_app_state().db_session_factory
@@ -912,6 +1274,22 @@ async def execute_phase(
         totals = {"created": 0, "skipped": 0, "failed": 0, "updated": 0}
 
         resource_order = get_fully_supported_types()
+        if phase_resource_types:
+            allowed = set(phase_resource_types)
+            resource_order = [r for r in resource_order if r in allowed]
+            if not resource_order:
+                raise ValueError(
+                    "Phase resource_types filter excluded every migratable type — "
+                    "check the phase configuration"
+                )
+        from aap_migration.resources import apply_host_membership_resource_cascade
+
+        resource_order = apply_host_membership_resource_cascade(resource_order)
+        if not resource_order:
+            raise ValueError(
+                "Phase resource_types filter excluded every migratable type — "
+                "check the phase configuration"
+            )
         num_resource_types = len(resource_order)
         CRED_PAUSE_AFTER = {"credentials", "credential_input_sources"}
         created_creds: list[dict[str, str]] = []
@@ -994,8 +1372,13 @@ async def execute_phase(
         )
         return totals
 
+    # Persist api_jobs via start_job BEFORE any write on this request session.
+    # Flushing phase.status first holds SQLite's write lock, so the separate
+    # persist session hits "database is locked", swallows it, and the later
+    # phase.job_id FK update fails with FOREIGN KEY constraint failed.
     job_id = svc.start_job(f"Plan: {phase_name}", "migration-run", _do_phase)
 
+    phase.status = PhaseStatus.RUNNING
     phase.job_id = job_id
     plan.status = "active"
     db.flush()

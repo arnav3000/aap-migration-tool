@@ -25,10 +25,11 @@ import sqlite3
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import requests
@@ -88,9 +89,7 @@ def _validate_api_url(url: str, label: str) -> str:
     url = url.strip().rstrip("/")
     parsed = urlparse(url)
     if parsed.scheme not in ("https", "http"):
-        raise ValueError(
-            f"{label} must use https:// or http:// (got {parsed.scheme!r})"
-        )
+        raise ValueError(f"{label} must use https:// or http:// (got {parsed.scheme!r})")
     if not parsed.hostname:
         raise ValueError(f"{label} has no hostname")
     return url
@@ -122,8 +121,7 @@ class IAMAnalyser:
     ):
         if scan_strategy not in ("resource", "principal"):
             raise ValueError(
-                f"scan_strategy must be 'resource' or 'principal', "
-                f"got '{scan_strategy}'"
+                f"scan_strategy must be 'resource' or 'principal', got '{scan_strategy}'"
             )
         self.scan_strategy = scan_strategy
         self._checkpoint_path = checkpoint_path
@@ -166,9 +164,7 @@ class IAMAnalyser:
         self._org_cache: dict[int, str] = {}
         self._org_cache_lock = threading.Lock()
         self._source_host = urlparse(self.source_url).hostname
-        self._target_host = (
-            urlparse(self.target_url).hostname if self.target_url else None
-        )
+        self._target_host = urlparse(self.target_url).hostname if self.target_url else None
 
     def close(self) -> None:
         self._source_session.close()
@@ -195,9 +191,7 @@ class IAMAnalyser:
         adapter = HTTPAdapter(max_retries=retry, pool_maxsize=pool_size)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
-        session.headers.update(
-            {"User-Agent": "aap-bridge-iam/1.0", "Accept": "application/json"}
-        )
+        session.headers.update({"User-Agent": "aap-bridge-iam/1.0", "Accept": "application/json"})
         return session
 
     @staticmethod
@@ -205,16 +199,12 @@ class IAMAnalyser:
         if not resp.text:
             return None
         try:
-            return resp.json()
+            return cast(dict[Any, Any], resp.json())
         except (ValueError, json.JSONDecodeError):
-            logger.warning(
-                "Invalid JSON from %s (HTTP %d)", resp.url, resp.status_code
-            )
+            logger.warning("Invalid JSON from %s (HTTP %d)", resp.url, resp.status_code)
             return None
 
-    def _validate_next_url(
-        self, next_url: str | None, expected_host: str | None
-    ) -> str | None:
+    def _validate_next_url(self, next_url: str | None, expected_host: str | None) -> str | None:
         if not next_url:
             return None
         if not next_url.startswith("http"):
@@ -222,8 +212,7 @@ class IAMAnalyser:
         parsed = urlparse(next_url)
         if parsed.hostname != expected_host:
             logger.warning(
-                "Pagination URL redirects to unexpected host %s "
-                "(expected %s) — skipping",
+                "Pagination URL redirects to unexpected host %s (expected %s) — skipping",
                 parsed.hostname,
                 expected_host,
             )
@@ -239,10 +228,10 @@ class IAMAnalyser:
         retry_after = resp.headers.get("Retry-After")
         if retry_after:
             try:
-                return max(float(retry_after), 0.0)
+                return float(max(float(retry_after), 0.0))
             except (ValueError, TypeError):
                 pass
-        return backoff_base * (2 ** attempt)
+        return float(backoff_base * (2**attempt))
 
     def _paginate(
         self,
@@ -276,19 +265,17 @@ class IAMAnalyser:
                     )
                     if resp.status_code == 200:
                         break
-                    retryable = (
-                        resp.status_code == 429
-                        or resp.status_code >= 500
-                    )
+                    retryable = resp.status_code == 429 or resp.status_code >= 500
                     if not retryable:
                         break
                     if attempt < self._PAGINATE_MAX_RETRIES - 1:
                         delay = self._retry_delay(
-                            resp, attempt, self._PAGINATE_BACKOFF_BASE,
+                            resp,
+                            attempt,
+                            self._PAGINATE_BACKOFF_BASE,
                         )
                         logger.warning(
-                            "Paginate %s returned HTTP %d, "
-                            "retrying in %.1fs (attempt %d/%d)",
+                            "Paginate %s returned HTTP %d, retrying in %.1fs (attempt %d/%d)",
                             endpoint,
                             resp.status_code,
                             delay,
@@ -347,17 +334,14 @@ class IAMAnalyser:
         if expected_count is not None and len(results) != expected_count:
             raise PaginationError(
                 endpoint,
-                f"count mismatch: collected {len(results)}, "
-                f"server reported {expected_count}",
+                f"count mismatch: collected {len(results)}, server reported {expected_count}",
                 items_collected=len(results),
                 expected_count=expected_count,
             )
 
         return results
 
-    def _source_get(
-        self, endpoint: str, params: dict | None = None
-    ) -> dict | None:
+    def _source_get(self, endpoint: str, params: dict | None = None) -> dict | None:
         url = f"{self.source_url}/{endpoint.lstrip('/')}"
         try:
             resp = self._source_session.get(
@@ -369,16 +353,12 @@ class IAMAnalyser:
             )
             if resp.status_code == 200:
                 return self._safe_json(resp)
-            logger.debug(
-                "Source GET %s returned HTTP %d", endpoint, resp.status_code
-            )
+            logger.debug("Source GET %s returned HTTP %d", endpoint, resp.status_code)
         except requests.RequestException as exc:
             logger.error("Source GET %s failed: %s", endpoint, exc)
         return None
 
-    def _source_paginate(
-        self, endpoint: str, params: dict | None = None
-    ) -> list[dict]:
+    def _source_paginate(self, endpoint: str, params: dict | None = None) -> list[dict]:
         return self._paginate(
             self.source_url,
             self.source_token,
@@ -388,9 +368,7 @@ class IAMAnalyser:
             params,
         )
 
-    def _target_get(
-        self, endpoint: str, params: dict | None = None
-    ) -> dict | None:
+    def _target_get(self, endpoint: str, params: dict | None = None) -> dict | None:
         if not self.target_url or not self.target_token or not self._target_session:
             return None
         url = f"{self.target_url}/{endpoint.lstrip('/')}"
@@ -404,16 +382,12 @@ class IAMAnalyser:
             )
             if resp.status_code == 200:
                 return self._safe_json(resp)
-            logger.debug(
-                "Target GET %s returned HTTP %d", endpoint, resp.status_code
-            )
+            logger.debug("Target GET %s returned HTTP %d", endpoint, resp.status_code)
         except requests.RequestException as exc:
             logger.error("Target GET %s failed: %s", endpoint, exc)
         return None
 
-    def _target_paginate(
-        self, endpoint: str, params: dict | None = None
-    ) -> list[dict]:
+    def _target_paginate(self, endpoint: str, params: dict | None = None) -> list[dict]:
         if not self.target_url or not self.target_token or not self._target_session:
             raise RuntimeError("Target not configured")
         return self._paginate(
@@ -425,9 +399,7 @@ class IAMAnalyser:
             params,
         )
 
-    def _target_post(
-        self, endpoint: str, data: dict
-    ) -> requests.Response | None:
+    def _target_post(self, endpoint: str, data: dict) -> requests.Response | None:
         if not self.target_url or not self.target_token or not self._target_session:
             return None
         url = f"{self.target_url}/{endpoint.lstrip('/')}"
@@ -450,7 +422,7 @@ class IAMAnalyser:
 
     def _load_id_mappings(self, db_path: str) -> None:
         if db_path.startswith("sqlite:///"):
-            db_path = db_path[len("sqlite:///"):]
+            db_path = db_path[len("sqlite:///") :]
 
         if not os.path.exists(db_path):
             logger.info(
@@ -466,9 +438,7 @@ class IAMAnalyser:
                 "FROM id_mappings WHERE target_id IS NOT NULL"
             )
             for resource_type, source_id, target_id in cursor.fetchall():
-                self._id_mappings.setdefault(resource_type, {})[
-                    source_id
-                ] = target_id
+                self._id_mappings.setdefault(resource_type, {})[source_id] = target_id
             conn.close()
 
             total = sum(len(m) for m in self._id_mappings.values())
@@ -477,22 +447,17 @@ class IAMAnalyser:
         except (sqlite3.Error, OSError) as exc:
             logger.error("Failed to load ID mappings: %s", exc)
 
-    def _get_target_id(
-        self, resource_type: str, source_id: int
-    ) -> int | None:
+    def _get_target_id(self, resource_type: str, source_id: int) -> int | None:
         return self._id_mappings.get(resource_type, {}).get(source_id)
 
-    def _discover_target_id_by_name(
-        self, resource_type: str, name: str
-    ) -> int | None:
+    def _discover_target_id_by_name(self, resource_type: str, name: str) -> int | None:
         param = "username" if resource_type == "users" else "name"
-        data = self._target_get(
-            f"{resource_type}/", params={param: name, "page_size": 1}
-        )
+        data = self._target_get(f"{resource_type}/", params={param: name, "page_size": 1})
         if data:
             results = data.get("results", [])
             if results:
-                return results[0].get("id")
+                target_id = results[0].get("id")
+                return int(target_id) if target_id is not None else None
         return None
 
     def _get_org_name(self, org_id: int | None) -> str:
@@ -527,25 +492,17 @@ class IAMAnalyser:
         for resource_type in RESOURCE_TYPES:
             self._progress(f"  Building org map: {resource_type}...")
             resources = self._source_paginate(f"{resource_type}/")
-            self._progress(
-                f"    {len(resources)} {resource_type}"
-            )
+            self._progress(f"    {len(resources)} {resource_type}")
 
             for resource in resources:
                 resources_scanned += 1
                 res_id = resource["id"]
                 org_id = resource.get("organization") or (
-                    resource.get("summary_fields", {})
-                    .get("organization", {})
-                    .get("id")
+                    resource.get("summary_fields", {}).get("organization", {}).get("id")
                 )
-                org_map[(resource_type, res_id)] = self._get_org_name(
-                    org_id
-                )
+                org_map[(resource_type, res_id)] = self._get_org_name(org_id)
 
-        self._progress(
-            f"  Org map complete: {resources_scanned} resources"
-        )
+        self._progress(f"  Org map complete: {resources_scanned} resources")
         return org_map, resources_scanned
 
     # ── Phase 1: Scan permissions ─────────────────────────────────────
@@ -563,11 +520,7 @@ class IAMAnalyser:
         results: list[PermissionEntry] = []
 
         for user in self._source_paginate(f"roles/{role_id}/users/"):
-            user_org_id = (
-                user.get("summary_fields", {})
-                .get("organization", {})
-                .get("id")
-            )
+            user_org_id = user.get("summary_fields", {}).get("organization", {}).get("id")
             user_org = self._get_org_name(user_org_id)
             results.append(
                 PermissionEntry(
@@ -578,23 +531,15 @@ class IAMAnalyser:
                     role_name=role_name,
                     principal_type="user",
                     principal_id=user["id"],
-                    principal_name=user.get(
-                        "username", f"user-{user['id']}"
-                    ),
+                    principal_name=user.get("username", f"user-{user['id']}"),
                     principal_org=user_org,
-                    is_cross_org=(
-                        user_org != "N/A"
-                        and res_org != "N/A"
-                        and user_org != res_org
-                    ),
+                    is_cross_org=(user_org != "N/A" and res_org != "N/A" and user_org != res_org),
                 )
             )
 
         for team in self._source_paginate(f"roles/{role_id}/teams/"):
             team_org_id = team.get("organization") or (
-                team.get("summary_fields", {})
-                .get("organization", {})
-                .get("id")
+                team.get("summary_fields", {}).get("organization", {}).get("id")
             )
             team_org = self._get_org_name(team_org_id)
             results.append(
@@ -606,15 +551,9 @@ class IAMAnalyser:
                     role_name=role_name,
                     principal_type="team",
                     principal_id=team["id"],
-                    principal_name=team.get(
-                        "name", f"team-{team['id']}"
-                    ),
+                    principal_name=team.get("name", f"team-{team['id']}"),
                     principal_org=team_org,
-                    is_cross_org=(
-                        team_org != "N/A"
-                        and res_org != "N/A"
-                        and team_org != res_org
-                    ),
+                    is_cross_org=(team_org != "N/A" and res_org != "N/A" and team_org != res_org),
                 )
             )
 
@@ -635,7 +574,7 @@ class IAMAnalyser:
         if not self._checkpoint_path:
             return
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if self._checkpoint is None:
             self._checkpoint = IAMCheckpoint(
                 scan_strategy=self.scan_strategy,
@@ -650,9 +589,7 @@ class IAMAnalyser:
         self._checkpoint.permissions_deduplicated = stats.permissions_deduplicated
 
         if completed_resource_types is not None:
-            self._checkpoint.completed_resource_types = list(
-                completed_resource_types
-            )
+            self._checkpoint.completed_resource_types = list(completed_resource_types)
         if completed_user_ids is not None:
             self._checkpoint.completed_user_ids = list(completed_user_ids)
         if completed_team_ids is not None:
@@ -662,9 +599,7 @@ class IAMAnalyser:
         dir_path = os.path.dirname(os.path.abspath(self._checkpoint_path))
         os.makedirs(dir_path, mode=0o700, exist_ok=True)
 
-        fd, tmp_path = tempfile.mkstemp(
-            dir=dir_path, prefix=".iam_checkpoint_", suffix=".tmp"
-        )
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".iam_checkpoint_", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(data)
@@ -681,9 +616,7 @@ class IAMAnalyser:
 
     def _load_checkpoint(self) -> IAMCheckpoint | None:
         """Load checkpoint from disk. Returns None if missing or invalid."""
-        if not self._checkpoint_path or not os.path.exists(
-            self._checkpoint_path
-        ):
+        if not self._checkpoint_path or not os.path.exists(self._checkpoint_path):
             return None
 
         try:
@@ -699,15 +632,10 @@ class IAMAnalyser:
             )
             return None
 
-    def _validate_checkpoint(
-        self, checkpoint: IAMCheckpoint
-    ) -> str | None:
+    def _validate_checkpoint(self, checkpoint: IAMCheckpoint) -> str | None:
         """Validate checkpoint matches current run. Returns error or None."""
         if checkpoint.version != 1:
-            return (
-                f"Unsupported checkpoint version {checkpoint.version} "
-                f"(expected 1)"
-            )
+            return f"Unsupported checkpoint version {checkpoint.version} (expected 1)"
         if checkpoint.scan_strategy != self.scan_strategy:
             return (
                 f"Checkpoint strategy '{checkpoint.scan_strategy}' "
@@ -737,16 +665,11 @@ class IAMAnalyser:
                     self._progress(f"  Checkpoint invalid: {err} — starting fresh")
                 else:
                     completed_types = set(checkpoint.completed_resource_types)
-                    entries = [
-                        PermissionEntry.from_dict(p)
-                        for p in checkpoint.permissions
-                    ]
+                    entries = [PermissionEntry.from_dict(p) for p in checkpoint.permissions]
                     seen = {e.dedup_key for e in entries}
                     stats.resources_scanned = checkpoint.resources_scanned
                     stats.permissions_found = checkpoint.permissions_found
-                    stats.permissions_deduplicated = (
-                        checkpoint.permissions_deduplicated
-                    )
+                    stats.permissions_deduplicated = checkpoint.permissions_deduplicated
                     self._checkpoint = checkpoint
                     self._progress(
                         f"  Resumed from checkpoint: "
@@ -767,30 +690,26 @@ class IAMAnalyser:
             for resource in resources:
                 stats.resources_scanned += 1
                 res_id = resource["id"]
-                res_name = resource.get(
-                    "name", resource.get("username", f"id-{res_id}")
-                )
+                res_name = resource.get("name", resource.get("username", f"id-{res_id}"))
 
                 org_id = resource.get("organization") or (
-                    resource.get("summary_fields", {})
-                    .get("organization", {})
-                    .get("id")
+                    resource.get("summary_fields", {}).get("organization", {}).get("id")
                 )
                 res_org = self._get_org_name(org_id)
 
-                object_roles = self._source_paginate(
-                    f"{resource_type}/{res_id}/object_roles/"
-                )
+                object_roles = self._source_paginate(f"{resource_type}/{res_id}/object_roles/")
 
                 for role in object_roles:
-                    role_work.append((
-                        role["id"],
-                        role.get("name", ""),
-                        resource_type,
-                        res_id,
-                        res_name,
-                        res_org,
-                    ))
+                    role_work.append(
+                        (
+                            role["id"],
+                            role.get("name", ""),
+                            resource_type,
+                            res_id,
+                            res_name,
+                            res_org,
+                        )
+                    )
 
             if not role_work:
                 self._progress(f"  {resource_type}: 0 permission entries")
@@ -802,31 +721,32 @@ class IAMAnalyser:
                 )
                 continue
 
-            self._progress(
-                f"  Fetching membership for {len(role_work)} roles..."
-            )
+            self._progress(f"  Fetching membership for {len(role_work)} roles...")
 
             if parallel:
-                completed = 0
                 completed_lock = threading.Lock()
+                role_work_total = len(role_work)
 
-                def _progress_tick() -> None:
-                    nonlocal completed
-                    with completed_lock:
-                        completed += 1
-                        c = completed
-                    if c % 500 == 0 or c == len(role_work):
-                        self._progress(
-                            f"    {c}/{len(role_work)} roles processed"
-                        )
+                def _make_role_progress_tick(
+                    lock: threading.Lock, total: int
+                ) -> Callable[[], None]:
+                    completed = 0
 
-                with ThreadPoolExecutor(
-                    max_workers=self.max_workers
-                ) as executor:
+                    def tick() -> None:
+                        nonlocal completed
+                        with lock:
+                            completed += 1
+                            c = completed
+                        if c % 500 == 0 or c == total:
+                            self._progress(f"    {c}/{total} roles processed")
+
+                    return tick
+
+                _progress_tick = _make_role_progress_tick(completed_lock, role_work_total)
+
+                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     futures = {
-                        executor.submit(
-                            self._fetch_role_members, *work_item
-                        ): work_item
+                        executor.submit(self._fetch_role_members, *work_item): work_item
                         for work_item in role_work
                     }
 
@@ -870,18 +790,12 @@ class IAMAnalyser:
                             stats.permissions_deduplicated += 1
 
                     if (i + 1) % 500 == 0:
-                        self._progress(
-                            f"    {i + 1}/{len(role_work)} roles processed"
-                        )
+                        self._progress(f"    {i + 1}/{len(role_work)} roles processed")
 
                     time.sleep(self.rate_limit_delay)
 
-            type_count = sum(
-                1 for e in entries if e.resource_type == resource_type
-            )
-            self._progress(
-                f"  {resource_type}: {type_count} permission entries"
-            )
+            type_count = sum(1 for e in entries if e.resource_type == resource_type)
+            self._progress(f"  {resource_type}: {type_count} permission entries")
 
             completed_types.add(resource_type)
             self._save_checkpoint(
@@ -891,9 +805,7 @@ class IAMAnalyser:
             )
 
         if stats.permissions_deduplicated:
-            self._progress(
-                f"Deduplicated {stats.permissions_deduplicated} duplicate entries"
-            )
+            self._progress(f"Deduplicated {stats.permissions_deduplicated} duplicate entries")
         self._progress(f"Total unique permissions: {stats.permissions_found}")
         return entries, stats
 
@@ -950,9 +862,7 @@ class IAMAnalyser:
                     principal_name=principal_name,
                     principal_org=principal_org,
                     is_cross_org=(
-                        principal_org != "N/A"
-                        and res_org != "N/A"
-                        and principal_org != res_org
+                        principal_org != "N/A" and res_org != "N/A" and principal_org != res_org
                     ),
                 )
             )
@@ -970,13 +880,8 @@ class IAMAnalyser:
         calls on environments where users+teams << resources*roles.
         """
         parallel = self.max_workers > 1
-        mode_label = (
-            f"{self.max_workers} workers" if parallel else "sequential"
-        )
-        self._progress(
-            f"Phase 1: Scanning permissions — principal strategy "
-            f"({mode_label})..."
-        )
+        mode_label = f"{self.max_workers} workers" if parallel else "sequential"
+        self._progress(f"Phase 1: Scanning permissions — principal strategy ({mode_label})...")
 
         stats = MigrationStats()
         entries: list[PermissionEntry] = []
@@ -989,22 +894,15 @@ class IAMAnalyser:
             if checkpoint:
                 err = self._validate_checkpoint(checkpoint)
                 if err:
-                    self._progress(
-                        f"  Checkpoint invalid: {err} — starting fresh"
-                    )
+                    self._progress(f"  Checkpoint invalid: {err} — starting fresh")
                 else:
                     completed_user_ids = set(checkpoint.completed_user_ids)
                     completed_team_ids = set(checkpoint.completed_team_ids)
-                    entries = [
-                        PermissionEntry.from_dict(p)
-                        for p in checkpoint.permissions
-                    ]
+                    entries = [PermissionEntry.from_dict(p) for p in checkpoint.permissions]
                     seen = {e.dedup_key for e in entries}
                     stats.resources_scanned = checkpoint.resources_scanned
                     stats.permissions_found = checkpoint.permissions_found
-                    stats.permissions_deduplicated = (
-                        checkpoint.permissions_deduplicated
-                    )
+                    stats.permissions_deduplicated = checkpoint.permissions_deduplicated
                     self._checkpoint = checkpoint
                     self._progress(
                         f"  Resumed from checkpoint: "
@@ -1028,11 +926,7 @@ class IAMAnalyser:
             if uid in completed_user_ids:
                 continue
             uname = user.get("username", f"user-{uid}")
-            org_id = (
-                user.get("summary_fields", {})
-                .get("organization", {})
-                .get("id")
-            )
+            org_id = user.get("summary_fields", {}).get("organization", {}).get("id")
             user_org = self._get_org_name(org_id)
             user_work.append(("user", uid, uname, user_org))
 
@@ -1048,9 +942,7 @@ class IAMAnalyser:
                 continue
             tname = team.get("name", f"team-{tid}")
             org_id = team.get("organization") or (
-                team.get("summary_fields", {})
-                .get("organization", {})
-                .get("id")
+                team.get("summary_fields", {}).get("organization", {}).get("id")
             )
             team_org = self._get_org_name(org_id)
             team_work.append(("team", tid, tname, team_org))
@@ -1062,40 +954,42 @@ class IAMAnalyser:
             )
 
         all_work = user_work + team_work
-        self._progress(
-            f"  Fetching roles for {len(user_work)} users + "
-            f"{len(team_work)} teams..."
-        )
+        self._progress(f"  Fetching roles for {len(user_work)} users + {len(team_work)} teams...")
 
         def _process_principal(
             work_item: tuple[str, int, str, str],
         ) -> list[PermissionEntry]:
             ptype, pid, pname, porg = work_item
             return self._fetch_principal_roles(
-                ptype, pid, pname, porg, org_map,
+                ptype,
+                pid,
+                pname,
+                porg,
+                org_map,
             )
 
         if parallel:
-            completed = 0
             completed_lock = threading.Lock()
+            all_work_total = len(all_work)
+            principal_progress: dict[str, int] = {"completed": 0}
 
-            def _progress_tick() -> None:
-                nonlocal completed
-                with completed_lock:
-                    completed += 1
-                    c = completed
-                if c % 500 == 0 or c == len(all_work):
-                    self._progress(
-                        f"    {c}/{len(all_work)} principals processed"
-                    )
+            def _make_principal_progress_tick(
+                lock: threading.Lock, total: int
+            ) -> Callable[[], None]:
+                def tick() -> None:
+                    with lock:
+                        principal_progress["completed"] += 1
+                        c = principal_progress["completed"]
+                    if c % 500 == 0 or c == total:
+                        self._progress(f"    {c}/{total} principals processed")
 
-            with ThreadPoolExecutor(
-                max_workers=self.max_workers
-            ) as executor:
+                return tick
+
+            _progress_tick = _make_principal_progress_tick(completed_lock, all_work_total)
+
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = {
-                    executor.submit(
-                        _process_principal, work_item
-                    ): work_item
+                    executor.submit(_process_principal, work_item): work_item
                     for work_item in all_work
                 }
 
@@ -1128,7 +1022,7 @@ class IAMAnalyser:
 
                     _progress_tick()
 
-                    if completed % 100 == 0:
+                    if principal_progress["completed"] % 100 == 0:
                         self._save_checkpoint(
                             entries,
                             stats,
@@ -1170,10 +1064,7 @@ class IAMAnalyser:
                     )
 
                 if (i + 1) % 500 == 0:
-                    self._progress(
-                        f"    {i + 1}/{len(all_work)} principals "
-                        f"processed"
-                    )
+                    self._progress(f"    {i + 1}/{len(all_work)} principals processed")
 
                 time.sleep(self.rate_limit_delay)
 
@@ -1201,23 +1092,12 @@ class IAMAnalyser:
                 )
                 stats.permissions_found += 1
 
-        user_count = sum(
-            1 for e in entries if e.principal_type == "user"
-        )
-        team_count = sum(
-            1 for e in entries if e.principal_type == "team"
-        )
-        self._progress(
-            f"  Permissions: {user_count} user, {team_count} team"
-        )
+        user_count = sum(1 for e in entries if e.principal_type == "user")
+        team_count = sum(1 for e in entries if e.principal_type == "team")
+        self._progress(f"  Permissions: {user_count} user, {team_count} team")
         if stats.permissions_deduplicated:
-            self._progress(
-                f"Deduplicated {stats.permissions_deduplicated} "
-                f"duplicate entries"
-            )
-        self._progress(
-            f"Total unique permissions: {stats.permissions_found}"
-        )
+            self._progress(f"Deduplicated {stats.permissions_deduplicated} duplicate entries")
+        self._progress(f"Total unique permissions: {stats.permissions_found}")
 
         self._save_checkpoint(
             entries,
@@ -1241,9 +1121,7 @@ class IAMAnalyser:
             team_id = team["id"]
             team_name = team.get("name", f"team-{team_id}")
             team_org_id = team.get("organization") or (
-                team.get("summary_fields", {})
-                .get("organization", {})
-                .get("id")
+                team.get("summary_fields", {}).get("organization", {}).get("id")
             )
             team_org = self._get_org_name(team_org_id)
 
@@ -1260,9 +1138,7 @@ class IAMAnalyser:
                 )
 
             if members:
-                self._progress(
-                    f"  {team_name} ({team_org}): {len(members)} members"
-                )
+                self._progress(f"  {team_name} ({team_org}): {len(members)} members")
             time.sleep(self.rate_limit_delay)
 
         self._progress(f"Total team memberships: {len(memberships)}")
@@ -1325,17 +1201,13 @@ class IAMAnalyser:
         orgs = self._target_paginate("organizations/")
         if not orgs:
             raise RuntimeError(
-                "No organizations found on target — "
-                "run the main migration pipeline first"
+                "No organizations found on target — run the main migration pipeline first"
             )
         self._progress(f"  Target has {len(orgs)} organizations")
 
         teams = self._target_paginate("teams/")
         if not teams:
-            logger.warning(
-                "No teams found on target — "
-                "team permission migration may fail"
-            )
+            logger.warning("No teams found on target — team permission migration may fail")
             self._progress("  Warning: no teams found on target")
         else:
             self._progress(f"  Target has {len(teams)} teams")
@@ -1352,26 +1224,18 @@ class IAMAnalyser:
         self._progress(f"Phase 6: {label} team memberships...")
 
         for idx, membership in enumerate(memberships):
-            target_team_id = self._get_target_id(
-                "teams", membership.team_id
-            )
+            target_team_id = self._get_target_id("teams", membership.team_id)
             if not target_team_id:
-                target_team_id = self._discover_target_id_by_name(
-                    "teams", membership.team_name
-                )
+                target_team_id = self._discover_target_id_by_name("teams", membership.team_name)
             if not target_team_id:
                 membership.status = "failed"
                 membership.error = "Team not found on target"
                 stats.team_memberships_failed += 1
                 continue
 
-            target_user_id = self._get_target_id(
-                "users", membership.user_id
-            )
+            target_user_id = self._get_target_id("users", membership.user_id)
             if not target_user_id:
-                target_user_id = self._discover_target_id_by_name(
-                    "users", membership.username
-                )
+                target_user_id = self._discover_target_id_by_name("users", membership.username)
             if not target_user_id:
                 membership.status = "failed"
                 membership.error = "User not found on target"
@@ -1433,35 +1297,27 @@ class IAMAnalyser:
         target_role_cache: dict[str, dict[str, int]] = {}
 
         for idx, entry in enumerate(permissions):
-            target_resource_id = self._get_target_id(
-                entry.resource_type, entry.resource_id
-            )
+            target_resource_id = self._get_target_id(entry.resource_type, entry.resource_id)
             if not target_resource_id:
                 target_resource_id = self._discover_target_id_by_name(
                     entry.resource_type, entry.resource_name
                 )
             if not target_resource_id:
                 entry.status = "failed"
-                entry.error = (
-                    f"{entry.resource_type} not found on target"
-                )
+                entry.error = f"{entry.resource_type} not found on target"
                 stats.permissions_failed += 1
                 continue
 
             if entry.principal_type == "user":
                 principal_endpoint = "users"
-                target_principal_id = self._get_target_id(
-                    "users", entry.principal_id
-                )
+                target_principal_id = self._get_target_id("users", entry.principal_id)
                 if not target_principal_id:
                     target_principal_id = self._discover_target_id_by_name(
                         "users", entry.principal_name
                     )
             else:
                 principal_endpoint = "teams"
-                target_principal_id = self._get_target_id(
-                    "teams", entry.principal_id
-                )
+                target_principal_id = self._get_target_id("teams", entry.principal_id)
                 if not target_principal_id:
                     target_principal_id = self._discover_target_id_by_name(
                         "teams", entry.principal_name
@@ -1469,10 +1325,7 @@ class IAMAnalyser:
 
             if not target_principal_id:
                 entry.status = "failed"
-                entry.error = (
-                    f"{entry.principal_type} '{entry.principal_name}' "
-                    f"not found on target"
-                )
+                entry.error = f"{entry.principal_type} '{entry.principal_name}' not found on target"
                 stats.permissions_failed += 1
                 continue
 
@@ -1481,24 +1334,16 @@ class IAMAnalyser:
                 roles_data = self._target_paginate(
                     f"{entry.resource_type}/{target_resource_id}/object_roles/"
                 )
-                target_role_cache[cache_key] = {
-                    r["name"]: r["id"] for r in roles_data
-                }
+                target_role_cache[cache_key] = {r["name"]: r["id"] for r in roles_data}
 
             mapped_role = self._map_role_name(entry.role_name)
-            target_role_id = target_role_cache.get(cache_key, {}).get(
-                mapped_role
-            )
+            target_role_id = target_role_cache.get(cache_key, {}).get(mapped_role)
             if not target_role_id and mapped_role != entry.role_name:
-                target_role_id = target_role_cache.get(cache_key, {}).get(
-                    entry.role_name
-                )
+                target_role_id = target_role_cache.get(cache_key, {}).get(entry.role_name)
 
             if not target_role_id:
                 entry.status = "failed"
-                entry.error = (
-                    f"Role '{entry.role_name}' not found on target resource"
-                )
+                entry.error = f"Role '{entry.role_name}' not found on target resource"
                 stats.permissions_failed += 1
                 continue
 
@@ -1569,9 +1414,7 @@ class IAMAnalyser:
             s.permissions_by_type[p.resource_type] = (
                 s.permissions_by_type.get(p.resource_type, 0) + 1
             )
-            s.permissions_by_role[p.role_name] = (
-                s.permissions_by_role.get(p.role_name, 0) + 1
-            )
+            s.permissions_by_role[p.role_name] = s.permissions_by_role.get(p.role_name, 0) + 1
             if p.status == "migrated":
                 s.permissions_migrated += 1
             elif p.status == "failed":
@@ -1635,9 +1478,7 @@ class IAMAnalyser:
         stats.system_roles_found = len(system_roles)
         stats.cross_org_shares = len(cross_org_shares)
 
-        org_summaries = self.build_org_summaries(
-            permissions, memberships, cross_org_shares
-        )
+        org_summaries = self.build_org_summaries(permissions, memberships, cross_org_shares)
 
         self._progress("Audit complete.")
         return IAMAuditResult(
@@ -1669,13 +1510,9 @@ class IAMAnalyser:
                 (already done in a prior --skip-user-roles pass).
         """
         if not self.target_url or not self.target_token:
-            raise RuntimeError(
-                "Target URL and token required for migration"
-            )
+            raise RuntimeError("Target URL and token required for migration")
         if skip_user_roles and users_only:
-            raise ValueError(
-                "--skip-user-roles and --users-only are mutually exclusive"
-            )
+            raise ValueError("--skip-user-roles and --users-only are mutually exclusive")
 
         mode = "dry_run" if dry_run else "migrate"
         label = "dry-run" if dry_run else "migration"
@@ -1713,15 +1550,13 @@ class IAMAnalyser:
                 stats.permissions_skipped += 1
             stats.user_permissions_pending = len(user_perms)
             self._progress(
-                f"  Skipping {len(user_perms)} user-based permissions "
-                f"(use --users-only later)"
+                f"  Skipping {len(user_perms)} user-based permissions (use --users-only later)"
             )
             for m in memberships:
                 m.status = "pending"
             stats.team_memberships_skipped = len(memberships)
             self._progress(
-                f"  Skipping {len(memberships)} team memberships "
-                f"(use --users-only later)"
+                f"  Skipping {len(memberships)} team memberships (use --users-only later)"
             )
             self._migrate_permissions(team_perms, stats, dry_run=dry_run)
 
@@ -1730,23 +1565,16 @@ class IAMAnalyser:
                 p.status = "skipped"
                 stats.permissions_skipped += 1
             self._progress(
-                f"  Skipping {len(team_perms)} team-based permissions "
-                f"(already migrated)"
+                f"  Skipping {len(team_perms)} team-based permissions (already migrated)"
             )
-            self._migrate_team_memberships(
-                memberships, stats, dry_run=dry_run
-            )
+            self._migrate_team_memberships(memberships, stats, dry_run=dry_run)
             self._migrate_permissions(user_perms, stats, dry_run=dry_run)
 
         else:
-            self._migrate_team_memberships(
-                memberships, stats, dry_run=dry_run
-            )
+            self._migrate_team_memberships(memberships, stats, dry_run=dry_run)
             self._migrate_permissions(permissions, stats, dry_run=dry_run)
 
-        org_summaries = self.build_org_summaries(
-            permissions, memberships, cross_org_shares
-        )
+        org_summaries = self.build_org_summaries(permissions, memberships, cross_org_shares)
 
         self._progress(f"IAM {label} complete.")
         return IAMAuditResult(

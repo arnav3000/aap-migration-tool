@@ -272,9 +272,7 @@ def migrate(
             "Error: TARGET__URL and TARGET__TOKEN environment variables required",
             err=True,
         )
-        click.echo(
-            "Hint: use 'aap-bridge iam audit' for read-only scan", err=True
-        )
+        click.echo("Hint: use 'aap-bridge iam audit' for read-only scan", err=True)
         sys.exit(1)
 
     if state_db is None:
@@ -335,8 +333,7 @@ def migrate(
         click.echo(f"  Permissions skipped:    {s.permissions_skipped}")
         if s.user_permissions_pending:
             click.echo(
-                f"  User perms pending:     {s.user_permissions_pending}"
-                f"  (run --users-only later)"
+                f"  User perms pending:     {s.user_permissions_pending}  (run --users-only later)"
             )
         attempted = s.permissions_migrated + s.permissions_failed
         if attempted > 0:
@@ -345,9 +342,7 @@ def migrate(
         click.echo(f"  Team members migrated:  {s.team_memberships_migrated}")
         click.echo(f"  Team members failed:    {s.team_memberships_failed}")
         if s.team_memberships_skipped:
-            click.echo(
-                f"  Team members pending:   {s.team_memberships_skipped}"
-            )
+            click.echo(f"  Team members pending:   {s.team_memberships_skipped}")
         click.echo("")
         click.echo(f"  JSON report: {json_path}")
         click.echo(f"  HTML report: {html_path}")
@@ -441,9 +436,7 @@ def report(json_path: str, output_dir: str | None) -> None:
         html_path = os.path.join(output_dir, html_filename)
 
         os.makedirs(output_dir, mode=0o700, exist_ok=True)
-        fd = os.open(
-            html_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
-        )
+        fd = os.open(html_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
             fh.write(html_content)
 

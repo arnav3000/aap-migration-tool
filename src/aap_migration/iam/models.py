@@ -34,7 +34,7 @@ class PermissionEntry:
         )
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PermissionEntry":
+    def from_dict(cls, data: dict[str, Any]) -> PermissionEntry:
         return cls(
             resource_type=data["resource_type"],
             resource_id=data["resource_id"],
@@ -228,9 +228,7 @@ class IAMAuditResult:
                 "source_url": self.source_url,
             },
             "statistics": self.stats.to_dict(),
-            "org_summaries": {
-                k: v.to_dict() for k, v in self.org_summaries.items()
-            },
+            "org_summaries": {k: v.to_dict() for k, v in self.org_summaries.items()},
             "permissions": [p.to_dict() for p in self.permissions],
             "team_memberships": [m.to_dict() for m in self.team_memberships],
             "system_roles": [r.to_dict() for r in self.system_roles],
@@ -272,22 +270,18 @@ class IAMCheckpoint:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "IAMCheckpoint":
+    def from_dict(cls, data: dict[str, Any]) -> IAMCheckpoint:
         return cls(
             version=data.get("version", 1),
             scan_strategy=data.get("scan_strategy", "resource"),
             source_url=data.get("source_url", ""),
             started_at=data.get("started_at", ""),
             updated_at=data.get("updated_at", ""),
-            completed_resource_types=data.get(
-                "completed_resource_types", []
-            ),
+            completed_resource_types=data.get("completed_resource_types", []),
             completed_user_ids=data.get("completed_user_ids", []),
             completed_team_ids=data.get("completed_team_ids", []),
             permissions=data.get("permissions", []),
             resources_scanned=data.get("resources_scanned", 0),
             permissions_found=data.get("permissions_found", 0),
-            permissions_deduplicated=data.get(
-                "permissions_deduplicated", 0
-            ),
+            permissions_deduplicated=data.get("permissions_deduplicated", 0),
         )

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html import escape
 from typing import Any
 from urllib.parse import urlparse
@@ -47,9 +47,7 @@ _RESOURCE_TYPE_DISPLAY = {
 
 
 def _display_type(rtype: str) -> str:
-    return _RESOURCE_TYPE_DISPLAY.get(
-        rtype, rtype.replace("_", " ").title()
-    )
+    return _RESOURCE_TYPE_DISPLAY.get(rtype, rtype.replace("_", " ").title())
 
 
 def _hostname_only(url: str) -> str:
@@ -112,9 +110,7 @@ def _build_team_summary(
                 "migrated": 0,
                 "failed": 0,
             }
-        by_team[key]["members"].append(
-            {"username": m.username, "status": m.status}
-        )
+        by_team[key]["members"].append({"username": m.username, "status": m.status})
         if m.status == "migrated":
             by_team[key]["migrated"] += 1
         elif m.status == "failed":
@@ -128,9 +124,7 @@ def _build_team_summary(
 
 def export_iam_json(result: IAMAuditResult, output_path: str) -> None:
     data = result.to_dict()
-    data["metadata"]["generated"] = datetime.now(timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
+    data["metadata"]["generated"] = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     data["metadata"]["source_host"] = _hostname_only(result.source_url)
     _write_secure(output_path, json.dumps(data, indent=2, default=str))
 
@@ -141,26 +135,21 @@ def load_audit_result_from_json(json_path: str) -> IAMAuditResult:
 
     meta = data.get("metadata", {})
     stats_raw = data.get("statistics", {})
-    stats = MigrationStats(**{
-        k: v for k, v in stats_raw.items() if k in MigrationStats.__dataclass_fields__
-    })
+    stats = MigrationStats(
+        **{k: v for k, v in stats_raw.items() if k in MigrationStats.__dataclass_fields__}
+    )
 
     permissions = [PermissionEntry(**p) for p in data.get("permissions", [])]
-    memberships = [
-        TeamMembership(**m) for m in data.get("team_memberships", [])
-    ]
-    system_roles = [
-        SystemRoleEntry(**r) for r in data.get("system_roles", [])
-    ]
-    cross_org_shares = [
-        CrossOrgShare(**c) for c in data.get("cross_org_shares", [])
-    ]
+    memberships = [TeamMembership(**m) for m in data.get("team_memberships", [])]
+    system_roles = [SystemRoleEntry(**r) for r in data.get("system_roles", [])]
+    cross_org_shares = [CrossOrgShare(**c) for c in data.get("cross_org_shares", [])]
 
     org_summaries_raw = data.get("org_summaries", {})
     org_summaries = {}
     for name, raw in org_summaries_raw.items():
         filtered = {
-            k: v for k, v in raw.items()
+            k: v
+            for k, v in raw.items()
             if k in OrgSummary.__dataclass_fields__ and k != "success_rate"
         }
         org_summaries[name] = OrgSummary(**filtered)
@@ -181,7 +170,7 @@ def load_audit_result_from_json(json_path: str) -> IAMAuditResult:
 
 
 def generate_iam_html_report(result: IAMAuditResult) -> str:
-    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     source_host = escape(_hostname_only(result.source_url))
     mode_label = {
         "audit": "Audit",
@@ -197,34 +186,22 @@ def generate_iam_html_report(result: IAMAuditResult) -> str:
             "source_host": source_host,
         },
         "stats": result.stats.to_dict(),
-        "org_summaries": {
-            k: v.to_dict() for k, v in result.org_summaries.items()
-        },
+        "org_summaries": {k: v.to_dict() for k, v in result.org_summaries.items()},
         "type_summaries": _build_type_summaries(result.permissions),
         "permissions": [p.to_dict() for p in result.permissions],
         "cross_org_shares": [c.to_dict() for c in result.cross_org_shares],
         "system_roles": [r.to_dict() for r in result.system_roles],
         "team_summary": _build_team_summary(result.team_memberships),
         "membership_failures": [
-            m.to_dict()
-            for m in result.team_memberships
-            if m.status == "failed"
+            m.to_dict() for m in result.team_memberships if m.status == "failed"
         ],
     }
 
     json_block = _safe_json_embed(report_data)
 
     is_migrate = result.mode in ("migrate", "dry_run")
-    failures_tab = (
-        '<button class="tab" data-tab="failures">Failures</button>'
-        if is_migrate
-        else ""
-    )
-    failures_div = (
-        '<div class="content hidden" id="failuresContent"></div>'
-        if is_migrate
-        else ""
-    )
+    failures_tab = '<button class="tab" data-tab="failures">Failures</button>' if is_migrate else ""
+    failures_div = '<div class="content hidden" id="failuresContent"></div>' if is_migrate else ""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">

@@ -8,11 +8,29 @@ organizations, enabling organization-scoped failure analysis.
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, cast
 
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+class OrgFailureSummary(TypedDict):
+    failed: int
+    skipped: int
+    total: int
+    resource_types: set[str]
+    resources: list[dict[str, Any]]
+
+
+def _empty_org_summary() -> OrgFailureSummary:
+    return {
+        "failed": 0,
+        "skipped": 0,
+        "total": 0,
+        "resource_types": set(),
+        "resources": [],
+    }
 
 
 # Resource types that are organization-scoped
@@ -61,7 +79,9 @@ class OrganizationMapper:
 
         # Caches
         self.org_names: dict[int, str] = {}  # org_id -> org_name
-        self.resource_orgs: dict[str, dict[int, int | None]] = {}  # resource_type -> {source_id -> org_id}
+        self.resource_orgs: dict[
+            str, dict[int, int | None]
+        ] = {}  # resource_type -> {source_id -> org_id}
 
         # Load organization names
         self._load_organizations()
@@ -131,7 +151,9 @@ class OrganizationMapper:
             count=len(self.resource_orgs[resource_type]),
         )
 
-    def _extract_org_from_resource(self, resource_type: str, resource: dict[str, Any]) -> int | None:
+    def _extract_org_from_resource(
+        self, resource_type: str, resource: dict[str, Any]
+    ) -> int | None:
         """Extract organization ID from a resource.
 
         Args:
@@ -145,7 +167,7 @@ class OrganizationMapper:
         if resource_type in ORG_SCOPED_RESOURCES:
             org_id = resource.get("organization")
             if org_id is not None:
-                return org_id
+                return int(org_id)
 
         # Parent-scoped resources use summary_fields
         if resource_type in PARENT_SCOPED_RESOURCES:
@@ -153,7 +175,7 @@ class OrganizationMapper:
             org = summary.get("organization", {})
             org_id = org.get("id") if isinstance(org, dict) else None
             if org_id is not None:
-                return org_id
+                return int(org_id)
 
         # Schedules: trace through unified_job_template
         if resource_type == "schedules":
@@ -221,13 +243,7 @@ class OrganizationMapper:
                 - resource_types: set of affected resource types
                 - resources: list of resource details
         """
-        org_summary = defaultdict(lambda: {
-            "failed": 0,
-            "skipped": 0,
-            "total": 0,
-            "resource_types": set(),
-            "resources": [],
-        })
+        org_summary: defaultdict[str, OrgFailureSummary] = defaultdict(_empty_org_summary)
 
         for failure in failures:
             resource_type = failure.get("resource_type")
@@ -250,4 +266,4 @@ class OrganizationMapper:
             summary["resource_types"].add(resource_type)
             summary["resources"].append(failure)
 
-        return dict(org_summary)
+        return cast(dict[str, dict[str, Any]], dict(org_summary))

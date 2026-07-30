@@ -8,6 +8,7 @@ and importing them to target AAP independently.
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -23,15 +24,11 @@ from aap_migration.cli.utils import (
     format_count,
     step_progress,
 )
-from aap_migration.migration.auditor_roles import (
-    assign_auditor_roles,
-    create_preflight_failure_summary,
-    preflight_gateway_access,
-)
+from aap_migration.migration.database import get_session
 from aap_migration.migration.exporter import create_exporter
 from aap_migration.migration.importer import create_importer
 from aap_migration.migration.parallel_exporter import ParallelExportCoordinator
-from aap_migration.migration.state import MigrationState
+from aap_migration.migration.state import MigrationProgress, MigrationState
 from aap_migration.reporting.live_progress import MigrationProgressDisplay
 from aap_migration.resources import (
     MANUAL_MIGRATION_ENDPOINTS,
@@ -130,6 +127,11 @@ def get_importer_dependencies(resource_type: str) -> dict[str, str]:
         return {}
 
 
+def _registry_migration_order(resource_type: str) -> int:
+    info = RESOURCE_REGISTRY.get(resource_type)
+    return info.migration_order if info is not None else 999
+
+
 def build_dependency_closure(
     requested_types: list[str], all_available_types: list[str]
 ) -> list[str]:
@@ -176,10 +178,7 @@ def build_dependency_closure(
                 queue.append(dep_resource_type)
 
     # Sort by migration_order to ensure dependencies come first
-    sorted_types = sorted(
-        needed_types,
-        key=lambda t: RESOURCE_REGISTRY.get(t).migration_order if t in RESOURCE_REGISTRY else 999,
-    )
+    sorted_types = sorted(needed_types, key=_registry_migration_order)
 
     return sorted_types
 
@@ -360,9 +359,9 @@ def export(
         parallel_types=parallel_types_enabled,
     )
 
-    async def run_export():
+    async def run_export() -> None:
         import logging
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         # Suppress console logging for cleaner output (Live progress display will handle it)
         root_logger = logging.getLogger()
@@ -465,7 +464,7 @@ def export(
                     )
 
                 # Get count from API WITH FILTERS
-                count = await temp_exporter.get_count(
+                count = await temp_exporter.get_count(  # type: ignore[attr-defined]
                     endpoint, filters=count_filters if count_filters else None
                 )
                 description = rtype.replace("_", " ").title()
@@ -501,7 +500,7 @@ def export(
                     )
 
                     # Create progress callback to update display
-                    def progress_callback(rtype: str, stats: dict):
+                    def progress_callback(rtype: str, stats: dict[str, Any]) -> None:
                         phase_id = rtype  # We use resource_type as phase_id
                         progress.update_phase(
                             phase_id, stats.get("exported", 0), stats.get("failed", 0)
@@ -692,7 +691,7 @@ def export(
 
             # Write metadata file
             metadata = {
-                "export_timestamp": datetime.utcnow().isoformat(),
+                "export_timestamp": datetime.now(UTC).isoformat(),
                 "source_url": ctx.config.source.url,
                 "total_resources": total_resources,
                 "records_per_file": records_per_file,
@@ -745,7 +744,9 @@ def export(
         loop.run_until_complete(run_export())
 
 
-def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tuple[bool, dict]:
+def validate_pre_import_state(
+    input_dir: Path, state: MigrationState, yes: bool = False
+) -> tuple[bool, dict[str, Any]]:
     """Validate database state before import to prevent duplicates.
 
     Checks for missing ID mappings that could cause duplicate resource creation.
@@ -758,7 +759,7 @@ def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tupl
     Returns:
         Tuple of (should_continue, validation_stats)
     """
-    validation_stats = {
+    validation_stats: dict[str, Any] = {
         "transformed_count": 0,
         "mapped_count": 0,
         "missing_mappings": 0,
@@ -783,7 +784,7 @@ def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tupl
                             resource_count += len(data)
                         else:
                             resource_count += 1
-                except Exception:
+                except Exception:  # nosec B112
                     continue
 
             if resource_count > 0:
@@ -1120,12 +1121,7 @@ def import_cmd(
             )
         # Always sort types_to_import by migration_order to ensure dependencies come first
         # This is critical for credential_types to be imported before credentials, etc.
-        types_to_import = sorted(
-            requested_types,
-            key=lambda t: (
-                RESOURCE_REGISTRY.get(t).migration_order if t in RESOURCE_REGISTRY else 999
-            ),
-        )
+        types_to_import = sorted(requested_types, key=_registry_migration_order)
 
     # Filter by phase if specified
     if phase == "phase1":
@@ -1210,13 +1206,13 @@ def import_cmd(
 
     async def batch_precheck_resources(
         resource_type: str,
-        resources: list[dict],
-        importer,
-        client,
-        state,
-        progress,
+        resources: list[dict[str, Any]],
+        importer: Any,
+        client: Any,
+        state: MigrationState,
+        progress: MigrationProgressDisplay,
         phase_id: str,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
         Proactively check which resources already exist in target environment.
 
@@ -1256,53 +1252,8 @@ def import_cmd(
         # Extract identifiers from resources
         # Track duplicates to report them in migration report
         resource_identifiers = []
-        resource_by_identifier = {}
+        resource_by_identifier: dict[Any, dict[str, Any]] = {}
         duplicates_skipped = []  # Track duplicates for reporting
-
-        # PRE-LOAD FK MAPPINGS: Load source_id -> target_id dicts for FK fields
-        # used in composite keys. This avoids O(N) database calls per resource.
-        # These mappings were created when parent resources (orgs, inventories, etc.)
-        # were imported earlier in the import order.
-        org_mappings = {}  # source_org_id -> target_org_id
-        cred_type_mappings = {}  # source_cred_type_id -> target_cred_type_id
-        parent_mappings = {}  # source_parent_id -> target_parent_id
-
-        if resource_type in ORGANIZATION_SCOPED_RESOURCES:
-            org_mappings = state.get_all_mappings_dict("organizations")
-            if resource_type == "credentials":
-                cred_type_mappings = state.get_all_mappings_dict("credential_types")
-            logger.info(
-                "loaded_fk_mappings_for_precheck",
-                resource_type=resource_type,
-                org_mappings_count=len(org_mappings),
-                cred_type_mappings_count=len(cred_type_mappings),
-            )
-        elif resource_type in PARENT_SCOPED_RESOURCES:
-            parent_field = PARENT_SCOPED_RESOURCES[resource_type]
-            # Determine the resource type for the parent field
-            # e.g., "inventory" -> "inventories", "unified_job_template" -> need to check multiple types
-            parent_type_map = {
-                "inventory": "inventories",
-                "unified_job_template": None,  # Special case: multiple types
-            }
-            parent_resource_type = parent_type_map.get(parent_field)
-            if parent_resource_type:
-                parent_mappings = state.get_all_mappings_dict(parent_resource_type)
-            else:
-                # For unified_job_template, load mappings from all possible parent types
-                for ptype in (
-                    "job_templates",
-                    "workflow_job_templates",
-                    "projects",
-                    "inventory_sources",
-                ):
-                    parent_mappings.update(state.get_all_mappings_dict(ptype))
-            logger.info(
-                "loaded_fk_mappings_for_precheck",
-                resource_type=resource_type,
-                parent_field=parent_field,
-                parent_mappings_count=len(parent_mappings),
-            )
 
         for resource in resources:
             identifier = resource.get(identifier_field)
@@ -1310,24 +1261,14 @@ def import_cmd(
             org = None  # Initialize org for all resources (prevents UnboundLocalError)
             parent_id = None  # Initialize parent_id for parent-scoped resources
             if identifier and source_id:
+                dict_key: Any
                 # Use composite key for organization-scoped resources to avoid duplicates
-                # CRITICAL: Translate source FK IDs to target FK IDs so keys match
-                # the target-side keys built from API responses (which use target IDs)
                 if resource_type in ORGANIZATION_SCOPED_RESOURCES:
-                    source_org = resource.get("organization")
-                    # Translate source org ID to target org ID for key matching
-                    org = (
-                        org_mappings.get(source_org, source_org) if source_org is not None else None
-                    )
+                    org = resource.get("organization")
                     # For credentials, include credential_type in uniqueness check
                     # AAP constraint: (name, organization, credential_type) must be unique
                     if resource_type == "credentials":
-                        source_cred_type = resource.get("credential_type")
-                        cred_type = (
-                            cred_type_mappings.get(source_cred_type, source_cred_type)
-                            if source_cred_type is not None
-                            else None
-                        )
+                        cred_type = resource.get("credential_type")
                         dict_key = (identifier, org, cred_type)
                     else:
                         # Other org-scoped resources: (name, org) is unique
@@ -1335,13 +1276,7 @@ def import_cmd(
                 elif resource_type in PARENT_SCOPED_RESOURCES:
                     # Parent-scoped resources: unique within parent (e.g., inventory_sources scoped to inventory)
                     parent_field = PARENT_SCOPED_RESOURCES[resource_type]
-                    source_parent = resource.get(parent_field)
-                    # Translate source parent ID to target parent ID for key matching
-                    parent_id = (
-                        parent_mappings.get(source_parent, source_parent)
-                        if source_parent is not None
-                        else None
-                    )
+                    parent_id = resource.get(parent_field)
                     dict_key = (identifier, parent_id) if parent_id is not None else identifier
                 else:
                     # Use name only for globally unique resources
@@ -1449,7 +1384,7 @@ def import_cmd(
         # Use character-based batching to avoid 414 URI Too Large errors
         # Long resource names (e.g., inventories) can cause URI to exceed 8KB limit
         MAX_QUERY_CHARS = 4000  # Safe limit for query parameters
-        existing_by_identifier = {}
+        existing_by_identifier: dict[Any, dict[str, Any]] = {}
 
         # Build batches based on character count, not fixed count
         current_batch: list[str] = []
@@ -1481,132 +1416,22 @@ def import_cmd(
             max_query_chars=MAX_QUERY_CHARS,
         )
 
-        # PERFORMANCE FIX: For resource types using manual pagination, fetch ALL target
-        # resources ONCE before the batch loop, then filter client-side per batch.
-        # Previously this fetch was inside the batch loop, causing O(N*M) API calls:
-        #   - 24,247 credentials: 186 batches x 122 pages = 22,692 API calls (2.6 hours)
-        #   - 78,000 job_templates: 600 batches x 390 pages = 234,000 API calls (27+ hours)
-        # With caching: O(M) API calls (just the target pages fetched once).
-        #   - 24,247 credentials: 122 pages = 122 API calls (~1 minute)
-        #   - 78,000 job_templates: 390 pages = 390 API calls (~3 minutes)
-        #
-        # BUGFIX context: list_resources() has an infinite loop bug where it strips
-        # query params during pagination (line 585 in aap_target_client.py).
-        # Manual pagination avoids this infinite loop for high-volume resource types.
-        MANUAL_PAGINATION_RESOURCE_TYPES = (
-            "organizations",
-            "credential_types",
-            "credentials",
-            "execution_environments",
-            "projects",
-            "inventories",
-            "inventory_sources",
-            "inventory_groups",
-            "hosts",
-            "job_templates",
-            "workflow_job_templates",
-            "schedules",
-            "notification_templates",
-            "applications",
-            "users",
-            "teams",
-            "labels",
-        )
-
-        # Cache: fetch all target resources once for manual-pagination types
-        cached_target_resources = None
-        if resource_type in MANUAL_PAGINATION_RESOURCE_TYPES:
-            logger.info(
-                "caching_target_resources_for_batch_precheck",
-                resource_type=resource_type,
-                num_batches=len(batches),
-                reason="Fetching target resources once to avoid O(N*M) API calls",
-            )
-
-            cached_target_resources = []
-            page = 1
-            MAX_PAGES = 500  # Safety limit to prevent infinite loops
-
-            endpoint = get_endpoint(resource_type)
-
-            while page <= MAX_PAGES:
-                params = {"page": page, "page_size": 200}
-
-                response = await client.get(endpoint, params=params)
-                results = response.get("results", [])
-                cached_target_resources.extend(results)
-
-                # Log progress every 50 pages for large datasets
-                if page % 50 == 0:
-                    logger.info(
-                        "target_cache_fetch_progress",
-                        resource_type=resource_type,
-                        pages_fetched=page,
-                        resources_fetched=len(cached_target_resources),
-                    )
-
-                if not response.get("next"):
-                    break
-
-                page += 1
-
-            if page > MAX_PAGES:
-                logger.error(
-                    "manual_pagination_limit_exceeded",
-                    resource_type=resource_type,
-                    max_pages=MAX_PAGES,
-                    resources_fetched=len(cached_target_resources),
-                )
-
-            logger.info(
-                "target_resources_cached",
-                resource_type=resource_type,
-                total_pages=page,
-                total_resources=len(cached_target_resources),
-            )
-
         for batch_idx, batch_identifiers in enumerate(batches):
             # Query target: GET /api/v2/{resource_type}/?{field}__in=val1,val2,val3
             filter_key = f"{identifier_field}__in"
             filters = {filter_key: ",".join(batch_identifiers)}
 
             try:
-                if cached_target_resources is not None:
-                    # Use cached target resources - filter client-side per batch
-                    # Normalize identifiers for matching (strip whitespace, case-insensitive)
-                    batch_identifiers_normalized = {
-                        str(ident).strip().lower() for ident in batch_identifiers if ident
-                    }
-
-                    existing_batch = [
-                        resource
-                        for resource in cached_target_resources
-                        if str(resource.get(identifier_field, "")).strip().lower()
-                        in batch_identifiers_normalized
-                    ]
-
-                    logger.debug(
-                        "batch_filtered_client_side",
-                        resource_type=resource_type,
-                        batch_idx=batch_idx,
-                        batch_size=len(batch_identifiers),
-                        all_target_count=len(cached_target_resources),
-                        matched_count=len(existing_batch),
-                    )
-
-                else:
-                    # Fallback for resource types not in MANUAL_PAGINATION_RESOURCE_TYPES.
-                    # list_resources() pagination is now fixed (manual page increment),
-                    # but the cached approach above is preferred for performance.
-                    existing_batch = await client.list_resources(
-                        resource_type=resource_type, filters=filters
-                    )
+                existing_batch = await client.list_resources(
+                    resource_type=resource_type, filters=filters
+                )
 
                 # Index by identifier for fast lookup
                 # For organization-scoped resources, use composite key (name, organization)
                 # For credentials, also include credential_type to match AAP's uniqueness constraint
                 # For parent-scoped resources (inventory_sources, hosts, groups), use (name, parent_id)
                 for existing_resource in existing_batch:
+                    key: Any
                     if resource_type in ORGANIZATION_SCOPED_RESOURCES:
                         name = existing_resource.get("name")
                         org = existing_resource.get("organization")
@@ -1670,6 +1495,8 @@ def import_cmd(
                 lookup_key = dict_key
                 identifier = dict_key
 
+            source_name_label: str = identifier if isinstance(identifier, str) else str(identifier)
+
             # Debug: Log lookup key being used
             logger.debug(
                 "checking_resource_existence",
@@ -1688,7 +1515,7 @@ def import_cmd(
                     resource_type=resource_type,
                     source_id=source_id,
                     target_id=existing["id"],
-                    source_name=identifier,
+                    source_name=source_name_label,
                     target_name=existing.get(identifier_field),
                 )
                 # FIX: Mark as skipped (not completed) - resource already exists in target
@@ -1699,7 +1526,7 @@ def import_cmd(
                     reason="Pre-existing in target (found in batch precheck)",
                     target_id=existing["id"],
                     target_name=existing.get(identifier_field),
-                    source_name=identifier,
+                    source_name=source_name_label,
                 )
 
                 found_count += 1
@@ -1729,7 +1556,7 @@ def import_cmd(
 
         return to_import
 
-    async def run_import():
+    async def run_import() -> None:
         # PRE-IMPORT VALIDATION: Check for missing mappings to prevent duplicates
         should_continue, validation_stats = validate_pre_import_state(
             input_dir, ctx.migration_state, yes
@@ -1746,10 +1573,10 @@ def import_cmd(
         total_imported = 0
         total_failed = 0
         total_skipped = 0
-        skipped_no_importer = []
+        skipped_no_importer: list[str] = []
 
         # Track detailed stats per resource type
-        run_stats = {}
+        run_stats: dict[str, Any] = {}
 
         # Initialize phases
         phases = []
@@ -1768,7 +1595,7 @@ def import_cmd(
                             for resource in resources:
                                 if "_deferred_scm_details" in resource:
                                     patch_count += 1
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
 
         # Build phases list based on import phase
@@ -1807,9 +1634,6 @@ def import_cmd(
         phases = [(rtype, desc, count) for rtype, desc, count in phases if count > 0]
 
         try:
-            # Track skipped resource types (no importer available)
-            skipped_no_importer = []
-
             with MigrationProgressDisplay(title="🚀 AAP Import Progress", enabled=True) as progress:
                 # Set total phases BEFORE initialize_phases to avoid jitter
                 progress.set_total_phases(len(phases))
@@ -1911,21 +1735,6 @@ def import_cmd(
 
                         transformed_resources.append(resource)
 
-                    # Snapshot auditor source IDs BEFORE import — _import_parallel
-                    # pops _source_id from each dict, so post-import reads get None.
-                    auditor_source_snapshot = (
-                        [
-                            {
-                                "username": r.get("username", "unknown"),
-                                "source_id": r.get("_source_id", r.get("id", 0)),
-                            }
-                            for r in transformed_resources
-                            if r.get("is_system_auditor") is True
-                        ]
-                        if rtype == "users"
-                        else []
-                    )
-
                     if not dry_run:
                         # Create appropriate importer using factory
                         try:
@@ -1936,7 +1745,6 @@ def import_cmd(
                                 ctx.config.performance,
                                 ctx.config.resource_mappings,
                             )
-                            importer.input_dir = input_dir
                         except NotImplementedError:
                             logger.info(
                                 "skipping_no_importer",
@@ -1986,23 +1794,149 @@ def import_cmd(
 
                         method_name = method_map.get(rtype)
                         echo_info(
-                            f"Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}"
+                            f"📋 Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}"
                         )
                         if method_name and hasattr(importer, method_name):
-                            # Proactive batch pre-check: query target to find existing resources
-                            # This avoids "already exists" errors and shows accurate progress
-                            # NOTE: Previously job_templates/workflow_job_templates/schedules were
-                            # bypassed here due to O(N*M) hang bug. That bug is now fixed by
-                            # caching target resources before the batch loop in batch_precheck_resources().
-                            resources_to_import = await batch_precheck_resources(
-                                resource_type=rtype,
-                                resources=transformed_resources,
-                                importer=importer,
-                                client=ctx.target_client,
-                                state=ctx.migration_state,
-                                progress=progress,
-                                phase_id=phase_id,
-                            )
+                            # TEMPORARY FIX: Skip batch precheck for automation resources to avoid hang
+                            # TODO: Investigate why batch_precheck_resources blocks for these types
+                            if rtype in ("job_templates", "workflow_job_templates", "schedules"):
+                                echo_warning(
+                                    f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using database check)"
+                                )
+                                logger.warning(
+                                    "batch_precheck_skipped_temporary_fix",
+                                    resource_type=rtype,
+                                    message="Skipping batch precheck due to known hang issue, using database check instead",
+                                )
+
+                                # Database check to avoid re-importing already completed resources
+                                # This prevents "already exists" errors on re-runs while avoiding the API hang
+                                # CRITICAL FIX: Also verify target_id still exists in target AAP
+
+                                # Step 1: Query database for completed/skipped resources (sync)
+                                resources_needing_validation = []
+                                resources_to_import = []
+                                already_completed_count = 0
+
+                                with get_session(ctx.migration_state.database_url) as session:
+                                    for resource in transformed_resources:
+                                        source_id = resource.get("_source_id")
+
+                                        # Check if already successfully completed or intentionally skipped
+                                        existing = (
+                                            session.query(MigrationProgress)
+                                            .filter_by(resource_type=rtype, source_id=source_id)
+                                            .first()
+                                        )
+
+                                        # If completed/skipped, need to validate target still exists
+                                        if (
+                                            existing
+                                            and existing.status in ("completed", "skipped")
+                                            and existing.target_id
+                                        ):
+                                            resources_needing_validation.append(
+                                                {
+                                                    "resource": resource,
+                                                    "source_id": source_id,
+                                                    "target_id": existing.target_id,
+                                                    "status": existing.status,
+                                                }
+                                            )
+                                        elif existing and existing.status in (
+                                            "completed",
+                                            "skipped",
+                                        ):
+                                            # No target_id but marked completed/skipped (shouldn't happen)
+                                            # Skip anyway to be safe
+                                            already_completed_count += 1
+                                            logger.info(
+                                                "resource_already_processed_skip",
+                                                resource_type=rtype,
+                                                source_id=source_id,
+                                                status=existing.status,
+                                                target_id=None,
+                                                verified="no_target_id",
+                                            )
+                                        else:
+                                            # Not completed/skipped (pending, failed, or no record)
+                                            resources_to_import.append(resource)
+
+                                # Step 2: Validate target resources exist (async, outside session)
+                                endpoint = get_endpoint(rtype)
+                                for item in resources_needing_validation:
+                                    target_id = item["target_id"]
+                                    source_id = item["source_id"]
+                                    resource = item["resource"]
+
+                                    try:
+                                        # Quick existence check (will raise if not found)
+                                        await ctx.target_client.get(f"{endpoint}{target_id}/")
+                                        # Target exists - safe to skip
+                                        # Mark as skipped in database for accurate reporting
+                                        ctx.migration_state.mark_skipped(
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            reason="Pre-existing in target (validated via database check)",
+                                            target_id=target_id,
+                                            target_name=resource.get("name"),
+                                            source_name=resource.get("name"),
+                                        )
+                                        already_completed_count += 1
+                                        logger.info(
+                                            "resource_already_processed_skip",
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            target_id=target_id,
+                                            status=item["status"],
+                                            verified="target_exists",
+                                        )
+                                    except Exception as e:
+                                        # Target deleted from AAP - need to re-import
+                                        logger.warning(
+                                            "target_deleted_re_importing",
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            target_id=target_id,
+                                            error=str(e),
+                                            action="clearing_status_and_reimporting",
+                                        )
+                                        # Add to import list
+                                        resources_to_import.append(resource)
+
+                                        # Clear database status (new session)
+                                        with get_session(
+                                            ctx.migration_state.database_url
+                                        ) as session:
+                                            existing = (
+                                                session.query(MigrationProgress)
+                                                .filter_by(resource_type=rtype, source_id=source_id)
+                                                .first()
+                                            )
+                                            if existing:
+                                                existing.status = "pending"
+                                                existing.target_id = None
+                                                session.commit()
+
+                                logger.info(
+                                    "database_check_result",
+                                    resource_type=rtype,
+                                    total=len(transformed_resources),
+                                    already_completed=already_completed_count,
+                                    to_import=len(resources_to_import),
+                                )
+                            else:
+                                # Proactive batch pre-check: query target to find existing resources
+                                # This avoids "already exists" errors and shows accurate progress
+                                resources_to_import = await batch_precheck_resources(
+                                    resource_type=rtype,
+                                    resources=transformed_resources,
+                                    importer=importer,
+                                    client=ctx.target_client,
+                                    state=ctx.migration_state,
+                                    progress=progress,
+                                    phase_id=phase_id,
+                                )
 
                             # Calculate skipped count (resources that already exist)
                             skipped_count = len(transformed_resources) - len(resources_to_import)
@@ -2014,7 +1948,10 @@ def import_cmd(
 
                                 # Create progress callback for live updates
                                 def update_progress(
-                                    success: int, failed: int, skipped: int, phase_id=phase_id
+                                    success: int,
+                                    failed: int,
+                                    skipped: int,
+                                    phase_id: str = phase_id,
                                 ) -> None:
                                     """Update progress display in real-time."""
                                     progress.update_phase(phase_id, success, failed, skipped)
@@ -2059,89 +1996,6 @@ def import_cmd(
                                     resource_type=rtype,
                                     total=len(transformed_resources),
                                 )
-
-                            # --- Post-phase: Gateway auditor role assignments (AAP 2.6+) ---
-                            # Runs for BOTH fresh imports and re-runs (all users pre-existing)
-                            if rtype == "users":
-                                # Use pre-captured snapshot — _source_id is popped by
-                                # _import_parallel during fresh import, so reading it
-                                # from transformed_resources post-import yields None.
-                                auditor_failed_count = 0
-                                if auditor_source_snapshot:
-                                    echo_info(
-                                        f"🔑 {len(auditor_source_snapshot)} system auditor(s) detected — "
-                                        f"assigning Gateway Platform Auditor roles..."
-                                    )
-                                    try:
-                                        role_def_id = await preflight_gateway_access(
-                                            ctx.target_client
-                                        )
-                                    except RuntimeError as gw_err:
-                                        logger.error(
-                                            "gateway_preflight_failed",
-                                            error=str(gw_err),
-                                            affected_count=len(auditor_source_snapshot),
-                                        )
-                                        role_def_id = None
-                                        preflight_error = str(gw_err)
-
-                                    if role_def_id is not None:
-                                        auditor_users = []
-                                        for snap in auditor_source_snapshot:
-                                            mapping = ctx.migration_state.get_id_mapping(
-                                                "users", snap["source_id"]
-                                            )
-                                            if mapping:
-                                                auditor_users.append(
-                                                    {
-                                                        "username": snap["username"],
-                                                        "source_id": snap["source_id"],
-                                                        "target_id": mapping["target_id"],
-                                                    }
-                                                )
-
-                                        if auditor_users:
-                                            auditor_summary = await assign_auditor_roles(
-                                                ctx.target_client, auditor_users, role_def_id
-                                            )
-                                            echo_info(
-                                                f"🔑 Auditor roles: {auditor_summary.verified_count}/{auditor_summary.auditor_count} "
-                                                f"assigned+verified (max sync {auditor_summary.sync_latency_ms_max:.0f}ms)"
-                                            )
-                                            if auditor_summary.failed:
-                                                auditor_failed_count = len(auditor_summary.failed)
-                                                for f in auditor_summary.failed:
-                                                    echo_warning(
-                                                        f"   ⚠ auditor_assignment_failed: {f.username} — {f.error}"
-                                                    )
-                                    else:
-                                        auditor_summary = create_preflight_failure_summary(
-                                            auditor_source_snapshot, preflight_error
-                                        )
-                                        auditor_failed_count = auditor_summary.auditor_count
-                                        echo_error(
-                                            f"\n{'=' * 60}\n"
-                                            f"❌ AUDITOR ROLE ASSIGNMENT BLOCKED\n"
-                                            f"{'=' * 60}\n"
-                                            f"Gateway preflight failed: {preflight_error}\n\n"
-                                            f"{auditor_summary.auditor_count} system auditor(s) will NOT\n"
-                                            f"have functional auditor access on AAP 2.6.\n\n"
-                                            f"Affected users:"
-                                        )
-                                        for f in auditor_summary.failed:
-                                            echo_error(f"   • {f.username}")
-                                        echo_error(
-                                            f"\nAction required: use a Gateway-capable token\n"
-                                            f"(length 32, from AAP 2.6 UI) and re-run, or:\n"
-                                            f"   python tools/remediate_auditor_roles.py --data-dir <path>\n"
-                                            f"{'=' * 60}"
-                                        )
-                                        for f in auditor_summary.failed:
-                                            echo_warning(
-                                                f"   ⚠ auditor_assignment_failed: {f.username} — {f.error}"
-                                            )
-                                if auditor_failed_count > 0:
-                                    total_failed += auditor_failed_count
 
                             # NOTE: SCM sync waiting has been removed from automatic flow.
                             # With two-phase import, users run phase1 (up to projects),
@@ -2224,7 +2078,7 @@ def import_cmd(
                                         skipped=base_skipped + skipped,
                                     )
 
-                                result = await importer.import_hosts_bulk(
+                                result = await importer.import_hosts_bulk(  # type: ignore[attr-defined]
                                     inventory_id=target_inv_id,
                                     hosts=inv_hosts,
                                     progress_callback=bulk_progress,

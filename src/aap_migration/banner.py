@@ -21,16 +21,17 @@ CYAN = "\033[36m"
 WHITE = "\033[37m"
 
 
-def get_version():
+def get_version() -> str:
     """Get tool version from package metadata."""
     try:
         from importlib.metadata import version
+
         return version("aap-bridge")
     except Exception:
         return "dev"
 
 
-def get_cli_banner():
+def get_cli_banner() -> str:
     """Get informative banner for CLI startup."""
     ver = get_version()
     line = "=" * 62
@@ -102,7 +103,7 @@ def get_cli_banner():
 """
 
 
-def get_container_motd():
+def get_container_motd() -> str:
     """Get Message of the Day for container shell login."""
     ver = get_version()
     return f"""
@@ -123,7 +124,7 @@ def get_container_motd():
 """
 
 
-def get_html_meta_tags():
+def get_html_meta_tags() -> str:
     """Get HTML meta tags for report attribution."""
     ver = get_version()
     return f'''
@@ -132,43 +133,35 @@ def get_html_meta_tags():
 '''
 
 
-def get_html_footer():
+def get_html_footer() -> str:
     """Get visible HTML footer with attribution."""
     ver = get_version()
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return f'''
+    return f"""
 <footer style="margin-top: 2em; padding: 1em; border-top: 2px solid #cc0000; text-align: center; color: #666; font-size: 0.9em;">
     <p><strong>{TOOL_NAME}</strong> v{ver} | Crafted by {CREATORS} | {ORGANIZATION}</p>
     <p><a href="https://github.com/arnav3000" style="color: #0366d6; text-decoration: none;">{GH_HANDLE}</a></p>
     <p>Report generated: {timestamp}</p>
 </footer>
-'''
+"""
 
 
-def inject_html_attribution(html_content):
+def inject_html_attribution(html_content: str) -> str:
     """Inject attribution into HTML report content."""
-    head_end = html_content.find('</head>')
-    body_end = html_content.find('</body>')
+    head_end = html_content.find("</head>")
+    body_end = html_content.find("</body>")
 
     if head_end == -1 or body_end == -1:
         return html_content
 
-    html_content = (
-        html_content[:head_end]
-        + get_html_meta_tags()
-        + html_content[head_end:]
-    )
+    html_content = html_content[:head_end] + get_html_meta_tags() + html_content[head_end:]
 
-    body_end = html_content.find('</body>')
-    html_content = (
-        html_content[:body_end]
-        + get_html_footer()
-        + html_content[body_end:]
-    )
+    body_end = html_content.find("</body>")
+    html_content = html_content[:body_end] + get_html_footer() + html_content[body_end:]
 
     return html_content
 
 
-def print_cli_banner():
+def print_cli_banner() -> None:
     """Print CLI banner to stdout."""
     print(get_cli_banner())

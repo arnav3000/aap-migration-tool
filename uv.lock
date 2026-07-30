@@ -21,7 +21,7 @@ constraints = [
 
 [[package]]
 name = "aap-bridge"
-version = "0.5.4"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },

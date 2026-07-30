@@ -6,7 +6,6 @@ success, failures, and discrepancies between exported and imported resources.
 """
 
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,7 +19,6 @@ from aap_migration.cli.utils import echo_error, echo_info, echo_success
 from aap_migration.migration.database import get_session
 from aap_migration.migration.models import MigrationProgress
 from aap_migration.migration.state import MigrationState
-from aap_migration.reporting.org_mapper import OrganizationMapper
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -39,19 +37,6 @@ logger = get_logger(__name__)
     type=str,
     help="Generate report for specific resource type only",
 )
-@click.option(
-    "--by-organization",
-    is_flag=True,
-    default=False,
-    help="Generate organization-scoped failure report (groups failures by owning organization)",
-)
-@click.option(
-    "--format",
-    "output_format",
-    type=click.Choice(["markdown", "csv", "html"], case_sensitive=False),
-    default="markdown",
-    help="Output format for organization report (default: markdown)",
-)
 @pass_context
 @requires_config
 @handle_errors
@@ -59,8 +44,6 @@ def generate_migration_report(
     ctx: MigrationContext,
     output: str | None,
     resource_type: str | None,
-    by_organization: bool,
-    output_format: str,
 ) -> None:
     """Generate comprehensive migration report with failures and discrepancies.
 
@@ -70,11 +53,6 @@ def generate_migration_report(
     - Resources successfully imported to target
     - Resources that failed
     - Discrepancies between exported and imported counts
-
-    With --by-organization flag:
-    - Groups failed/skipped resources by owning organization
-    - Shows organization-level statistics
-    - Maps resources to organizations using exported metadata
 
     Examples:
 
@@ -86,28 +64,7 @@ def generate_migration_report(
 
         # Save to custom location
         aap-bridge migration-report --output /tmp/migration-report.md
-
-        # Generate organization-scoped failure report
-        aap-bridge migration-report --by-organization
-
-        # Organization report in CSV format
-        aap-bridge migration-report --by-organization --format csv
-
-        # Organization report in HTML format (styled, browser-viewable)
-        aap-bridge migration-report --by-organization --format html
-
-        # Organization report for specific resource type
-        aap-bridge migration-report --by-organization --resource-type credentials
     """
-    # Branch to organization-scoped report if requested
-    if by_organization:
-        return _generate_organization_report(
-            ctx=ctx,
-            output=output,
-            resource_type=resource_type,
-            output_format=output_format,
-        )
-
     echo_info("Generating migration report...")
 
     # Set default output path
@@ -240,7 +197,7 @@ def _identify_missing_resources(
 
     # Find resources that were transformed but not completed
     for resource in transformed_data:
-        source_id = resource.get("_source_id") or resource.get("id")
+        source_id = resource.get("id")
         if source_id and source_id not in completed_ids:
             missing.append(
                 {
@@ -251,35 +208,6 @@ def _identify_missing_resources(
             )
 
     return missing
-
-
-def _determine_transform_drop_reason(
-    export_resource: dict,
-    db_transform_records: dict[int, str],
-) -> str:
-    """Determine why a resource was dropped during the export→transform phase.
-
-    Checks DB phase='transform' records first (authoritative for transformer-specific
-    skips), then falls back to export data field checks for filter-based drops.
-    """
-    source_id = export_resource.get("_source_id") or export_resource.get("id")
-
-    if source_id in db_transform_records and db_transform_records[source_id]:
-        return db_transform_records[source_id]
-
-    if export_resource.get("pending_deletion"):
-        return "Pending deletion in source AAP"
-
-    if export_resource.get("managed"):
-        summary_fields = export_resource.get("summary_fields", {})
-        related = export_resource.get("related", {})
-        if "created_by" in summary_fields or "created_by" in related:
-            return "Custom managed credential type (not built-in)"
-
-    if export_resource.get("has_inventory_sources"):
-        return "Dynamic host (managed by inventory source)"
-
-    return "Filtered during transform (check transform logs)"
 
 
 def _format_workflow_nodes_failures(
@@ -403,7 +331,6 @@ def _analyze_resource_type(
         "failed_count": 0,
         "in_progress_count": 0,
         "pending_count": 0,
-        "pending_resources": [],
         "skipped_count": 0,
         "failed_resources": [],
         "skipped_resources": [],
@@ -413,8 +340,6 @@ def _analyze_resource_type(
         "transform_skipped": [],
         "import_failed": [],
         "import_skipped": [],
-        # Phase-specific counts for accurate discrepancy calculation
-        "import_skipped_count": 0,
     }
 
     # Count exported resources (handle both flat and directory structure)
@@ -481,68 +406,7 @@ def _analyze_resource_type(
 
     stats["transformed_count"] = len(transformed_data)
 
-    # Compute export→transform diff to find ALL dropped resources.
-    # This is a set difference — guaranteed to catch every drop regardless of
-    # which filter removed it (pending_deletion, transformer skip, etc.).
-    export_ids_map: dict[int, dict] = {}
-    for r in exported_data:
-        sid = r.get("_source_id") or r.get("id")
-        if sid is not None:
-            export_ids_map[sid] = r
-
-    xform_id_set: set[int] = set()
-    for r in transformed_data:
-        sid = r.get("_source_id") or r.get("id")
-        if sid is not None:
-            xform_id_set.add(sid)
-
-    transform_dropped_ids = set(export_ids_map.keys()) - xform_id_set
-
-    if transform_dropped_ids:
-        db_transform_records: dict[int, str] = {}
-        try:
-            with get_session(database_url) as session:
-                records = (
-                    session.query(
-                        MigrationProgress.source_id,
-                        MigrationProgress.error_message,
-                    )
-                    .filter_by(resource_type=resource_type, phase="transform")
-                    .all()
-                )
-                db_transform_records = {rec.source_id: rec.error_message for rec in records}
-        except Exception as e:
-            logger.warning(f"Failed to query transform records for {resource_type}: {e}")
-
-        for sid in sorted(transform_dropped_ids):
-            export_resource = export_ids_map[sid]
-            reason = _determine_transform_drop_reason(export_resource, db_transform_records)
-            stats["transform_skipped"].append(
-                {
-                    "source_id": sid,
-                    "source_name": export_resource.get("name"),
-                    "reason": reason,
-                    "phase": "transform",
-                }
-            )
-
-    if resource_type == "schedules":
-        pwd_placeholders = []
-        for sched in transformed_data:
-            pvars = sched.get("_password_placeholder_vars", [])
-            if pvars:
-                pwd_placeholders.append(
-                    {
-                        "source_id": sched.get("_source_id") or sched.get("id"),
-                        "name": sched.get("name", "unknown"),
-                        "password_vars": pvars,
-                    }
-                )
-        if pwd_placeholders:
-            stats["password_placeholder_schedules"] = pwd_placeholders
-
     # Query database for migration progress
-    db_source_ids: set[int] = set()
     try:
         with get_session(database_url) as session:
             # Count by status
@@ -551,7 +415,6 @@ def _analyze_resource_type(
             )
 
             for record in progress_records:
-                db_source_ids.add(record.source_id)
                 # FIX: Count "imported" only if status="completed" AND phase="import"
                 # This prevents counting resources from previous runs or transform phase
                 # Database structure:
@@ -581,14 +444,6 @@ def _analyze_resource_type(
                     stats["in_progress_count"] += 1
                 elif record.status == "pending":
                     stats["pending_count"] += 1
-                    stats["pending_resources"].append(
-                        {
-                            "source_id": record.source_id,
-                            "source_name": record.source_name,
-                            "phase": record.phase,
-                            "error": record.error_message,
-                        }
-                    )
                 elif record.status == "skipped":
                     stats["skipped_count"] += 1
                     skip_info = {
@@ -599,57 +454,27 @@ def _analyze_resource_type(
                     }
                     stats["skipped_resources"].append(skip_info)
 
-                    # Route import-phase skips for detailed reporting.
-                    # Transform-phase skips are handled by the file diff above.
-                    if record.phase == "import":
+                    # Separate by phase for detailed reporting
+                    if record.phase == "transform":
+                        stats["transform_skipped"].append(skip_info)
+                    elif record.phase == "import":
                         stats["import_skipped"].append(skip_info)
-                        stats["import_skipped_count"] += 1
 
     except Exception as e:
         logger.warning(f"Failed to query database for {resource_type}: {e}")
 
     # Calculate discrepancy (resources that are neither completed, failed, nor skipped)
-    # Use import_skipped_count (not total skipped_count) because transform-phase skips
-    # are NOT in the transformed files, so they shouldn't reduce the discrepancy.
-    # Include in_progress_count since those resources are being processed.
     stats["discrepancy"] = stats["transformed_count"] - (
-        stats["completed_count"]
-        + stats["failed_count"]
-        + stats["import_skipped_count"]
-        + stats["in_progress_count"]
+        stats["completed_count"] + stats["failed_count"] + stats["skipped_count"]
     )
 
-    # Identify specific missing resources and explain discrepancy
+    # Identify specific missing resources if there's a discrepancy
     if stats["discrepancy"] > 0:
         stats["missing_resources"] = _identify_missing_resources(
             resource_type,
             transform_dir,
             database_url,
         )
-
-        xform_ids = [r.get("_source_id") or r.get("id") for r in transformed_data]
-        unique_xform_ids = set(xform_ids)
-        duplicate_count = len(xform_ids) - len(unique_xform_ids)
-        not_in_db_count = len(unique_xform_ids - db_source_ids)
-        remaining = stats["discrepancy"] - duplicate_count - not_in_db_count
-
-        reasons = []
-        if duplicate_count > 0:
-            reasons.append(
-                f"{duplicate_count} duplicate source IDs in transformed files "
-                f"— all unique resources were processed, no resources are missing"
-            )
-        if not_in_db_count > 0:
-            reasons.append(
-                f"{not_in_db_count} resources exist in transformed files "
-                f"but have no record in the migration database"
-            )
-        if remaining > 0:
-            reasons.append(
-                f"{remaining} resources are tracked in the database "
-                f"but have not completed the import phase"
-            )
-        stats["discrepancy_reasons"] = reasons
 
     return stats
 
@@ -672,10 +497,10 @@ def _generate_markdown_report(
 
     # Summary table
     lines.append(
-        "| Resource Type | Exported | Transformed | Imported | Failed | Skipped | In Progress | Discrepancy |"
+        "| Resource Type | Exported | Transformed | Imported | Failed | Skipped | Discrepancy |"
     )
     lines.append(
-        "|---------------|----------|-------------|----------|--------|---------|-------------|-------------|"
+        "|---------------|----------|-------------|----------|--------|---------|-------------|"
     )
 
     total_exported = 0
@@ -683,7 +508,6 @@ def _generate_markdown_report(
     total_imported = 0
     total_failed = 0
     total_skipped = 0
-    total_in_progress = 0
     total_discrepancy = 0
 
     for stats in report_data:
@@ -693,17 +517,15 @@ def _generate_markdown_report(
         imported = stats["completed_count"]
         failed = stats["failed_count"]
         skipped = stats["skipped_count"]
-        in_progress = stats["in_progress_count"]
         discrepancy = stats["discrepancy"]
 
         # Format discrepancy with warning emoji if non-zero
         discrepancy_str = f"**{discrepancy}** ⚠️" if discrepancy != 0 else str(discrepancy)
         failed_str = f"**{failed}** ❌" if failed > 0 else str(failed)
         skipped_str = f"**{skipped}** ⏭️" if skipped > 0 else str(skipped)
-        in_progress_str = f"**{in_progress}** ⏳" if in_progress > 0 else str(in_progress)
 
         lines.append(
-            f"| {rtype} | {exported} | {transformed} | {imported} | {failed_str} | {skipped_str} | {in_progress_str} | {discrepancy_str} |"
+            f"| {rtype} | {exported} | {transformed} | {imported} | {failed_str} | {skipped_str} | {discrepancy_str} |"
         )
 
         total_exported += exported
@@ -711,7 +533,6 @@ def _generate_markdown_report(
         total_imported += imported
         total_failed += failed
         total_skipped += skipped
-        total_in_progress += in_progress
         total_discrepancy += discrepancy
 
     # Totals row
@@ -720,12 +541,9 @@ def _generate_markdown_report(
     )
     total_failed_str = f"**{total_failed}**" if total_failed > 0 else str(total_failed)
     total_skipped_str = f"**{total_skipped}**" if total_skipped > 0 else str(total_skipped)
-    total_in_progress_str = (
-        f"**{total_in_progress}**" if total_in_progress > 0 else str(total_in_progress)
-    )
 
     lines.append(
-        f"| **TOTAL** | **{total_exported}** | **{total_transformed}** | **{total_imported}** | {total_failed_str} | {total_skipped_str} | {total_in_progress_str} | {total_discrepancy_str} |"
+        f"| **TOTAL** | **{total_exported}** | **{total_transformed}** | **{total_imported}** | {total_failed_str} | {total_skipped_str} | {total_discrepancy_str} |"
     )
 
     lines.append("")
@@ -861,12 +679,7 @@ def _generate_markdown_report(
 
     # Detailed sections for failures, skipped, and discrepancies
     for stats in report_data:
-        if (
-            stats["failed_count"] > 0
-            or stats["skipped_count"] > 0
-            or stats["pending_count"] > 0
-            or stats["discrepancy"] != 0
-        ):
+        if stats["failed_count"] > 0 or stats["skipped_count"] > 0 or stats["discrepancy"] != 0:
             lines.append(f"## {stats['resource_type']} - Issues")
             lines.append("")
 
@@ -1056,36 +869,6 @@ def _generate_markdown_report(
                     )
                     lines.append("")
 
-            if stats["pending_count"] > 0:
-                lines.append(f"### Pending Resources ({stats['pending_count']})")
-                lines.append("")
-                lines.append(
-                    "These resources have database records but have not completed processing:"
-                )
-                lines.append("")
-                lines.append("| Source ID | Name | Phase |")
-                lines.append("|-----------|------|-------|")
-
-                display_limit = 20
-                for pending in stats["pending_resources"][:display_limit]:
-                    source_id = pending["source_id"]
-                    name = pending["source_name"] or "N/A"
-                    phase = pending["phase"] or "N/A"
-                    lines.append(f"| {source_id} | {name} | {phase} |")
-
-                if stats["pending_count"] > display_limit:
-                    lines.append(f"| ... | *({stats['pending_count'] - display_limit} more)* | |")
-
-                lines.append("")
-                lines.append("**Note:**")
-                lines.append(
-                    "- Pending resources may be from a previous migration run or require re-processing"
-                )
-                lines.append(
-                    "- Re-run import for the affected resource type to process these resources"
-                )
-                lines.append("")
-
             if stats["discrepancy"] > 0:
                 lines.append(f"### Missing Resources (Discrepancy: {stats['discrepancy']})")
                 lines.append("")
@@ -1095,12 +878,6 @@ def _generate_markdown_report(
                 lines.append(f"- **Imported:** {stats['completed_count']}")
                 lines.append(f"- **Discrepancy:** {stats['discrepancy']}")
                 lines.append("")
-
-                if stats.get("discrepancy_reasons"):
-                    lines.append("**Discrepancy Explanation:**")
-                    for reason in stats["discrepancy_reasons"]:
-                        lines.append(f"- {reason}")
-                    lines.append("")
 
                 # Calculate gaps at each phase
                 export_transform_gap = stats["exported_count"] - stats["transformed_count"]
@@ -1161,298 +938,9 @@ def _generate_markdown_report(
             lines.append("---")
             lines.append("")
 
-    # Host subscription limit advisory
-    host_stats = next((s for s in report_data if s["resource_type"] == "hosts"), None)
-    if host_stats and host_stats["failed_count"] > 0:
-        host_limit_failures = [
-            f
-            for f in host_stats["failed_resources"]
-            if f.get("error") and "maximum number of" in f["error"].lower()
-        ]
-        if host_limit_failures:
-            lines.append("## Host Subscription Limit Detected")
-            lines.append("")
-            lines.append(
-                f"**{len(host_limit_failures)} host(s)** failed due to AAP 2.6 organization host subscription limits."
-            )
-            lines.append("")
-            lines.append(
-                "**Error:** *You have already reached the maximum number of hosts allowed for your organization.*"
-            )
-            lines.append("")
-            lines.append("**Required Actions:**")
-            lines.append(
-                "1. Check AAP 2.6 subscription settings and verify the host limit per organization"
-            )
-            lines.append("2. Contact your AAP administrator to increase the host limit if needed")
-            lines.append("3. Re-run host import after the subscription limit is adjusted")
-            lines.append("")
-            lines.append(
-                "**Note:** This is an AAP 2.6 subscription/license constraint, not a migration tool issue."
-            )
-            lines.append("")
-            lines.append("---")
-            lines.append("")
-
-    # Collect all failed resources across all resource types for pattern detection
-    all_failures = []
-    for stats in report_data:
-        for f in stats.get("failed_resources", []):
-            f_with_type = dict(f, resource_type=stats["resource_type"])
-            all_failures.append(f_with_type)
-
-    # Schedule/workflow node launch config advisory
-    prompt_on_launch_failures = [
-        f
-        for f in all_failures
-        if f.get("error")
-        and (
-            "not configured to prompt on launch" in f["error"].lower()
-            or "variables are not allowed on launch" in f["error"].lower()
-            or "field is not configured to prompt" in f["error"].lower()
-        )
-    ]
-    if prompt_on_launch_failures:
-        lines.append("## Schedule/Workflow Node Launch Config Conflicts")
-        lines.append("")
-        lines.append(
-            f"**{len(prompt_on_launch_failures)} resource(s)** failed because the schedule or workflow node "
-            f"contains overrides (extra_data, inventory, limit, job_tags, etc.) that the parent "
-            f"template does not allow via its 'Prompt on Launch' settings."
-        )
-        lines.append("")
-        lines.append("### What happened")
-        lines.append("")
-        lines.append(
-            "In AAP 2.4, schedules and workflow nodes could override fields like `inventory`, `limit`, "
-            "`job_tags`, `extra_data`, `verbosity`, etc. regardless of the parent template's "
-            "'Prompt on Launch' (`ask_*_on_launch`) settings. AAP 2.6 enforces strict validation: "
-            "a schedule can only override a field if the parent template has the corresponding "
-            "`ask_*_on_launch` flag enabled (e.g., `ask_inventory_on_launch=true` for inventory overrides)."
-        )
-        lines.append("")
-        lines.append(
-            "The migration tool preserves source data exactly as-is without modification. "
-            "If a schedule had an inventory override in AAP 2.4 but the parent template did not have "
-            "`ask_inventory_on_launch=true`, AAP 2.6 rejects the import and the failure is reported "
-            "here for manual resolution."
-        )
-        lines.append("")
-        lines.append("### Affected Resources")
-        lines.append("")
-        lines.append("| Source ID | Name | Error |")
-        lines.append("|-----------|------|-------|")
-        for f in prompt_on_launch_failures:
-            source_id = f.get("source_id", "N/A")
-            name = f.get("source_name") or "N/A"
-            error = (f.get("error") or "Unknown error").replace("|", "\\|")[:200]
-            lines.append(f"| {source_id} | {name} | {error} |")
-        lines.append("")
-        lines.append("### Remediation Options")
-        lines.append("")
-        lines.append(
-            "1. **Enable 'Prompt on Launch' in AAP 2.6** (recommended): Edit the parent job template "
-            "in AAP 2.6 and enable 'Prompt on Launch' for the fields that the schedule overrides "
-            "(e.g., enable `ask_inventory_on_launch` if the schedule overrides `inventory`). "
-            "Then re-run the schedule import."
-        )
-        lines.append(
-            "2. **Create manually in AAP 2.6**: After migration completes, manually create "
-            "the failed schedules in AAP 2.6 with the correct override values."
-        )
-        lines.append(
-            "3. **Remove overrides in source AAP 2.4**: If the schedule overrides are no longer needed, "
-            "edit the schedules in AAP 2.4 to remove the conflicting fields, then re-export and re-migrate."
-        )
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
-    # Missing required survey variables advisory
-    survey_var_failures = [
-        f
-        for f in all_failures
-        if f.get("error")
-        and (
-            "variables_needed_to_start" in f["error"].lower()
-            or "value missing" in f["error"].lower()
-            or (
-                "required" in f["error"].lower()
-                and ("survey" in f["error"].lower() or "extra_data" in f["error"].lower())
-            )
-        )
-    ]
-    if survey_var_failures:
-        lines.append("## Schedule Survey Variable Compatibility (AAP 2.4 → 2.6)")
-        lines.append("")
-        lines.append(
-            f"**{len(survey_var_failures)} schedule(s)** failed due to a behavioral difference "
-            f"between AAP 2.4 and AAP 2.6 in how schedules handle survey variables."
-        )
-        lines.append("")
-        lines.append("### What happened")
-        lines.append("")
-        lines.append(
-            "In AAP, the **survey spec** (defined on the job/workflow template) and the **schedule** "
-            "are separate objects. The survey spec defines which variables exist, their types, defaults, "
-            "and whether they are required. The schedule's `extra_data` carries runtime variable overrides."
-        )
-        lines.append("")
-        lines.append(
-            "**AAP 2.4 behavior:** Schedules only needed to include variables they wanted to override. "
-            "Any required survey variable not in the schedule's `extra_data` would use the survey's "
-            "default value at runtime. A schedule could carry just 1 variable even if the survey had 10."
-        )
-        lines.append("")
-        lines.append(
-            "**AAP 2.6 behavior:** Schedules must include ALL required survey variables in `extra_data` "
-            "at creation time, even if they match the survey defaults. AAP 2.6 rejects schedule creation "
-            "with a `variables_needed_to_start` error listing each missing variable name."
-        )
-        lines.append("")
-        lines.append(
-            "The migration tool preserves schedule data exactly as-is from AAP 2.4 without modification. "
-            "The survey specs are migrated separately. The schedule failures below are caused by AAP 2.6's "
-            "stricter validation, not missing data."
-        )
-        lines.append("")
-        lines.append("### Affected Resources")
-        lines.append("")
-        lines.append("| Source ID | Name | Variables in Schedule | Missing (Required by Survey) |")
-        lines.append("|-----------|------|----------------------|------------------------------|")
-        for f in survey_var_failures:
-            source_id = f.get("source_id", "N/A")
-            name = f.get("source_name") or "N/A"
-            error = f.get("error", "")
-            missing_vars = re.findall(r"'([^']+)'\s*value missing", error)
-            if missing_vars:
-                vars_str = ", ".join(f"`{v}`" for v in missing_vars)
-            else:
-                vars_str = error.replace("|", "\\|")[:200]
-            lines.append(
-                f"| {source_id} | {name} | *(partial — see AAP 2.4 source)* | {vars_str} |"
-            )
-        lines.append("")
-        lines.append("### Remediation Options")
-        lines.append("")
-        lines.append(
-            "1. **Re-create schedules in AAP 2.6** (recommended): After migration, manually create "
-            "the failed schedules in AAP 2.6 UI. AAP 2.6 will prompt for all required survey variable "
-            "values during schedule creation."
-        )
-        lines.append(
-            "2. **Update schedules in AAP 2.4 before migration**: Edit each affected schedule in the "
-            "AAP 2.4 UI and populate all required survey variables in the schedule's extra variables. "
-            "Then re-export and re-run the migration."
-        )
-        lines.append(
-            "3. **Mark survey variables as optional**: If certain survey variables are not needed for "
-            "scheduled runs, edit the template's survey in AAP 2.6 to set those variables as "
-            "optional (`required=false`), then re-run the schedule import."
-        )
-        lines.append("")
-        lines.append(
-            "**Note:** Password-type survey variables cannot be exported from AAP 2.4 "
-            "(they appear as `$encrypted$`). Schedules referencing password survey variables "
-            "will always need those values manually re-entered in AAP 2.6 after migration."
-        )
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
-    # Password placeholder advisory for schedules
-    pwd_placeholder_schedules = []
-    for rd in report_data:
-        pwd_placeholder_schedules.extend(rd.get("password_placeholder_schedules", []))
-    if pwd_placeholder_schedules:
-        lines.append("## Schedule Password Variables — Action Required")
-        lines.append("")
-        lines.append(
-            f"**{len(pwd_placeholder_schedules)} schedule(s)** were imported with empty placeholder "
-            f"values for password-type survey variables. Password values cannot be exported from "
-            f"AAP 2.4 (they appear as `$encrypted$`), so the migration tool sets them to empty strings "
-            f"to allow schedule creation to succeed."
-        )
-        lines.append("")
-        lines.append(
-            "**After migration, update these password values** in the AAP 2.6 UI under each "
-            "schedule's extra variables."
-        )
-        lines.append("")
-        lines.append("| Source ID | Schedule Name | Password Variables |")
-        lines.append("|-----------|---------------|--------------------|")
-        for p in pwd_placeholder_schedules:
-            vars_str = ", ".join(f"`{v}`" for v in p["password_vars"])
-            lines.append(f"| {p['source_id']} | {p['name']} | {vars_str} |")
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
-    # Job template inventory requirement advisory
-    inventory_required_failures = [
-        f
-        for f in all_failures
-        if f.get("error")
-        and f.get("resource_type") == "job_templates"
-        and (
-            ("inventory" in f["error"].lower() and "null" in f["error"].lower())
-            or ("inventory" in f["error"].lower() and "required" in f["error"].lower())
-        )
-    ]
-    if inventory_required_failures:
-        lines.append("## Job Template Inventory Requirement")
-        lines.append("")
-        lines.append(
-            f"**{len(inventory_required_failures)} job template(s)** failed because they have no default "
-            f"inventory and `ask_inventory_on_launch` is not enabled."
-        )
-        lines.append("")
-        lines.append("### What happened")
-        lines.append("")
-        lines.append(
-            "In AAP 2.4, job templates could exist without a default inventory and without "
-            "`ask_inventory_on_launch` enabled — the inventory could be provided at runtime through "
-            "other mechanisms. AAP 2.6 requires every job template to either have a default inventory "
-            "assigned OR have `ask_inventory_on_launch=true` so users are prompted at launch time."
-        )
-        lines.append("")
-        lines.append(
-            "The migration tool preserves source data exactly as-is without modification. "
-            "Job templates that had no inventory and no launch prompt in AAP 2.4 are rejected by "
-            "AAP 2.6 and reported here for manual resolution."
-        )
-        lines.append("")
-        lines.append("### Affected Resources")
-        lines.append("")
-        lines.append("| Source ID | Name | Error |")
-        lines.append("|-----------|------|-------|")
-        for f in inventory_required_failures:
-            source_id = f.get("source_id", "N/A")
-            name = f.get("source_name") or "N/A"
-            error = (f.get("error") or "Unknown error").replace("|", "\\|")[:200]
-            lines.append(f"| {source_id} | {name} | {error} |")
-        lines.append("")
-        lines.append("### Remediation Options")
-        lines.append("")
-        lines.append(
-            "1. **Set a default inventory in source AAP 2.4** (recommended): Edit the job template "
-            "and assign a default inventory, then re-export and re-run the migration."
-        )
-        lines.append(
-            "2. **Enable 'Prompt on Launch' in source AAP 2.4**: Edit the job template and enable "
-            "`ask_inventory_on_launch`, then re-export and re-run the migration."
-        )
-        lines.append(
-            "3. **Fix in AAP 2.6 after migration**: Manually create the failed job templates in AAP 2.6 "
-            "with either a default inventory or `ask_inventory_on_launch` enabled."
-        )
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
     # Success message if everything is clean
     if total_failed == 0 and total_discrepancy == 0:
-        lines.append("## Migration Completed Successfully")
+        lines.append("## ✅ Migration Completed Successfully")
         lines.append("")
         lines.append(
             f"All {total_imported} resources were imported successfully with no failures or discrepancies."
@@ -1460,1267 +948,6 @@ def _generate_markdown_report(
         lines.append("")
 
     return "\n".join(lines)
-
-
-def _generate_organization_report(
-    ctx: MigrationContext,
-    output: str | None,
-    resource_type: str | None,
-    output_format: str,
-) -> None:
-    """Generate organization-scoped failure report.
-
-    Args:
-        ctx: Migration context
-        output: Output file path
-        resource_type: Optional resource type filter
-        output_format: Output format (markdown or csv)
-    """
-    echo_info("Generating organization-scoped failure report...")
-
-    # Set default output path based on format
-    if not output:
-        extension_map = {"markdown": "md", "csv": "csv", "html": "html"}
-        extension = extension_map.get(output_format, "md")
-        output = f"{ctx.config.paths.report_dir}/org-failures.{extension}"
-
-    # Ensure report directory exists
-    output_path = Path(output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        migration_state = ctx.migration_state
-        export_dir = Path(ctx.config.paths.export_dir)
-        transform_dir = Path(ctx.config.paths.transform_dir)
-
-        # Initialize organization mapper
-        echo_info("Loading organization mappings...")
-        org_mapper = OrganizationMapper(export_dir, transform_dir)
-
-        # For HTML format, query ALL resources to show complete picture
-        # For markdown/CSV, query only failures/skipped (current behavior)
-        if output_format == "html":
-            echo_info("Querying all resources for complete report...")
-            all_resources = []
-
-            with get_session(migration_state.database_url) as session:
-                query = session.query(MigrationProgress).filter(MigrationProgress.phase == "import")
-
-                # Filter by resource type if specified
-                if resource_type:
-                    query = query.filter(MigrationProgress.resource_type == resource_type)
-
-                for record in query.all():
-                    all_resources.append(
-                        {
-                            "resource_type": record.resource_type,
-                            "source_id": record.source_id,
-                            "source_name": record.source_name,
-                            "status": record.status,
-                            "error_message": record.error_message,
-                            "phase": record.phase,
-                        }
-                    )
-
-            echo_info(f"Found {len(all_resources)} total resources")
-
-            # Build export metadata lookup from export files
-            # Fields extracted per resource type:
-            #   all types: modified
-            #   job_templates, workflow_job_templates, projects, inventory_sources: last_job_run, last_job_failed, next_job_run
-            #   projects, inventory_sources: status, last_update_failed
-            export_meta_lookup: dict[tuple[str, int], dict] = {}
-            export_meta_fields = {
-                "created",
-                "modified",
-                "last_job_run",
-                "last_job_failed",
-                "next_job_run",
-                "last_update_failed",
-            }
-            resource_types_in_db = {r["resource_type"] for r in all_resources}
-
-            for rtype in resource_types_in_db:
-                export_files = []
-                export_subdir = export_dir / rtype
-                if export_subdir.exists() and export_subdir.is_dir():
-                    export_files = sorted(export_subdir.glob(f"{rtype}_*.json"))
-                else:
-                    flat_file = export_dir / f"{rtype}.json"
-                    if flat_file.exists():
-                        export_files = [flat_file]
-
-                for batch_file in export_files:
-                    try:
-                        with open(batch_file) as f:
-                            batch_data = json.load(f)
-                        if not isinstance(batch_data, list):
-                            batch_data = [batch_data]
-                        for res in batch_data:
-                            sid = res.get("_source_id") or res.get("id")
-                            if sid is not None:
-                                meta = {
-                                    k: res[k] for k in export_meta_fields if res.get(k) is not None
-                                }
-                                # Rename export "status" to "sync_status" to avoid collision with migration status
-                                if res.get("status") is not None:
-                                    meta["sync_status"] = res["status"]
-                                if meta:
-                                    export_meta_lookup[(rtype, sid)] = meta
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to read export file for metadata: {batch_file}: {e}"
-                        )
-
-            if export_meta_lookup:
-                echo_info(f"Loaded export metadata for {len(export_meta_lookup)} resources")
-
-            # Merge export metadata into resource records
-            for resource in all_resources:
-                key = (resource["resource_type"], resource["source_id"])
-                if key in export_meta_lookup:
-                    resource.update(export_meta_lookup[key])
-                # Truncate long error messages for HTML report size
-                err = resource.get("error_message")
-                if err and len(err) > 500:
-                    resource["error_message"] = err[:500] + "..."
-
-            # Build organization summary with ALL resources
-            echo_info("Mapping resources to organizations...")
-            org_summary = org_mapper.build_org_summary(all_resources)
-
-            # Stamp org_name on each resource for global search
-            for org_name_key, summary in org_summary.items():
-                for resource in summary["resources"]:
-                    resource["org_name"] = org_name_key
-
-            # Generate HTML with complete data
-            report_content = _format_org_report_html(org_summary, migration_state)
-
-        else:
-            # For markdown/CSV: query only failed and skipped resources
-            echo_info("Querying failed and skipped resources...")
-            failures = []
-
-            with get_session(migration_state.database_url) as session:
-                query = session.query(MigrationProgress).filter(
-                    MigrationProgress.status.in_(["failed", "skipped"])
-                )
-
-                # Filter by resource type if specified
-                if resource_type:
-                    query = query.filter(MigrationProgress.resource_type == resource_type)
-
-                for record in query.all():
-                    failures.append(
-                        {
-                            "resource_type": record.resource_type,
-                            "source_id": record.source_id,
-                            "source_name": record.source_name,
-                            "status": record.status,
-                            "error_message": record.error_message,
-                            "phase": record.phase,
-                        }
-                    )
-
-            if not failures:
-                echo_success("No failures or skipped resources found!")
-                return
-
-            echo_info(f"Found {len(failures)} failed/skipped resources")
-
-            # Build organization summary
-            echo_info("Mapping resources to organizations...")
-            org_summary = org_mapper.build_org_summary(failures)
-
-            # Generate report
-            if output_format == "markdown":
-                report_content = _format_org_report_markdown(org_summary, migration_state)
-            else:  # csv
-                report_content = _format_org_report_csv(org_summary)
-
-        # Write report
-        output_path.write_text(report_content)
-        echo_success(f"Organization report generated: {output}")
-
-        # Print summary
-        _print_org_summary(org_summary)
-
-    except Exception as e:
-        echo_error(f"Failed to generate organization report: {e}")
-        logger.error("Organization report generation failed", error=str(e), exc_info=True)
-        raise click.ClickException(str(e)) from e
-
-
-def _format_org_report_markdown(org_summary: dict, migration_state) -> str:
-    """Format organization summary as markdown."""
-    lines = [
-        "# AAP Migration - Organization Failure Report",
-        "",
-        f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
-        f"**Migration ID:** {migration_state.migration_id}",
-        "",
-        "---",
-        "",
-        "## Summary by Organization",
-        "",
-    ]
-
-    # Summary table
-    lines.append("| Organization | Failed | Skipped | Total | Resource Types Affected |")
-    lines.append("|--------------|--------|---------|-------|------------------------|")
-
-    # Sort by total (descending)
-    sorted_orgs = sorted(
-        org_summary.items(),
-        key=lambda x: x[1]["total"],
-        reverse=True,
-    )
-
-    total_failed = 0
-    total_skipped = 0
-    total_all = 0
-
-    for org_name, summary in sorted_orgs:
-        failed = summary["failed"]
-        skipped = summary["skipped"]
-        total = summary["total"]
-        resource_types = ", ".join(sorted(summary["resource_types"]))
-
-        failed_str = f"**{failed}**" if failed > 0 else str(failed)
-        skipped_str = f"**{skipped}**" if skipped > 0 else str(skipped)
-
-        lines.append(f"| {org_name} | {failed_str} | {skipped_str} | {total} | {resource_types} |")
-
-        total_failed += failed
-        total_skipped += skipped
-        total_all += total
-
-    # Totals row
-    lines.append(f"| **TOTAL** | **{total_failed}** | **{total_skipped}** | **{total_all}** | - |")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # Detailed sections per organization
-    for org_name, summary in sorted_orgs:
-        lines.append(f"## {org_name}")
-        lines.append("")
-        lines.append("**Statistics:**")
-        lines.append(f"- Failed: {summary['failed']}")
-        lines.append(f"- Skipped: {summary['skipped']}")
-        lines.append(f"- Total: {summary['total']}")
-        lines.append(f"- Resource Types: {', '.join(sorted(summary['resource_types']))}")
-        lines.append("")
-
-        # Group by resource type
-        by_type = {}
-        for resource in summary["resources"]:
-            rtype = resource["resource_type"]
-            if rtype not in by_type:
-                by_type[rtype] = []
-            by_type[rtype].append(resource)
-
-        for rtype in sorted(by_type.keys()):
-            resources = by_type[rtype]
-            lines.append(f"### {rtype} ({len(resources)})")
-            lines.append("")
-            lines.append("| Source ID | Name | Status | Error/Reason |")
-            lines.append("|-----------|------|--------|--------------|")
-
-            for resource in resources:
-                source_id = resource["source_id"]
-                source_name = resource.get("source_name", "N/A")
-                status = resource["status"]
-                error = resource.get("error_message", "No error message")
-                # Escape pipe characters
-                error = error.replace("|", "\\|")
-                # Truncate long errors
-                if len(error) > 100:
-                    error = error[:97] + "..."
-
-                lines.append(f"| {source_id} | {source_name} | {status} | {error} |")
-
-            lines.append("")
-
-        lines.append("---")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def _format_org_report_csv(org_summary: dict) -> str:
-    """Format organization summary as CSV."""
-    import csv
-    from io import StringIO
-
-    output = StringIO()
-    writer = csv.writer(output)
-
-    # Header
-    writer.writerow(
-        [
-            "Organization",
-            "Resource Type",
-            "Source ID",
-            "Source Name",
-            "Status",
-            "Error/Reason",
-        ]
-    )
-
-    # Sort organizations by total (descending)
-    sorted_orgs = sorted(
-        org_summary.items(),
-        key=lambda x: x[1]["total"],
-        reverse=True,
-    )
-
-    # Write data
-    for org_name, summary in sorted_orgs:
-        for resource in summary["resources"]:
-            writer.writerow(
-                [
-                    org_name,
-                    resource["resource_type"],
-                    resource["source_id"],
-                    resource.get("source_name", "N/A"),
-                    resource["status"],
-                    resource.get("error_message", "No error message"),
-                ]
-            )
-
-    return output.getvalue()
-
-
-def _format_org_report_html(org_summary: dict, migration_state) -> str:
-    """Format organization summary as interactive HTML with tabs and filtering.
-
-    Creates a tabbed interface with:
-    - Summary tab: All orgs with success rates
-    - Failures tab: Failed + skipped resources
-    - Successful tab: Completed resources
-    - Complete tab: All resources
-
-    Designed to handle 1000+ organizations and 2M+ objects efficiently by:
-    - Loading data once as embedded JSON
-    - Using JavaScript for client-side filtering
-    - Only rendering visible content
-    - Pagination for large result sets
-    """
-    import json
-    from html import escape
-
-    # Prepare data for JSON embedding
-    json_data = {
-        "metadata": {
-            "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "migration_id": str(migration_state.migration_id),
-        },
-        "organizations": {},
-    }
-
-    # Convert org_summary to JSON-friendly format
-    # Now includes completed resources for success tracking
-    for org_name, summary in org_summary.items():
-        # Count by status
-        completed = sum(1 for r in summary["resources"] if r["status"] == "completed")
-        failed = sum(1 for r in summary["resources"] if r["status"] == "failed")
-        skipped = sum(1 for r in summary["resources"] if r["status"] == "skipped")
-        pending = sum(1 for r in summary["resources"] if r["status"] == "pending")
-
-        json_data["organizations"][org_name] = {
-            "completed": completed,
-            "failed": failed,
-            "skipped": skipped,
-            "pending": pending,
-            "total": summary["total"],
-            "resource_types": sorted(summary["resource_types"]),
-            "resources": summary["resources"],
-        }
-
-    # Generate tabbed interactive HTML app
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AAP Migration - Organization Report</title>
-    <style>
-        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 20px;
-            min-height: 100vh;
-        }}
-        .container {{
-            max-width: 1600px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-            overflow: hidden;
-        }}
-        .header {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            text-align: center;
-        }}
-        .header h1 {{ font-size: 2em; margin-bottom: 10px; }}
-        .header .metadata {{ opacity: 0.9; font-size: 0.9em; }}
-        .tabs {{
-            display: flex;
-            background: #f8f9fa;
-            border-bottom: 3px solid #e9ecef;
-            overflow-x: auto;
-        }}
-        .tab {{
-            padding: 15px 30px;
-            cursor: pointer;
-            border: none;
-            background: transparent;
-            font-size: 1em;
-            font-weight: 600;
-            color: #6c757d;
-            transition: all 0.3s;
-            border-bottom: 3px solid transparent;
-            margin-bottom: -3px;
-            white-space: nowrap;
-        }}
-        .tab:hover {{ background: #e9ecef; color: #495057; }}
-        .tab.active {{
-            color: #667eea;
-            border-bottom-color: #667eea;
-            background: white;
-        }}
-        .controls {{
-            background: #fff;
-            padding: 20px 30px;
-            border-bottom: 2px solid #e9ecef;
-            display: flex;
-            gap: 15px;
-            flex-wrap: wrap;
-            align-items: center;
-        }}
-        .controls.hidden {{ display: none; }}
-        .control-group {{
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-        }}
-        .control-group label {{
-            font-size: 0.85em;
-            font-weight: 600;
-            color: #495057;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }}
-        select, input[type="text"] {{
-            padding: 10px 15px;
-            border: 2px solid #dee2e6;
-            border-radius: 6px;
-            font-size: 14px;
-            min-width: 200px;
-            transition: all 0.3s;
-        }}
-        select:focus, input[type="text"]:focus {{
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }}
-        .stats {{
-            padding: 20px 30px;
-            background: #fff;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 15px;
-        }}
-        .stat-card {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px;
-            border-radius: 8px;
-            text-align: center;
-        }}
-        .stat-card.success {{ background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }}
-        .stat-card.failed {{ background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }}
-        .stat-card.skipped {{ background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%); }}
-        .stat-card .value {{ font-size: 2.5em; font-weight: bold; margin-bottom: 5px; }}
-        .stat-card .label {{ font-size: 0.9em; opacity: 0.9; }}
-        .content {{ padding: 30px; min-height: 400px; }}
-        .content.hidden {{ display: none; }}
-        .resource-type-section {{ overflow-x: auto; }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 20px;
-            font-size: 0.9em;
-        }}
-        .resource-type-section table {{ table-layout: fixed; }}
-        th {{
-            background: #667eea;
-            color: white;
-            padding: 12px 8px;
-            text-align: left;
-            font-weight: 600;
-            position: sticky;
-            top: 0;
-            white-space: nowrap;
-        }}
-        td {{
-            padding: 10px 8px;
-            border-bottom: 1px solid #e9ecef;
-        }}
-        .resource-type-section td {{
-            word-break: break-word;
-            font-size: 0.85em;
-        }}
-        .resource-type-section th:nth-child(1) {{ width: 70px; }}
-        .resource-type-section th:nth-child(2) {{ width: 20%; }}
-        .resource-type-section th:nth-child(3) {{ width: 11%; }}
-        .resource-type-section th:nth-child(4) {{ width: 65px; }}
-        .resource-type-section th:nth-child(5) {{ width: 110px; }}
-        .resource-type-section th:nth-child(6) {{ width: 80px; }}
-        .resource-type-section th:nth-child(7), .resource-type-section th:nth-child(8), .resource-type-section th:nth-child(9) {{ width: 95px; }}
-        .resource-type-section th:last-child {{ width: auto; }}
-        .resource-type-section th {{
-            position: relative;
-        }}
-        .col-resize-handle {{
-            position: absolute;
-            right: 0;
-            top: 0;
-            bottom: 0;
-            width: 5px;
-            cursor: col-resize;
-            background: transparent;
-        }}
-        .col-resize-handle:hover, .col-resize-handle.active {{
-            background: rgba(255,255,255,0.4);
-        }}
-        body.col-resizing {{
-            cursor: col-resize !important;
-            user-select: none;
-        }}
-        body.col-resizing * {{
-            cursor: col-resize !important;
-        }}
-        tr:hover {{ background: #f8f9fa; }}
-        tr.clickable {{ cursor: pointer; }}
-        .status-completed {{
-            background: #38ef7d;
-            color: white;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 0.85em;
-            font-weight: 600;
-        }}
-        .status-failed {{
-            background: #f5576c;
-            color: white;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 0.85em;
-            font-weight: 600;
-        }}
-        .status-skipped {{
-            background: #fcb69f;
-            color: #333;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 0.85em;
-            font-weight: 600;
-        }}
-        .success-rate {{
-            font-weight: 600;
-            padding: 4px 8px;
-            border-radius: 4px;
-        }}
-        .success-rate.high {{ background: #d4edda; color: #155724; }}
-        .success-rate.medium {{ background: #fff3cd; color: #856404; }}
-        .success-rate.low {{ background: #f8d7da; color: #721c24; }}
-        .pagination {{
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 10px;
-            padding: 20px;
-            margin-top: 20px;
-        }}
-        .pagination.hidden {{ display: none; }}
-        .pagination button {{
-            padding: 8px 16px;
-            border: 2px solid #667eea;
-            background: white;
-            color: #667eea;
-            border-radius: 6px;
-            cursor: pointer;
-            font-weight: 600;
-            transition: all 0.3s;
-        }}
-        .pagination button:hover:not(:disabled) {{
-            background: #667eea;
-            color: white;
-        }}
-        .pagination button:disabled {{
-            opacity: 0.3;
-            cursor: not-allowed;
-        }}
-        .pagination .page-info {{
-            padding: 0 15px;
-            font-weight: 600;
-            color: #495057;
-        }}
-        .resource-type-section {{
-            margin-bottom: 30px;
-        }}
-        .resource-type-section h3 {{
-            color: #495057;
-            padding: 10px 0;
-            border-bottom: 2px solid #e9ecef;
-            margin-bottom: 15px;
-        }}
-        .name-cell {{
-            word-break: break-word;
-        }}
-        .error-cell {{
-            max-width: 400px;
-            word-wrap: break-word;
-            font-size: 0.85em;
-            color: #495057;
-        }}
-        .last-run-cell {{
-            font-size: 0.85em;
-            white-space: nowrap;
-        }}
-        .last-run-dot {{
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            margin-right: 6px;
-            vertical-align: middle;
-        }}
-        .last-run-dot.success {{ background: #38ef7d; }}
-        .last-run-dot.failed {{ background: #f5576c; }}
-        .last-run-dot.unknown {{ background: #dee2e6; }}
-        .summary-search {{
-            padding: 15px 30px;
-            background: #f8f9fa;
-            border-bottom: 1px solid #e9ecef;
-        }}
-        .summary-search input {{
-            padding: 10px 15px;
-            border: 2px solid #dee2e6;
-            border-radius: 6px;
-            font-size: 14px;
-            width: 100%;
-            max-width: 400px;
-            transition: all 0.3s;
-        }}
-        .summary-search input:focus {{
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }}
-        .no-data {{
-            text-align: center;
-            padding: 60px 20px;
-            color: #6c757d;
-        }}
-        .status-pending {{
-            background: #007bff;
-            color: white;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 0.85em;
-            font-weight: 600;
-        }}
-        .stat-card.pending {{ background: linear-gradient(135deg, #667eea 0%, #4a6cf7 100%); }}
-        .btn-toggle {{
-            padding: 8px 14px;
-            border: 2px solid #667eea;
-            background: white;
-            color: #667eea;
-            border-radius: 6px;
-            cursor: pointer;
-            font-weight: 600;
-            font-size: 13px;
-            transition: all 0.3s;
-            white-space: nowrap;
-        }}
-        .btn-toggle:hover {{ background: #667eea; color: white; }}
-        .btn-toggle.active {{ background: #667eea; color: white; }}
-        th.sortable {{ cursor: pointer; user-select: none; }}
-        th.sortable:hover {{ background: #5a6fd6; }}
-        th .sort-arrow {{ margin-left: 4px; font-size: 0.8em; }}
-        .group-row {{ cursor: pointer; }}
-        .group-row:hover {{ background: #e9ecef !important; }}
-        .group-row td {{ font-weight: 600; }}
-        .group-count {{ background: #667eea; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.85em; }}
-    </style>
-</head>
-<body>
-<div class="container">
-    <div class="header">
-        <h1>📊 AAP Migration - Organization Report</h1>
-        <div class="metadata">
-            Generated: {escape(json_data["metadata"]["generated"])} |
-            Migration ID: {escape(json_data["metadata"]["migration_id"])}
-        </div>
-    </div>
-    <div class="tabs">
-        <button class="tab active" data-tab="summary">📊 Summary</button>
-        <button class="tab" data-tab="failures">❌ Failures</button>
-        <button class="tab" data-tab="pending">⏳ Pending</button>
-        <button class="tab" data-tab="successful">✅ Successful</button>
-        <button class="tab" data-tab="complete">📋 Complete</button>
-    </div>
-    <div class="controls hidden" id="controls">
-        <div class="control-group">
-            <label for="orgSelect">Organization</label>
-            <select id="orgSelect">
-                <option value="">All Organizations</option>
-            </select>
-        </div>
-        <div class="control-group">
-            <label for="resourceTypeFilter">Resource Type</label>
-            <select id="resourceTypeFilter">
-                <option value="">All Types</option>
-            </select>
-        </div>
-        <div class="control-group">
-            <label for="searchInput">Search</label>
-            <input type="text" id="searchInput" placeholder="Search by name, ID, org, or error...">
-        </div>
-        <div class="control-group" style="justify-content:flex-end;">
-            <label>&nbsp;</label>
-            <div style="display:flex;gap:8px;">
-                <button id="groupToggle" class="btn-toggle" title="Group failures by error pattern">Group Errors</button>
-                <button id="csvDownload" class="btn-toggle" title="Download filtered results as CSV">⬇ CSV</button>
-            </div>
-        </div>
-    </div>
-    <div class="stats" id="statsContainer"></div>
-    <div class="summary-search hidden" id="summarySearch">
-        <input type="text" id="summarySearchInput" placeholder="Search organizations...">
-    </div>
-    <div class="content" id="summaryContent"></div>
-    <div class="content hidden" id="failuresContent"></div>
-    <div class="content hidden" id="pendingContent"></div>
-    <div class="content hidden" id="successfulContent"></div>
-    <div class="content hidden" id="completeContent"></div>
-    <div class="pagination hidden" id="paginationContainer">
-        <button id="prevPage">← Previous</button>
-        <span class="page-info" id="pageInfo">Page 1 of 1</span>
-        <button id="nextPage">Next →</button>
-    </div>
-</div>
-<script>
-const DATA = {json.dumps(json_data, separators=(",", ":"))};
-let currentTab = 'summary';
-let currentOrg = '';
-let currentPage = 1;
-const itemsPerPage = 100;
-let filteredData = [];
-let _allResourcesCache = null;
-let _searchDebounceTimer = null;
-let viewMode = 'flat';
-let currentSort = {{ column: '', direction: 'asc' }};
-
-function getAllResources() {{
-    if (!_allResourcesCache) {{
-        _allResourcesCache = [];
-        Object.values(DATA.organizations).forEach(org => {{
-            org.resources.forEach(r => _allResourcesCache.push(r));
-        }});
-    }}
-    return _allResourcesCache;
-}}
-
-function getAllResourceTypes() {{
-    const types = new Set();
-    Object.values(DATA.organizations).forEach(org => {{
-        org.resource_types.forEach(t => types.add(t));
-    }});
-    return Array.from(types).sort();
-}}
-
-function formatTs(ts) {{
-    if (!ts) return '<span style="color:#adb5bd;">—</span>';
-    return new Date(ts).toISOString().replace('T', ' ').substring(0, 16);
-}}
-
-function formatLastRun(resource) {{
-    const ts = resource.last_job_run;
-    if (!ts) return '<span class="last-run-cell" style="color:#adb5bd;">—</span>';
-    const dateStr = formatTs(ts);
-    const failed = resource.last_job_failed;
-    let dotClass = 'unknown';
-    if (failed === true) dotClass = 'failed';
-    else if (failed === false) dotClass = 'success';
-    return `<span class="last-run-cell"><span class="last-run-dot ${{dotClass}}"></span>${{dateStr}}</span>`;
-}}
-
-function formatSyncStatus(resource) {{
-    const st = resource.sync_status;
-    if (!st && resource.last_update_failed === undefined) return '<span style="color:#adb5bd;">—</span>';
-    let color = '#adb5bd';
-    if (st === 'successful') color = '#28a745';
-    else if (st === 'failed' || st === 'error') color = '#dc3545';
-    else if (st === 'never updated') color = '#6c757d';
-    else if (st === 'running') color = '#007bff';
-    else if (st === 'canceled') color = '#ffc107';
-    const label = st || (resource.last_update_failed ? 'failed' : 'ok');
-    return `<span style="color:${{color}};font-weight:600;">${{label}}</span>`;
-}}
-
-function getErrorPattern(msg) {{
-    if (!msg) return '(no message)';
-    return msg.replace(/'[^']*'/g, "'...'").replace(/\\b\\d{{4,}}\\b/g, 'NNN').substring(0, 100);
-}}
-
-function applySortToFiltered() {{
-    if (!currentSort.column) return;
-    const col = currentSort.column;
-    const dir = currentSort.direction === 'asc' ? 1 : -1;
-    filteredData.sort((a, b) => {{
-        let va = a[col], vb = b[col];
-        if (va == null && vb == null) return 0;
-        if (va == null) return 1;
-        if (vb == null) return -1;
-        if (typeof va === 'string') va = va.toLowerCase();
-        if (typeof vb === 'string') vb = vb.toLowerCase();
-        if (va < vb) return -dir;
-        if (va > vb) return dir;
-        return 0;
-    }});
-}}
-
-function sortData(column) {{
-    if (currentSort.column === column) {{
-        currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
-    }} else {{
-        currentSort.column = column;
-        currentSort.direction = 'asc';
-    }}
-    applySortToFiltered();
-    currentPage = 1;
-    renderPage();
-}}
-
-function downloadCSV() {{
-    if (!filteredData.length) return;
-    const cols = ['source_id','source_name','org_name','resource_type','status','last_job_run','last_job_failed','sync_status','modified','created','next_job_run','error_message'];
-    const headers = ['Source ID','Name','Organization','Resource Type','Status','Last Run','Last Run Failed','Sync Status','Modified','Created','Next Run','Error/Reason'];
-    let csv = headers.join(',') + '\\n';
-    filteredData.forEach(r => {{
-        csv += cols.map(c => {{
-            let v = r[c] != null ? String(r[c]) : '';
-            if (v.includes(',') || v.includes('"') || v.includes('\\n')) v = '"' + v.replace(/"/g, '""') + '"';
-            return v;
-        }}).join(',') + '\\n';
-    }});
-    const blob = new Blob([csv], {{type: 'text/csv'}});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `migration-report-${{currentTab}}-${{new Date().toISOString().substring(0,10)}}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-}}
-
-function renderGroupedView() {{
-    const contentId = `${{currentTab}}Content`;
-    if (!filteredData.length) {{
-        document.getElementById(contentId).innerHTML = '<div class="no-data"><p>No resources match the current filters</p></div>';
-        document.getElementById('paginationContainer').classList.add('hidden');
-        return;
-    }}
-    const groups = {{}};
-    filteredData.forEach(r => {{
-        const pattern = getErrorPattern(r.error_message);
-        if (!groups[pattern]) groups[pattern] = {{ count: 0, types: new Set(), orgs: new Set(), sample: r.error_message }};
-        groups[pattern].count++;
-        groups[pattern].types.add(r.resource_type);
-        if (r.org_name) groups[pattern].orgs.add(r.org_name);
-    }});
-    const sorted = Object.entries(groups).sort((a, b) => b[1].count - a[1].count);
-    let html = `<div class="resource-type-section"><h3>Error Patterns (${{sorted.length}} patterns, ${{filteredData.length}} resources)</h3>`;
-    html += '<table><thead><tr><th>Error Pattern</th><th>Count</th><th>Resource Types</th><th>Orgs Affected</th></tr></thead><tbody>';
-    sorted.forEach(([pattern, data]) => {{
-        const sample = data.sample || '';
-        const searchVal = sample.substring(0, 60).replace(/"/g, '&quot;');
-        html += `<tr class="group-row" onclick="applyPatternFilter('${{searchVal.replace(/'/g, "\\\\'")}}')">
-            <td class="error-cell" style="max-width:500px;">${{escapeHtml(pattern)}}</td>
-            <td><span class="group-count">${{data.count}}</span></td>
-            <td style="font-size:0.85em;">${{Array.from(data.types).sort().join(', ')}}</td>
-            <td style="font-size:0.85em;">${{data.orgs.size}} org${{data.orgs.size !== 1 ? 's' : ''}}</td>
-        </tr>`;
-    }});
-    html += '</tbody></table></div>';
-    document.getElementById(contentId).innerHTML = html;
-    document.getElementById('paginationContainer').classList.add('hidden');
-}}
-
-function applyPatternFilter(text) {{
-    viewMode = 'flat';
-    document.getElementById('groupToggle').classList.remove('active');
-    document.getElementById('searchInput').value = text;
-    currentPage = 1;
-    renderDetailTab();
-}}
-
-function init() {{
-    populateOrgDropdown();
-    renderSummaryTab();
-    attachEventListeners();
-}}
-
-function populateOrgDropdown() {{
-    const select = document.getElementById('orgSelect');
-    const orgs = Object.keys(DATA.organizations).sort((a, b) => DATA.organizations[b].total - DATA.organizations[a].total);
-    orgs.forEach(org => {{
-        const option = document.createElement('option');
-        option.value = org;
-        const stats = DATA.organizations[org];
-        const successRate = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0;
-        option.textContent = `${{org}} (Success: ${{successRate}}%, Total: ${{stats.total}})`;
-        select.appendChild(option);
-    }});
-}}
-
-function switchTab(tabName) {{
-    currentTab = tabName;
-    currentPage = 1;
-    document.querySelectorAll('.tab').forEach(tab => {{
-        tab.classList.toggle('active', tab.dataset.tab === tabName);
-    }});
-    document.querySelectorAll('.content').forEach(content => content.classList.add('hidden'));
-    const controls = document.getElementById('controls');
-    const summarySearch = document.getElementById('summarySearch');
-    if (tabName === 'summary') {{
-        controls.classList.add('hidden');
-        summarySearch.classList.remove('hidden');
-        document.getElementById('summaryContent').classList.remove('hidden');
-        renderSummaryTab();
-    }} else {{
-        controls.classList.remove('hidden');
-        summarySearch.classList.add('hidden');
-        document.getElementById(`${{tabName}}Content`).classList.remove('hidden');
-        populateResourceTypeFilter();
-        renderDetailTab();
-    }}
-}}
-
-function renderSummaryTab() {{
-    const searchTerm = (document.getElementById('summarySearchInput').value || '').toLowerCase();
-    const orgs = Object.entries(DATA.organizations).filter(([name]) => {{
-        if (!searchTerm) return true;
-        return name.toLowerCase().includes(searchTerm);
-    }});
-    const totalOrgs = orgs.length;
-    const totalCompleted = orgs.reduce((sum, [_, data]) => sum + data.completed, 0);
-    const totalFailed = orgs.reduce((sum, [_, data]) => sum + data.failed, 0);
-    const totalSkipped = orgs.reduce((sum, [_, data]) => sum + data.skipped, 0);
-    const totalPending = orgs.reduce((sum, [_, data]) => sum + (data.pending || 0), 0);
-    const totalAll = orgs.reduce((sum, [_, data]) => sum + data.total, 0);
-    const overallSuccessRate = totalAll > 0 ? Math.round((totalCompleted / totalAll) * 100) : 0;
-    document.getElementById('statsContainer').innerHTML = `
-        <div class="stat-card">
-            <div class="value">${{totalOrgs}}</div>
-            <div class="label">Organizations</div>
-        </div>
-        <div class="stat-card success">
-            <div class="value">${{totalCompleted}}</div>
-            <div class="label">Successful</div>
-        </div>
-        <div class="stat-card failed">
-            <div class="value">${{totalFailed}}</div>
-            <div class="label">Failed</div>
-        </div>
-        <div class="stat-card skipped">
-            <div class="value">${{totalSkipped}}</div>
-            <div class="label">Skipped</div>
-        </div>
-        ${{totalPending > 0 ? `<div class="stat-card pending"><div class="value">${{totalPending}}</div><div class="label">Pending</div></div>` : ''}}
-        <div class="stat-card">
-            <div class="value">${{overallSuccessRate}}%</div>
-            <div class="label">Success Rate</div>
-        </div>
-    `;
-    const sortedOrgs = orgs.sort((a, b) => b[1].total - a[1].total);
-    let tableHtml = '<table><thead><tr><th>Organization</th><th>Total</th><th>Successful</th><th>Failed</th><th>Skipped</th><th>Pending</th><th>Success Rate</th><th>Resource Types</th></tr></thead><tbody>';
-    sortedOrgs.forEach(([orgName, stats]) => {{
-        const successRate = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0;
-        let rateClass = successRate < 50 ? 'low' : (successRate < 80 ? 'medium' : 'high');
-        tableHtml += `<tr class="clickable" onclick="goToOrg('${{orgName.replace(/'/g, "\\'")}}')" title="Click to view details">
-            <td><strong>${{escapeHtml(orgName)}}</strong></td>
-            <td>${{stats.total}}</td>
-            <td><span class="status-completed">${{stats.completed}}</span></td>
-            <td><span class="status-failed">${{stats.failed}}</span></td>
-            <td><span class="status-skipped">${{stats.skipped}}</span></td>
-            <td>${{(stats.pending || 0) > 0 ? '<span class="status-pending">' + (stats.pending || 0) + '</span>' : '0'}}</td>
-            <td><span class="success-rate ${{rateClass}}">${{successRate}}%</span></td>
-            <td style="font-size: 0.85em;">${{stats.resource_types.join(', ')}}</td>
-        </tr>`;
-    }});
-    tableHtml += '</tbody></table>';
-    document.getElementById('summaryContent').innerHTML = tableHtml;
-    document.getElementById('paginationContainer').classList.add('hidden');
-}}
-
-function goToOrg(orgName) {{
-    document.getElementById('orgSelect').value = orgName;
-    currentOrg = orgName;
-    populateResourceTypeFilter();
-    switchTab('failures');
-}}
-
-function populateResourceTypeFilter() {{
-    const resourceTypeSelect = document.getElementById('resourceTypeFilter');
-    const currentValue = resourceTypeSelect.value;
-    resourceTypeSelect.innerHTML = '<option value="">All Types</option>';
-    let types;
-    if (currentOrg) {{
-        types = DATA.organizations[currentOrg].resource_types;
-    }} else {{
-        types = getAllResourceTypes();
-    }}
-    types.forEach(type => {{
-        const option = document.createElement('option');
-        option.value = type;
-        option.textContent = type;
-        resourceTypeSelect.appendChild(option);
-    }});
-    if (currentValue && types.includes(currentValue)) {{
-        resourceTypeSelect.value = currentValue;
-    }}
-}}
-
-function renderDetailTab() {{
-    let resources;
-    if (currentOrg) {{
-        resources = DATA.organizations[currentOrg].resources;
-    }} else {{
-        resources = getAllResources();
-    }}
-    const resourceTypeFilter = document.getElementById('resourceTypeFilter').value;
-    const searchTerm = document.getElementById('searchInput').value.toLowerCase();
-    let statusFilter = [];
-    if (currentTab === 'failures') statusFilter = ['failed', 'skipped'];
-    else if (currentTab === 'pending') statusFilter = ['pending'];
-    else if (currentTab === 'successful') statusFilter = ['completed'];
-    else statusFilter = ['completed', 'failed', 'skipped', 'pending'];
-    filteredData = resources.filter(resource => {{
-        if (!statusFilter.includes(resource.status)) return false;
-        if (resourceTypeFilter && resource.resource_type !== resourceTypeFilter) return false;
-        if (searchTerm) {{
-            const matchName = resource.source_name && resource.source_name.toLowerCase().includes(searchTerm);
-            const matchId = resource.source_id && resource.source_id.toString().includes(searchTerm);
-            const matchError = resource.error_message && resource.error_message.toLowerCase().includes(searchTerm);
-            const matchOrg = resource.org_name && resource.org_name.toLowerCase().includes(searchTerm);
-            const matchLastRun = resource.last_job_run && resource.last_job_run.toLowerCase().includes(searchTerm);
-            const matchSync = resource.sync_status && resource.sync_status.toLowerCase().includes(searchTerm);
-            const matchModified = resource.modified && resource.modified.toLowerCase().includes(searchTerm);
-            if (!matchName && !matchId && !matchError && !matchOrg && !matchLastRun && !matchSync && !matchModified) return false;
-        }}
-        return true;
-    }});
-    const completed = filteredData.filter(r => r.status === 'completed').length;
-    const failed = filteredData.filter(r => r.status === 'failed').length;
-    const skipped = filteredData.filter(r => r.status === 'skipped').length;
-    const pending = filteredData.filter(r => r.status === 'pending').length;
-    const successRate = filteredData.length > 0 ? Math.round((completed / filteredData.length) * 100) : 0;
-    const orgLabel = currentOrg ? escapeHtml(currentOrg) : 'All Organizations';
-    document.getElementById('statsContainer').innerHTML = `
-        <div class="stat-card"><div class="value" style="font-size: 1.8em;">${{orgLabel}}</div><div class="label">${{currentOrg ? 'Selected Organization' : filteredData.length + ' matching resources'}}</div></div>
-        <div class="stat-card success"><div class="value">${{completed}}</div><div class="label">Successful</div></div>
-        <div class="stat-card failed"><div class="value">${{failed}}</div><div class="label">Failed</div></div>
-        <div class="stat-card skipped"><div class="value">${{skipped}}</div><div class="label">Skipped</div></div>
-        ${{pending > 0 ? `<div class="stat-card pending"><div class="value">${{pending}}</div><div class="label">Pending</div></div>` : ''}}
-        <div class="stat-card"><div class="value">${{successRate}}%</div><div class="label">Success Rate</div></div>
-    `;
-    applySortToFiltered();
-    if (viewMode === 'grouped' && (currentTab === 'failures' || currentTab === 'complete')) {{
-        renderGroupedView();
-    }} else {{
-        renderPage();
-    }}
-}}
-
-function renderPage() {{
-    const start = (currentPage - 1) * itemsPerPage;
-    const end = start + itemsPerPage;
-    const pageData = filteredData.slice(start, end);
-    const contentId = `${{currentTab}}Content`;
-    if (pageData.length === 0) {{
-        document.getElementById(contentId).innerHTML = '<div class="no-data"><p>No resources match the current filters</p></div>';
-        document.getElementById('paginationContainer').classList.add('hidden');
-        return;
-    }}
-    const showError = currentTab !== 'successful';
-    const byType = {{}};
-    pageData.forEach(resource => {{
-        if (!byType[resource.resource_type]) byType[resource.resource_type] = [];
-        byType[resource.resource_type].push(resource);
-    }});
-    let html = '';
-    Object.keys(byType).sort().forEach(resourceType => {{
-        const resources = byType[resourceType];
-        const sa = (col) => currentSort.column === col ? (currentSort.direction === 'asc' ? ' ▲' : ' ▼') : '';
-        html += `<div class="resource-type-section"><h3>${{resourceType}} (${{resources.length}})</h3><table><thead><tr>
-            <th class="sortable" onclick="sortData('source_id')">Source ID${{sa('source_id')}}</th>
-            <th class="sortable" onclick="sortData('source_name')">Name${{sa('source_name')}}</th>
-            <th class="sortable" onclick="sortData('org_name')">Organization${{sa('org_name')}}</th>
-            <th class="sortable" onclick="sortData('status')">Status${{sa('status')}}</th>
-            <th class="sortable" onclick="sortData('last_job_run')">Last Run${{sa('last_job_run')}}</th>
-            <th class="sortable" onclick="sortData('sync_status')">Sync Status${{sa('sync_status')}}</th>
-            <th class="sortable" onclick="sortData('modified')">Modified${{sa('modified')}}</th>
-            <th class="sortable" onclick="sortData('created')">Created${{sa('created')}}</th>
-            <th class="sortable" onclick="sortData('next_job_run')">Next Run${{sa('next_job_run')}}</th>
-            ${{showError ? '<th class="sortable" onclick="sortData(\\'error_message\\')">Error/Reason' + sa('error_message') + '</th>' : ''}}
-        </tr></thead><tbody>`;
-        resources.forEach(resource => {{
-            const statusMap = {{'completed': 'status-completed', 'failed': 'status-failed', 'skipped': 'status-skipped', 'pending': 'status-pending'}};
-            const statusClass = statusMap[resource.status] || '';
-            const error = resource.error_message || (resource.status === 'completed' ? 'Success' : 'No message');
-            const truncatedError = error.length > 150 ? error.substring(0, 150) + '...' : error;
-            const lastRun = formatLastRun(resource);
-            const syncStatus = formatSyncStatus(resource);
-            const modified = formatTs(resource.modified);
-            const created = formatTs(resource.created);
-            const nextRun = formatTs(resource.next_job_run);
-            html += `<tr title="${{escapeHtml(error)}}"><td>${{resource.source_id}}</td><td class="name-cell">${{escapeHtml(resource.source_name || 'N/A')}}</td><td class="name-cell">${{escapeHtml(resource.org_name || 'N/A')}}</td><td><span class="${{statusClass}}">${{resource.status}}</span></td><td>${{lastRun}}</td><td>${{syncStatus}}</td><td>${{modified}}</td><td>${{created}}</td><td>${{nextRun}}</td>${{showError ? `<td class="error-cell">${{escapeHtml(truncatedError)}}</td>` : ''}}</tr>`;
-        }});
-        html += '</tbody></table></div>';
-    }});
-    document.getElementById(contentId).innerHTML = html;
-    const totalPages = Math.ceil(filteredData.length / itemsPerPage);
-    if (totalPages > 1) {{
-        document.getElementById('paginationContainer').classList.remove('hidden');
-        document.getElementById('pageInfo').textContent = `Page ${{currentPage}} of ${{totalPages}} (Showing ${{start + 1}}-${{Math.min(end, filteredData.length)}} of ${{filteredData.length}})`;
-        document.getElementById('prevPage').disabled = currentPage === 1;
-        document.getElementById('nextPage').disabled = currentPage === totalPages;
-    }} else {{
-        document.getElementById('paginationContainer').classList.add('hidden');
-    }}
-    initColumnResize();
-}}
-
-function initColumnResize() {{
-    document.querySelectorAll('.resource-type-section th').forEach(th => {{
-        if (th.querySelector('.col-resize-handle')) return;
-        const handle = document.createElement('div');
-        handle.className = 'col-resize-handle';
-        th.appendChild(handle);
-        let startX, startW;
-        handle.addEventListener('mousedown', (e) => {{
-            e.preventDefault();
-            e.stopPropagation();
-            startX = e.pageX;
-            startW = th.offsetWidth;
-            handle.classList.add('active');
-            document.body.classList.add('col-resizing');
-            const onMove = (ev) => {{
-                const diff = ev.pageX - startX;
-                const newW = Math.max(40, startW + diff);
-                th.style.width = newW + 'px';
-            }};
-            const onUp = () => {{
-                handle.classList.remove('active');
-                document.body.classList.remove('col-resizing');
-                document.removeEventListener('mousemove', onMove);
-                document.removeEventListener('mouseup', onUp);
-            }};
-            document.addEventListener('mousemove', onMove);
-            document.addEventListener('mouseup', onUp);
-        }});
-    }});
-}}
-
-function attachEventListeners() {{
-    document.querySelectorAll('.tab').forEach(tab => {{
-        tab.addEventListener('click', () => switchTab(tab.dataset.tab));
-    }});
-    document.getElementById('orgSelect').addEventListener('change', () => {{
-        currentOrg = document.getElementById('orgSelect').value;
-        currentPage = 1;
-        populateResourceTypeFilter();
-        renderDetailTab();
-    }});
-    document.getElementById('resourceTypeFilter').addEventListener('change', () => {{ currentPage = 1; renderDetailTab(); }});
-    document.getElementById('searchInput').addEventListener('input', () => {{
-        clearTimeout(_searchDebounceTimer);
-        _searchDebounceTimer = setTimeout(() => {{ currentPage = 1; renderDetailTab(); }}, 200);
-    }});
-    document.getElementById('summarySearchInput').addEventListener('input', () => {{
-        clearTimeout(_searchDebounceTimer);
-        _searchDebounceTimer = setTimeout(() => {{ renderSummaryTab(); }}, 200);
-    }});
-    document.getElementById('prevPage').addEventListener('click', () => {{ if (currentPage > 1) {{ currentPage--; renderPage(); }} }});
-    document.getElementById('nextPage').addEventListener('click', () => {{
-        const totalPages = Math.ceil(filteredData.length / itemsPerPage);
-        if (currentPage < totalPages) {{ currentPage++; renderPage(); }}
-    }});
-    document.getElementById('groupToggle').addEventListener('click', () => {{
-        viewMode = viewMode === 'flat' ? 'grouped' : 'flat';
-        document.getElementById('groupToggle').classList.toggle('active', viewMode === 'grouped');
-        currentPage = 1;
-        renderDetailTab();
-    }});
-    document.getElementById('csvDownload').addEventListener('click', downloadCSV);
-}}
-
-function escapeHtml(text) {{
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}}
-
-init();
-</script>
-</body>
-</html>"""
-
-    return html
-
-
-def _print_org_summary(org_summary: dict) -> None:
-    """Print organization summary to console."""
-    click.echo()
-    click.echo("=" * 100)
-    click.echo("ORGANIZATION FAILURE SUMMARY")
-    click.echo("=" * 100)
-
-    # Sort by total (descending)
-    sorted_orgs = sorted(
-        org_summary.items(),
-        key=lambda x: x[1]["total"],
-        reverse=True,
-    )
-
-    for org_name, summary in sorted_orgs:
-        failed = summary["failed"]
-        skipped = summary["skipped"]
-        total = summary["total"]
-
-        # Color code based on status
-        if failed > 0:
-            status = click.style("HAS FAILURES", fg="red", bold=True)
-        elif skipped > 0:
-            status = click.style("HAS SKIPPED", fg="cyan", bold=True)
-        else:
-            status = click.style("OK", fg="green")
-
-        click.echo(
-            f"{org_name:40s} | Failed: {failed:4d} | Skipped: {skipped:4d} | Total: {total:4d} | {status}"
-        )
-
-    click.echo("=" * 100)
-    click.echo()
 
 
 def _print_summary(report_data: list[dict]) -> None:
@@ -2735,15 +962,12 @@ def _print_summary(report_data: list[dict]) -> None:
         discrepancy = stats["discrepancy"]
         failed = stats["failed_count"]
         skipped = stats["skipped_count"]
-        in_progress = stats["in_progress_count"]
 
         # Color code based on status
         if failed > 0:
             status = click.style("FAILED", fg="red", bold=True)
         elif discrepancy > 0:
             status = click.style("WARNING", fg="yellow", bold=True)
-        elif in_progress > 0:
-            status = click.style("IN PROGRESS", fg="yellow")
         elif skipped > 0:
             status = click.style("SKIPPED", fg="cyan", bold=True)
         else:
@@ -2752,7 +976,7 @@ def _print_summary(report_data: list[dict]) -> None:
         click.echo(
             f"{rtype:30s} | Exported: {stats['exported_count']:5d} | "
             f"Imported: {stats['completed_count']:5d} | "
-            f"Failed: {failed:4d} | Skipped: {skipped:4d} | In Progress: {in_progress:4d} | Discrepancy: {discrepancy:4d} | {status}"
+            f"Failed: {failed:4d} | Skipped: {skipped:4d} | Discrepancy: {discrepancy:4d} | {status}"
         )
 
     click.echo("=" * 100)

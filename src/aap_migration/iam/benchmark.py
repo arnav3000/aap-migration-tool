@@ -11,12 +11,9 @@ Usage:
 
 from __future__ import annotations
 
-import json
-import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -31,6 +28,7 @@ def _create_session(verify_ssl: bool = True) -> requests.Session:
     session.mount("http://", adapter)
     if not verify_ssl:
         import urllib3
+
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     return session
 
@@ -57,7 +55,7 @@ def _api_get(
         elapsed = time.monotonic() - start
         data = resp.json() if resp.status_code == 200 and resp.text else None
         return elapsed, resp.status_code, data
-    except Exception as exc:
+    except Exception:
         elapsed = time.monotonic() - start
         return elapsed, 0, None
 
@@ -90,8 +88,11 @@ def run_benchmark(
 
     for rtype in ["credentials", "projects", "inventories", "job_templates", "organizations"]:
         elapsed, status, data = _api_get(
-            session, source_url, source_token,
-            f"{rtype}/?page_size=5", verify_ssl,
+            session,
+            source_url,
+            source_token,
+            f"{rtype}/?page_size=5",
+            verify_ssl,
         )
         if status != 200 or not data:
             print(f"  {rtype}: HTTP {status} ({elapsed:.3f}s) — skipping")
@@ -103,8 +104,11 @@ def run_benchmark(
         for resource in resources[:3]:
             res_id = resource["id"]
             e2, s2, d2 = _api_get(
-                session, source_url, source_token,
-                f"{rtype}/{res_id}/object_roles/", verify_ssl,
+                session,
+                source_url,
+                source_token,
+                f"{rtype}/{res_id}/object_roles/",
+                verify_ssl,
             )
             if s2 == 200 and d2:
                 for role in d2.get("results", []):
@@ -140,7 +144,11 @@ def run_benchmark(
 
     for i, ep in enumerate(endpoints):
         elapsed, status, data = _api_get(
-            session, source_url, source_token, ep, verify_ssl,
+            session,
+            source_url,
+            source_token,
+            ep,
+            verify_ssl,
         )
         timings.append(elapsed)
         if status == 200 and data:
@@ -160,7 +168,11 @@ def run_benchmark(
     p95 = sorted(timings)[int(len(timings) * 0.95)] if timings else 0
     p99 = sorted(timings)[int(len(timings) * 0.99)] if timings else 0
 
-    empty_pct = (empty_count / (empty_count + non_empty_count) * 100) if (empty_count + non_empty_count) else 0
+    empty_pct = (
+        (empty_count / (empty_count + non_empty_count) * 100)
+        if (empty_count + non_empty_count)
+        else 0
+    )
 
     print(f"\n  Calls made:         {total_calls}")
     print(f"  Empty responses:    {empty_count} ({empty_pct:.1f}%)")
@@ -201,7 +213,11 @@ def run_benchmark(
         wall_elapsed = time.monotonic() - wall_start
 
         c_avg = sum(concurrent_timings) / len(concurrent_timings) if concurrent_timings else 0
-        c_p95 = sorted(concurrent_timings)[int(len(concurrent_timings) * 0.95)] if concurrent_timings else 0
+        c_p95 = (
+            sorted(concurrent_timings)[int(len(concurrent_timings) * 0.95)]
+            if concurrent_timings
+            else 0
+        )
         actual_rps = total_calls / wall_elapsed if wall_elapsed else 0
         speedup = seq_total_time / wall_elapsed if wall_elapsed > 0 else 1.0
 

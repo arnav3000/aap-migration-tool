@@ -19,6 +19,7 @@ to the hardcoded RESOURCE_REGISTRY below.
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -426,9 +427,6 @@ ORGANIZATION_SCOPED_RESOURCES = {
     "job_templates",
     "workflow_job_templates",
     "teams",
-    "notification_templates",
-    "execution_environments",
-    "labels",
 }
 
 # Parent-scoped resources: unique within parent resource
@@ -604,6 +602,97 @@ def get_fully_supported_types() -> list[str]:
     ]
     # Return in migration order
     return sorted(types, key=lambda x: RESOURCE_REGISTRY[x].migration_order)
+
+
+def cascade_skip_phases_for_hosts(skip_phases: list[str]) -> list[str]:
+    """If hosts are skipped, also skip host-inventory memberships.
+
+    Memberships only attach already-migrated hosts to additional inventories.
+    Migrating them without hosts is wasted work.
+    """
+    expanded = list(skip_phases)
+    if "hosts" in expanded and "host_inventory_memberships" not in expanded:
+        expanded.append("host_inventory_memberships")
+    return expanded
+
+
+def apply_host_membership_resource_cascade(
+    resource_order: list[str],
+    *,
+    exclusions: dict[str, list[Any]] | None = None,
+    preview_resources: dict[str, list[dict[str, Any]]] | None = None,
+) -> list[str]:
+    """Drop host_inventory_memberships when hosts are not being migrated.
+
+    Cascades when:
+    - ``hosts`` is absent from ``resource_order`` (phase filter), or
+    - every previewed host id is present in ``exclusions["hosts"]``.
+    """
+    order = list(resource_order)
+    if "host_inventory_memberships" not in order:
+        return order
+
+    if "hosts" not in order:
+        return [rtype for rtype in order if rtype != "host_inventory_memberships"]
+
+    excluded_hosts = {str(x) for x in (exclusions or {}).get("hosts") or []}
+    if not excluded_hosts or preview_resources is None:
+        return order
+
+    host_items = preview_resources.get("hosts") or []
+    all_host_ids = {
+        str(item.get("source_id")) for item in host_items if item.get("source_id") is not None
+    }
+    if all_host_ids and all_host_ids <= excluded_hosts:
+        return [rtype for rtype in order if rtype != "host_inventory_memberships"]
+    return order
+
+
+def is_host_inventory_membership_excluded(
+    resource: dict[str, Any],
+    excluded_ids: dict[str, list[Any]] | None,
+) -> bool:
+    """Return True when a membership's host was excluded from migration."""
+    if not excluded_ids:
+        return False
+    excluded_hosts = {str(x) for x in excluded_ids.get("hosts") or []}
+    if not excluded_hosts:
+        return False
+    host_id = resource.get("host_id")
+    return host_id is not None and str(host_id) in excluded_hosts
+
+
+def is_resource_type_fully_excluded(
+    resource_type: str,
+    exclusions: dict[str, list[Any]] | None,
+    preview_resources: dict[str, list[dict[str, Any]]] | None,
+) -> bool:
+    """Return True when every previewed id for ``resource_type`` is excluded."""
+    if not exclusions or not preview_resources:
+        return False
+    excluded = {str(x) for x in exclusions.get(resource_type) or []}
+    if not excluded:
+        return False
+    items = preview_resources.get(resource_type) or []
+    all_ids = {str(item.get("source_id")) for item in items if item.get("source_id") is not None}
+    return bool(all_ids) and all_ids <= excluded
+
+
+def excluded_preview_count(
+    resource_type: str,
+    exclusions: dict[str, list[Any]] | None,
+    preview_resources: dict[str, list[dict[str, Any]]] | None,
+) -> int:
+    """Count of previewed resources excluded for ``resource_type``."""
+    if not exclusions:
+        return 0
+    excluded = {str(x) for x in exclusions.get(resource_type) or []}
+    if not excluded:
+        return 0
+    items = (preview_resources or {}).get(resource_type) or []
+    if not items:
+        return len(excluded)
+    return sum(1 for item in items if str(item.get("source_id")) in excluded)
 
 
 def get_endpoint(resource_type: str) -> str:

@@ -14,7 +14,7 @@ We release patches for security vulnerabilities for the following versions:
 
 If you discover a security vulnerability in AAP Bridge, please report it by emailing:
 
-**aap.bridge.183yy@simplelogin.com**
+**<aap.bridge.183yy@simplelogin.com>**
 
 Please include the following information:
 
@@ -108,8 +108,8 @@ We do not currently have a bug bounty program. However, we greatly appreciate re
 
 For security-related questions or concerns:
 
-- **Email**: aap.bridge.183yy@simplelogin.com
-- **GitHub**: Create a security advisory (https://github.com/arnav3000/aap-bridge-fork/security/advisories/new)
+- **Email**: <aap.bridge.183yy@simplelogin.com>
+- **GitHub**: Create a security advisory (<https://github.com/arnav3000/aap-bridge-fork/security/advisories/new>)
 
 ---
 

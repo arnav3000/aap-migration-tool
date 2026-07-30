@@ -287,6 +287,10 @@ class DataTransformer:
         # Raises SkipResourceError if a required dependency is missing
         self._validate_dependencies(transformed, resource_type)
 
+        # Preserve related object names for import-time FK recovery (ID map miss /
+        # name_prefix). Must run before summary_fields is stripped as read-only.
+        self._stash_dependency_names(transformed)
+
         # Step 2: Apply transformations in order
         # NOTE: specific transformations run BEFORE read-only and deprecated field removal
         # so they can inspect all fields for migration logic (e.g., extracting IDs from summary_fields)
@@ -319,6 +323,60 @@ class DataTransformer:
     # Dependency Validation Methods (NEW)
     # ==========================================================================
 
+    def _extract_dependency_ids_from_summary(self, data: dict[str, Any]) -> None:
+        """Copy FK IDs from summary_fields onto top-level fields before dep checks.
+
+        Many AAP list/detail payloads omit top-level FK IDs while still exposing
+        them under summary_fields. Validation must see those IDs or required
+        deps are silently skipped.
+        """
+        summary = data.get("summary_fields")
+        if not isinstance(summary, dict):
+            return
+        for field in self.DEPENDENCIES:
+            if data.get(field):
+                continue
+            info = summary.get(field)
+            if isinstance(info, dict) and info.get("id") is not None:
+                data[field] = info["id"]
+
+    def _stash_dependency_names(self, data: dict[str, Any]) -> None:
+        """Keep related object names after summary_fields is stripped.
+
+        Import resolves FKs by source ID first. When that mapping is missing
+        (common after clear-state / partial runs, and with name_prefix), import
+        can recover by looking up the related resource by name — including the
+        prefixed name when the source uses name_prefix.
+        """
+        summary = data.get("summary_fields")
+        if not isinstance(summary, dict):
+            return
+
+        names: dict[str, str] = {}
+        for field in self.DEPENDENCIES:
+            info = summary.get(field)
+            if isinstance(info, dict):
+                name = info.get("name") or info.get("username")
+                if name:
+                    names[field] = str(name)
+
+        # Job templates / similar: M2M credentials live under summary_fields.credentials
+        creds = summary.get("credentials")
+        if isinstance(creds, list):
+            cred_names: dict[str, str] = {}
+            for cred in creds:
+                if isinstance(cred, dict) and cred.get("id") is not None and cred.get("name"):
+                    cred_names[str(cred["id"])] = str(cred["name"])
+            if cred_names:
+                data.setdefault("_credential_names", {}).update(cred_names)
+
+        if names:
+            existing = data.get("_dependency_names")
+            if isinstance(existing, dict):
+                existing.update(names)
+            else:
+                data["_dependency_names"] = names
+
     def _validate_dependencies(
         self,
         data: dict[str, Any],
@@ -345,19 +403,33 @@ class DataTransformer:
             # No dependencies defined for this resource type
             return
 
+        self._extract_dependency_ids_from_summary(data)
+
         source_id = coerce_source_id(data)
 
         for field, dep_resource_type in self.DEPENDENCIES.items():
             dep_source_id = data.get(field)
+            is_required = field in self.REQUIRED_DEPENDENCIES
 
-            # Skip if field is not set or is None/0
+            # Required FK absent entirely → skip (cannot import correctly)
             if not dep_source_id:
+                if is_required:
+                    source_name = data.get("name") or data.get("username") or source_id
+                    self.stats["skipped_count"] += 1
+                    raise SkipResourceError(
+                        f"Skipping '{source_name}': required field '{field}' "
+                        f"({dep_resource_type}) is missing from the source record",
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        missing_dependency=f"{dep_resource_type}:missing",
+                    )
                 continue
 
             # Check if the dependency exists in id_mappings
             if not self.state.has_source_mapping(dep_resource_type, dep_source_id):
-                if field in self.REQUIRED_DEPENDENCIES:
+                if is_required:
                     # Required dependency is missing - skip this resource
+                    source_name = data.get("name") or data.get("username") or source_id
                     logger.warning(
                         "required_dependency_missing",
                         resource_type=resource_type,
@@ -370,8 +442,9 @@ class DataTransformer:
                     )
                     self.stats["skipped_count"] += 1
                     raise SkipResourceError(
-                        f"{resource_type} {source_id} references non-exported "
-                        f"{dep_resource_type} {dep_source_id}",
+                        f"Skipping '{source_name}': required {dep_resource_type} "
+                        f"(source id {dep_source_id}) was not migrated — include that "
+                        f"dependency in the plan or migrate it first",
                         resource_type=resource_type,
                         source_id=source_id,
                         missing_dependency=f"{dep_resource_type}:{dep_source_id}",
@@ -1034,12 +1107,67 @@ class CredentialTransformer(DataTransformer):
         "user": "users",
         "team": "teams",
     }
-    # Organization and credential_type are required; user/team ownership is optional
-    REQUIRED_DEPENDENCIES = {"organization", "credential_type"}
+    # credential_type is always required. organization/user/team are optional ownership —
+    # AAP allows user/team-owned credentials with organization=null; import falls back to admin.
+    REQUIRED_DEPENDENCIES = {"credential_type"}
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.external_credential_type_ids: set[int] | None = None
+
+    def _extract_credential_fks(self, data: dict[str, Any]) -> None:
+        """Ensure organization/credential_type IDs exist before dependency checks."""
+        summary = data.get("summary_fields") or {}
+        if not data.get("organization"):
+            org_info = summary.get("organization")
+            if isinstance(org_info, dict) and org_info.get("id") is not None:
+                data["organization"] = org_info["id"]
+        if not data.get("credential_type"):
+            cred_type_info = summary.get("credential_type")
+            if isinstance(cred_type_info, dict) and cred_type_info.get("id") is not None:
+                data["credential_type"] = cred_type_info["id"]
+            elif "related" in data and data["related"].get("credential_type"):
+                import re
+
+                match = re.search(
+                    r"/credential_types/(\d+)/", str(data["related"]["credential_type"])
+                )
+                if match:
+                    data["credential_type"] = int(match.group(1))
+
+    def _validate_dependencies(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> None:
+        self._extract_credential_fks(data)
+        # Built-in credential types are managed by AAP and are often never
+        # written to id_mappings (they aren't "migrated"). Allow them through
+        # so import can resolve via name mapping or the builtin ID fallback.
+        from aap_migration.migration.credential_type_utils import is_builtin_credential_type_id
+
+        cred_type_id = data.get("credential_type")
+        original_deps = self.DEPENDENCIES
+        original_required = self.REQUIRED_DEPENDENCIES
+        if (
+            cred_type_id is not None
+            and is_builtin_credential_type_id(cred_type_id)
+            and self.state
+            and not self.state.has_source_mapping("credential_types", int(cred_type_id))
+        ):
+            self.DEPENDENCIES = {k: v for k, v in original_deps.items() if k != "credential_type"}
+            self.REQUIRED_DEPENDENCIES = original_required - {"credential_type"}
+            logger.debug(
+                "builtin_credential_type_dependency_allowed",
+                credential_name=data.get("name"),
+                credential_type_id=cred_type_id,
+                message="Built-in credential type has no source mapping; allowing transform",
+            )
+        try:
+            super()._validate_dependencies(data, resource_type)
+        finally:
+            self.DEPENDENCIES = original_deps
+            self.REQUIRED_DEPENDENCIES = original_required
 
     def _load_external_credential_types(self) -> None:
         """Load IDs of external credential types from export files.
@@ -1147,6 +1275,22 @@ class CredentialTransformer(DataTransformer):
                     "Advanced auth methods (AppRole, Kubernetes, namespace) must be reconfigured manually.",
                 )
 
+        # vault_id is only valid on Ansible Vault (and similar vault) types.
+        # Leaving it on SCM/Machine/etc. credentials causes target 400s like:
+        #   'vault_id' is not one of ['ssh_private_key', 'url']
+        cred_type_lower = str(cred_type_name).lower()
+        is_vault_type = "vault" in cred_type_lower
+        if not is_vault_type and "vault_id" in data["inputs"]:
+            del data["inputs"]["vault_id"]
+            logger.info(
+                "credential_vault_id_removed",
+                resource_type="credentials",
+                source_id=source_id,
+                source_name=data.get("name"),
+                credential_type=cred_type_name,
+                message="Removed vault_id from non-vault credential type inputs",
+            )
+
     def _apply_specific_transformations(
         self, data: dict[str, Any], resource_type: str
     ) -> dict[str, Any]:
@@ -1174,6 +1318,7 @@ class CredentialTransformer(DataTransformer):
         ):
             # Check if mapped
             if self.state and not self.state.get_mapped_id("credential_types", cred_type_id):
+                cred_name = data.get("name") or source_id
                 logger.info(
                     "skipping_credential_external_type_unmapped",
                     resource_type="credentials",
@@ -1184,7 +1329,8 @@ class CredentialTransformer(DataTransformer):
                 )
                 self.stats["skipped_count"] += 1
                 raise SkipResourceError(
-                    f"Credential {source_id} depends on unmapped external credential type {cred_type_id}",
+                    f"Skipping '{cred_name}': external credential type "
+                    f"(source id {cred_type_id}) is not mapped on the target",
                     resource_type=resource_type,
                     source_id=source_id,
                     missing_dependency=f"credential_types:{cred_type_id}",
@@ -1262,6 +1408,28 @@ class CredentialTransformer(DataTransformer):
             encrypted_fields = []
 
             ssh_key_fields = {"ssh_key_data", "private_key", "ssh_private_key"}
+            # Boolean inputs must never receive string secrets — AAP rejects that with
+            # "secret not allowed for boolean type (verify_ssl)".
+            boolean_input_fields = {
+                "verify_ssl",
+                "verify_certificate",
+                "verify_certificates",
+                "update_on_launch",
+                "overwrite",
+                "overwrite_vars",
+            }
+
+            # Coerce string/bool-ish values for known boolean fields up front
+            for bool_key in list(data["inputs"].keys()):
+                if bool_key not in boolean_input_fields:
+                    continue
+                raw = data["inputs"][bool_key]
+                if raw == "$encrypted$":
+                    # Secrets cannot represent booleans — default to True (verify on)
+                    data["inputs"][bool_key] = True
+                    encrypted_fields.append(bool_key)
+                elif isinstance(raw, str):
+                    data["inputs"][bool_key] = raw.strip().lower() in {"1", "true", "yes", "on"}
 
             # First pass: Check if we need an encrypted key (ssh_key_unlock is present/encrypted)
             ssh_key_unlock_value = None
@@ -1278,63 +1446,56 @@ class CredentialTransformer(DataTransformer):
                 temp_values["ssh_key_unlock"] = ssh_key_unlock_value
                 encrypted_fields.append("ssh_key_unlock")
 
-            for key, value in data["inputs"].items():
-                if value == "$encrypted$":
-                    # Skip if already handled (e.g. ssh_key_unlock)
-                    if key == "ssh_key_unlock":
-                        continue
+            for key, value in list(data["inputs"].items()):
+                if value != "$encrypted$":
+                    continue
+                # Skip if already handled (e.g. ssh_key_unlock / booleans)
+                if key == "ssh_key_unlock" or key in boolean_input_fields:
+                    continue
 
-                    if key in ssh_key_fields or ("private" in key.lower() and "key" in key.lower()):
-                        # Generate valid PEM format for SSH key fields (cached if config available)
-                        if ssh_key_unlock_value:
-                            # Use encrypted key generator with the passphrase we generated
-                            if self.config and self.config.performance:
-                                temp_value = self.config.performance.get_dummy_encrypted_ssh_key(
-                                    ssh_key_unlock_value
-                                )
-                            else:
-                                temp_value = generate_temp_encrypted_ssh_key(ssh_key_unlock_value)
-                        else:
-                            # Use unencrypted key generator
-                            if self.config and self.config.performance:
-                                temp_value = self.config.performance.get_dummy_ssh_key()
-                            else:
-                                temp_value = generate_temp_ssh_key()
-                    else:
-                        # Generate temp value for other secrets (cached if config available)
+                if key in ssh_key_fields or ("private" in key.lower() and "key" in key.lower()):
+                    # Generate valid PEM format for SSH key fields (cached if config available)
+                    if ssh_key_unlock_value:
+                        # Use encrypted key generator with the passphrase we generated
                         if self.config and self.config.performance:
-                            temp_value = self.config.performance.get_dummy_password()
+                            temp_value = self.config.performance.get_dummy_encrypted_ssh_key(
+                                ssh_key_unlock_value
+                            )
                         else:
-                            temp_value = secrets.token_urlsafe(16)
+                            temp_value = generate_temp_encrypted_ssh_key(ssh_key_unlock_value)
+                    else:
+                        # Use unencrypted key generator
+                        if self.config and self.config.performance:
+                            temp_value = self.config.performance.get_dummy_ssh_key()
+                        else:
+                            temp_value = generate_temp_ssh_key()
+                else:
+                    # Generate temp value for other secrets (cached if config available)
+                    if self.config and self.config.performance:
+                        temp_value = self.config.performance.get_dummy_password()
+                    else:
+                        temp_value = secrets.token_urlsafe(16)
 
-                    data["inputs"][key] = temp_value
-                    temp_values[key] = temp_value
-                    encrypted_fields.append(key)
+                data["inputs"][key] = temp_value
+                temp_values[key] = temp_value
+                encrypted_fields.append(key)
 
-            if temp_values:
-                data["_needs_vault_lookup"] = True
+            if temp_values or encrypted_fields:
+                if temp_values:
+                    data["_needs_vault_lookup"] = True
                 data["_encrypted_fields"] = encrypted_fields
                 logger.info(
                     "credential_temp_values_generated",
                     resource_type="credentials",
                     source_id=source_id,
                     source_name=data.get("name"),
-                    fields=list(temp_values.keys()),
+                    fields=list(temp_values.keys()) or encrypted_fields,
                     message="Temporary values generated for encrypted fields - update after migration",
                 )
 
-        # Set null organization to Default (ID=1) for API compatibility
-        # Testing if organization is required by the API
-        if "organization" in data and data["organization"] is None:
-            data["organization"] = 1  # Default organization
-            logger.info(
-                "defaulted_null_organization",
-                resource_type="credentials",
-                source_id=source_id,
-                source_name=data.get("name"),
-                organization_id=1,
-                message="Set null organization to Default (ID=1)",
-            )
+        # Leave organization=None when unset. Import assigns the target admin user
+        # when no organization/user/team ownership remains after dependency resolve.
+        # Do not invent source org ID 1 here — that org may not be in the migration plan.
 
         return data
 
@@ -1431,8 +1592,16 @@ class JobTemplateTransformer(DataTransformer):
                             source="summary_fields",
                         )
 
-        # Remove _credentials field as it's replaced by credentials with full details
+        # Exporter may only set _credentials as a list of source IDs — promote
+        # those into credentials before the helper field is dropped.
         if "_credentials" in data:
+            if "credentials" not in data:
+                raw_creds = data["_credentials"]
+                if isinstance(raw_creds, list) and raw_creds:
+                    if all(isinstance(c, int) for c in raw_creds):
+                        data["credentials"] = [{"id": c} for c in raw_creds]
+                    elif all(isinstance(c, dict) and "id" in c for c in raw_creds):
+                        data["credentials"] = list(raw_creds)
             del data["_credentials"]
 
         # Ensure boolean fields are proper booleans
@@ -1518,9 +1687,10 @@ class ProjectTransformer(DataTransformer):
     DEPENDENCIES = {
         "organization": "organizations",
         "credential": "credentials",
-        "signature_validation_credential": "credentials",  # CRITICAL FIX (Customer B - content signing)
+        "default_environment": "execution_environments",
+        "signature_validation_credential": "credentials",
     }
-    # Organization is required; credential (for SCM auth) and signature_validation_credential are optional
+    # Organization is required; credential (for SCM auth) is optional
     REQUIRED_DEPENDENCIES = {"organization"}
 
     def __init__(self, *args: Any, defer_project_sync: bool = True, **kwargs: Any):
@@ -1546,33 +1716,12 @@ class ProjectTransformer(DataTransformer):
         Returns:
             Transformed project data
         """
+        # Extract org / credential / EE IDs from summary_fields before they are
+        # stripped as read-only. ProjectTransformer overrides the base router, so
+        # call the shared extractor explicitly.
+        data = self._transform_projects(data)
+
         source_id = data.get("_source_id") or data.get("id")
-
-        # Clear SCM options for manual projects
-        # AAP 2.6 rejects manual projects with scm_track_submodules=true
-        # and other SCM update flags that don't apply to manual projects
-        scm_type = data.get("scm_type")
-        if not scm_type or scm_type == "":
-            scm_flags = [
-                "scm_track_submodules",
-                "scm_clean",
-                "scm_delete_on_update",
-                "scm_update_on_launch",
-            ]
-
-            cleared_any = False
-            for flag in scm_flags:
-                if data.get(flag):
-                    data[flag] = False
-                    cleared_any = True
-
-            if cleared_any:
-                logger.info(
-                    "cleared_scm_flags_for_manual_project",
-                    source_id=source_id,
-                    source_name=data.get("name"),
-                    message="Cleared SCM update flags for manual project to prevent AAP 2.6 validation error",
-                )
 
         # Ensure scm_update_on_launch is boolean
         if "scm_update_on_launch" in data and not isinstance(data["scm_update_on_launch"], bool):
@@ -1602,12 +1751,10 @@ class ProjectTransformer(DataTransformer):
                     "scm_type": scm_type,
                     "scm_url": data.get("scm_url"),
                     "scm_branch": data.get("scm_branch", ""),
-                    "scm_refspec": data.get("scm_refspec", ""),  # CRITICAL FIX (Customer B)
                     "scm_clean": data.get("scm_clean", False),
                     "scm_delete_on_update": data.get("scm_delete_on_update", False),
                     "scm_update_on_launch": data.get("scm_update_on_launch", False),
                     "scm_update_cache_timeout": data.get("scm_update_cache_timeout", 0),
-                    "scm_track_submodules": data.get("scm_track_submodules", False),  # CRITICAL FIX
                     "credential": data.get("credential"),  # Keep source credential ID
                 }
 
@@ -1617,12 +1764,10 @@ class ProjectTransformer(DataTransformer):
                 # Remove other SCM fields to be clean
                 for field in [
                     "scm_branch",
-                    "scm_refspec",  # CRITICAL FIX: Also remove from main data (Customer B)
                     "scm_clean",
                     "scm_delete_on_update",
                     "scm_update_on_launch",
                     "scm_update_cache_timeout",
-                    "scm_track_submodules",  # CRITICAL FIX: Also remove from main data
                     "credential",
                 ]:
                     data.pop(field, None)
@@ -1838,8 +1983,40 @@ class TeamTransformer(DataTransformer):
     DEPENDENCIES = {
         "organization": "organizations",
     }
-    # Organization is optional for teams (some teams may be global)
-    REQUIRED_DEPENDENCIES = set()
+    # AAP requires every team to belong to an organization
+    REQUIRED_DEPENDENCIES = {"organization"}
+
+    def _extract_organization_from_summary(self, data: dict[str, Any]) -> None:
+        """Copy organization from summary_fields when the top-level field is missing."""
+        org = data.get("organization")
+        if org:
+            return
+        org_info = data.get("summary_fields", {}).get("organization")
+        if isinstance(org_info, dict) and org_info.get("id") is not None:
+            data["organization"] = org_info["id"]
+            logger.debug(
+                "extracted_organization_from_summary",
+                resource_type="teams",
+                source_id=coerce_source_id(data),
+                source_name=data.get("name"),
+                organization_id=org_info["id"],
+            )
+
+    def _validate_dependencies(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> None:
+        # Extract before required-dependency checks so summary-only org is not lost.
+        self._extract_organization_from_summary(data)
+        super()._validate_dependencies(data, resource_type)
+
+    def _apply_specific_transformations(
+        self, data: dict[str, Any], resource_type: str
+    ) -> dict[str, Any]:
+        """Ensure organization is present before read-only fields are stripped."""
+        self._extract_organization_from_summary(data)
+        return data
 
 
 class CredentialTypeTransformer(DataTransformer):
@@ -1896,6 +2073,19 @@ class CredentialTypeTransformer(DataTransformer):
                 message="Built-in credential type (managed=True)",
             )
 
+        # Custom credential types with kind=galaxy are rejected by newer AAP
+        # (Must be 'cloud' or 'net', not galaxy). Skip rather than fail import.
+        if data.get("kind") == "galaxy" and not data.get("managed"):
+            source_id = coerce_source_id(data)
+            self.stats["skipped_count"] += 1
+            raise SkipResourceError(
+                f"Skipping credential type '{data.get('name')}': kind 'galaxy' "
+                f"is not supported on the target (must be 'cloud' or 'net')",
+                resource_type=resource_type,
+                source_id=source_id,
+                missing_dependency="credential_types:kind=galaxy",
+            )
+
         # Clean up inputs schema - remove 'metadata' if present (causes validation errors in 2.6)
         # Error: Additional properties are not allowed ('metadata' was unexpected)
         inputs = data.get("inputs")
@@ -1907,6 +2097,25 @@ class CredentialTypeTransformer(DataTransformer):
                 source_name=data.get("name"),
             )
             del inputs["metadata"]
+
+        # AAP 2.5+ rejects 'dependencies' on custom credential type injectors/inputs
+        injectors = data.get("injectors")
+        if isinstance(injectors, dict) and "dependencies" in injectors:
+            logger.info(
+                "removing_dependencies_from_credential_type_injectors",
+                resource_type="credential_types",
+                source_id=data.get("_source_id") or data.get("id"),
+                source_name=data.get("name"),
+            )
+            del injectors["dependencies"]
+        if isinstance(inputs, dict) and "dependencies" in inputs:
+            logger.info(
+                "removing_dependencies_from_credential_type_inputs",
+                resource_type="credential_types",
+                source_id=data.get("_source_id") or data.get("id"),
+                source_name=data.get("name"),
+            )
+            del inputs["dependencies"]
 
         return data
 
@@ -2014,8 +2223,8 @@ class ExecutionEnvironmentTransformer(DataTransformer):
         "organization": "organizations",
         "credential": "credentials",
     }
-    # Organization is required; credential (for private registries) is optional
-    REQUIRED_DEPENDENCIES = {"organization"}
+    # Organization is optional (global/managed EEs have none); credential is optional
+    REQUIRED_DEPENDENCIES = set()
 
 
 class InventoryGroupTransformer(DataTransformer):
@@ -2076,54 +2285,6 @@ class InventorySourceTransformer(DataTransformer):
     # Inventory is required; source_project/credential/EE are optional
     REQUIRED_DEPENDENCIES = {"inventory"}
 
-    def _extract_fk_fields(self, data: dict[str, Any]) -> None:
-        """Populate FK fields from summary_fields before dependency validation."""
-        if "summary_fields" not in data:
-            return
-        sf = data["summary_fields"]
-        for field, sf_key in (
-            ("inventory", "inventory"),
-            ("source_project", "source_project"),
-            ("credential", "credential"),
-            ("execution_environment", "execution_environment"),
-        ):
-            if field not in data and sf_key in sf:
-                info = sf[sf_key]
-                if isinstance(info, dict) and "id" in info:
-                    data[field] = info["id"]
-
-    def _validate_dependencies(
-        self,
-        data: dict[str, Any],
-        resource_type: str,
-    ) -> None:
-        """Validate inventory sources and SCM project mappings are import-ready."""
-        self._extract_fk_fields(data)
-        super()._validate_dependencies(data, resource_type)
-
-        if not self.state:
-            return
-
-        source_id = coerce_source_id(data)
-        inventory_id = data.get("inventory")
-        if inventory_id and self.state.get_mapped_id("inventories", inventory_id) is None:
-            raise SkipResourceError(
-                f"inventory_sources {source_id} references unmapped inventories {inventory_id}",
-                resource_type=resource_type,
-                source_id=source_id,
-                missing_dependency=f"inventories:{inventory_id}",
-            )
-
-        if data.get("source") == "scm":
-            project_id = data.get("source_project")
-            if project_id and self.state.get_mapped_id("projects", project_id) is None:
-                raise SkipResourceError(
-                    f"inventory_sources {source_id} references unmapped projects {project_id}",
-                    resource_type=resource_type,
-                    source_id=source_id,
-                    missing_dependency=f"projects:{project_id}",
-                )
-
     def _apply_specific_transformations(
         self, data: dict[str, Any], resource_type: str
     ) -> dict[str, Any]:
@@ -2137,15 +2298,28 @@ class InventorySourceTransformer(DataTransformer):
             Transformed inventory source data
         """
         source_id = data.get("_source_id") or data.get("id")
-        self._extract_fk_fields(data)
-        if data.get("inventory") is not None:
-            logger.debug(
-                "extracted_inventory_from_summary",
-                resource_type="inventory_sources",
-                source_id=source_id,
-                source_name=data.get("name"),
-                inventory_id=data.get("inventory"),
-            )
+
+        # Extract inventory ID from summary_fields if not already set
+        if "inventory" not in data and "summary_fields" in data:
+            if "inventory" in data["summary_fields"]:
+                inv_info = data["summary_fields"]["inventory"]
+                if isinstance(inv_info, dict) and "id" in inv_info:
+                    data["inventory"] = inv_info["id"]
+                    logger.debug(
+                        "extracted_inventory_from_summary",
+                        resource_type="inventory_sources",
+                        source_id=source_id,
+                        source_name=data.get("name"),
+                        inventory_id=inv_info["id"],
+                    )
+
+        # Extract source_project ID from summary_fields
+        if "source_project" not in data and "summary_fields" in data:
+            if "source_project" in data["summary_fields"]:
+                proj_info = data["summary_fields"]["source_project"]
+                if isinstance(proj_info, dict) and "id" in proj_info:
+                    data["source_project"] = proj_info["id"]
+
         return data
 
 
@@ -2156,358 +2330,6 @@ class ScheduleTransformer(DataTransformer):
         "unified_job_template": "unified_job_templates",
     }
     REQUIRED_DEPENDENCIES = {"unified_job_template"}
-
-    # Cache for template launch configuration (loaded from exported data)
-    # Maps (resource_type, source_id) -> dict of ask_*_on_launch fields
-    _template_launch_config_cache: dict[tuple[str, int], dict[str, bool]] | None = None
-
-    # Field name to ask_*_on_launch attribute mapping
-    _FIELD_TO_LAUNCH_FLAG = {
-        "inventory": "ask_inventory_on_launch",
-        "extra_data": "ask_variables_on_launch",
-        "limit": "ask_limit_on_launch",
-        "diff_mode": "ask_diff_mode_on_launch",
-        "job_tags": "ask_tags_on_launch",
-        "skip_tags": "ask_skip_tags_on_launch",
-        "verbosity": "ask_verbosity_on_launch",
-        "job_type": "ask_job_type_on_launch",
-        "scm_branch": "ask_scm_branch_on_launch",
-        "forks": "ask_forks_on_launch",
-        "timeout": "ask_timeout_on_launch",
-        "job_slice_count": "ask_job_slice_count_on_launch",
-    }
-
-    def _load_template_launch_config(self) -> dict[tuple[str, int], dict[str, bool]]:
-        """Load ask_*_on_launch fields from exported template data.
-
-        Reads job_templates and workflow_job_templates from the input_dir
-        (raw exports) and builds a lookup cache mapping (resource_type, source_id)
-        to a dict of ask_*_on_launch fields.
-
-        Returns:
-            Cache dict mapping (resource_type, source_id) to launch config dict.
-        """
-        if self._template_launch_config_cache is not None:
-            return self._template_launch_config_cache
-
-        cache: dict[tuple[str, int], dict[str, bool]] = {}
-        self._template_launch_config_cache = cache
-
-        if not self.input_dir:
-            logger.debug(
-                "schedule_launch_config_no_input_dir",
-                message="No input_dir available - cannot load template launch config",
-            )
-            return cache
-
-        # Load from both job_templates and workflow_job_templates
-        for resource_type in ("job_templates", "workflow_job_templates"):
-            template_dir = self.input_dir / resource_type
-            if not template_dir.exists():
-                continue
-
-            for json_file in sorted(template_dir.glob(f"{resource_type}_*.json")):
-                try:
-                    with open(json_file) as f:
-                        templates = json.load(f)
-
-                    if not isinstance(templates, list):
-                        templates = [templates]
-
-                    for template in templates:
-                        source_id = template.get("_source_id") or template.get("id")
-                        if not source_id:
-                            continue
-
-                        # Extract all ask_*_on_launch fields
-                        launch_config = {}
-                        for key, value in template.items():
-                            if key.startswith("ask_") and key.endswith("_on_launch"):
-                                launch_config[key] = bool(value)
-
-                        # CRITICAL FIX: Also capture survey_enabled for schedule extra_data validation
-                        # Schedules with survey-enabled templates must preserve survey variable values
-                        # even when ask_variables_on_launch=False
-                        launch_config["survey_enabled"] = bool(
-                            template.get("survey_enabled", False)
-                        )
-
-                        # Extract survey variable names for granular filtering
-                        # Only preserve extra_data variables that are defined in the survey spec
-                        survey_spec = template.get("survey_spec")
-                        if survey_spec and isinstance(survey_spec, dict) and "spec" in survey_spec:
-                            survey_vars = set()
-                            for question in survey_spec["spec"]:
-                                if isinstance(question, dict) and "variable" in question:
-                                    survey_vars.add(question["variable"])
-                            if survey_vars:
-                                launch_config["_survey_vars"] = survey_vars
-
-                            # Cache full survey spec for default injection
-                            # Required to fill in missing required survey variables
-                            launch_config["_survey_spec"] = survey_spec["spec"]
-
-                        if launch_config:
-                            cache[(resource_type, int(source_id))] = launch_config
-
-                except Exception as e:
-                    logger.warning(
-                        "schedule_launch_config_load_error",
-                        file=str(json_file),
-                        error=str(e),
-                        message="Failed to load template launch config from export file",
-                    )
-
-        logger.debug(
-            "schedule_launch_config_loaded",
-            job_templates=sum(1 for k in cache if k[0] == "job_templates"),
-            workflow_templates=sum(1 for k in cache if k[0] == "workflow_job_templates"),
-            total=len(cache),
-        )
-
-        return cache
-
-    def _get_template_launch_config(self, ujt_type: str, ujt_id: int) -> dict[str, bool] | None:
-        """Get the launch configuration for a specific template.
-
-        Args:
-            ujt_type: Resource type (e.g., 'job_templates', 'workflow_job_templates')
-            ujt_id: Source template ID
-
-        Returns:
-            Dict of ask_*_on_launch fields, or None if template not found.
-        """
-        cache = self._load_template_launch_config()
-        return cache.get((ujt_type, int(ujt_id)))
-
-    def _check_prompt_on_launch(self, ujt_type: str, ujt_id: int, field: str) -> bool:
-        """Check if a template allows prompting for a specific field at launch.
-
-        Args:
-            ujt_type: Resource type (e.g., 'job_templates', 'workflow_job_templates')
-            ujt_id: Source template ID
-            field: Schedule field name (e.g., 'inventory', 'extra_data')
-
-        Returns:
-            True if the field can be prompted on launch, False otherwise.
-            Returns True (permissive) if template config cannot be determined.
-        """
-        launch_flag = self._FIELD_TO_LAUNCH_FLAG.get(field)
-        if not launch_flag:
-            # Unknown field mapping - allow it through (don't strip unknown fields)
-            return True
-
-        config = self._get_template_launch_config(ujt_type, ujt_id)
-        if config is None:
-            # Template not found in exports - be permissive, don't strip
-            return True
-
-        return config.get(launch_flag, False)
-
-    def _strip_non_promptable_overrides(
-        self,
-        schedule_data: dict[str, Any],
-        ujt_type: str,
-        ujt_id: int,
-    ) -> dict[str, Any]:
-        """Log schedule overrides that may conflict with template launch config.
-
-        Data is preserved as-is and passed through to AAP 2.6. If the target
-        API rejects an override, the failure is captured in the migration report
-        with the exact validation error for manual remediation.
-        """
-        if ujt_type not in ("job_templates", "workflow_job_templates"):
-            return schedule_data
-
-        config = self._get_template_launch_config(ujt_type, ujt_id)
-        if config is None:
-            return schedule_data
-
-        source_id = schedule_data.get("_source_id") or schedule_data.get("id")
-        source_name = schedule_data.get("name")
-
-        for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
-            if field not in schedule_data:
-                continue
-
-            value = schedule_data[field]
-            if value is None:
-                continue
-            if isinstance(value, str) and not value.strip():
-                continue
-            if isinstance(value, dict) and not value:
-                continue
-
-            if not config.get(launch_flag, False):
-                logger.info(
-                    f"schedule_{field}_override_preserved",
-                    source_id=source_id,
-                    source_name=source_name,
-                    ujt_type=ujt_type,
-                    ujt_id=ujt_id,
-                    field=field,
-                    launch_flag=launch_flag,
-                    message=(
-                        f"Preserving '{field}' override as-is — template does not "
-                        f"have '{launch_flag}' enabled. If AAP 2.6 rejects this, "
-                        f"the failure will appear in the migration report."
-                    ),
-                )
-
-        return schedule_data
-
-    @staticmethod
-    def _generate_valid_default(question: dict[str, Any]) -> Any:
-        """Generate a value that satisfies AAP 2.6 survey validation constraints."""
-        q_type = question.get("type", "text")
-        default = question.get("default")
-        min_val = question.get("min", 0)
-        choices = question.get("choices", "")
-
-        if isinstance(min_val, str):
-            try:
-                min_val = int(min_val) if min_val else 0
-            except ValueError:
-                min_val = 0
-
-        if q_type == "integer":
-            if isinstance(default, (int, float)) and default >= min_val:
-                return int(default)
-            return int(min_val) if min_val else 0
-
-        if q_type == "float":
-            if isinstance(default, (int, float)) and default >= min_val:
-                return float(default)
-            return float(min_val) if min_val else 0.0
-
-        if q_type == "multiplechoice":
-            choice_list = choices if isinstance(choices, list) else []
-            if default and default in choice_list:
-                return default
-            return choice_list[0] if choice_list else ""
-
-        if q_type == "multiselect":
-            choice_list = choices if isinstance(choices, list) else []
-            if isinstance(default, list):
-                return default if default else (choice_list[:1] if choice_list else [])
-            if isinstance(default, str) and default:
-                return default.split("\n")
-            return choice_list[:1] if choice_list else []
-
-        if q_type == "password" or default == "$encrypted$":
-            return "x" * max(int(min_val), 1)
-
-        if default is None:
-            default = ""
-        val = str(default)
-        if min_val and len(val) < int(min_val):
-            val = val + "x" * (int(min_val) - len(val))
-        return val
-
-    def _augment_survey_defaults(
-        self,
-        schedule_data: dict[str, Any],
-        ujt_type: str,
-        ujt_id: int,
-    ) -> dict[str, Any]:
-        """Fill in missing required survey variable defaults for AAP 2.6 compatibility.
-
-        AAP 2.4 allowed schedules to carry partial extra_data — missing required
-        survey variables used the survey's default at runtime. AAP 2.6 requires
-        ALL required survey variables in extra_data at schedule creation time.
-
-        This fills in the survey spec's own default values for any required
-        variable not already present in the schedule's extra_data, preserving
-        the effective runtime behavior from AAP 2.4.
-        """
-        config = self._get_template_launch_config(ujt_type, ujt_id)
-        if config is None:
-            return schedule_data
-        if not config.get("survey_enabled", False):
-            return schedule_data
-
-        survey_spec = config.get("_survey_spec")
-        if not survey_spec:
-            return schedule_data
-
-        extra_data = schedule_data.get("extra_data", {})
-        if isinstance(extra_data, str):
-            try:
-                extra_data = json.loads(extra_data) if extra_data else {}
-            except (json.JSONDecodeError, TypeError):
-                extra_data = {}
-
-        source_id = schedule_data.get("_source_id") or schedule_data.get("id")
-        augmented = []
-        password_placeholders = []
-
-        survey_by_var = {q["variable"]: q for q in survey_spec if q.get("variable")}
-
-        for key, value in list(extra_data.items()):
-            if value == "$encrypted$":
-                q = survey_by_var.get(key, {})
-                extra_data[key] = self._generate_valid_default(q)
-                password_placeholders.append(key)
-
-        for question in survey_spec:
-            var_name = question.get("variable")
-            if not var_name:
-                continue
-            if not question.get("required", False):
-                continue
-            if var_name in extra_data:
-                continue
-
-            q_type = question.get("type", "")
-            default = question.get("default")
-
-            if q_type == "password" or default == "$encrypted$":
-                password_placeholders.append(var_name)
-
-            extra_data[var_name] = self._generate_valid_default(question)
-            augmented.append(var_name)
-
-        if augmented:
-            schedule_data["extra_data"] = extra_data
-            logger.info(
-                "schedule_survey_defaults_augmented",
-                source_id=source_id,
-                source_name=schedule_data.get("name"),
-                ujt_type=ujt_type,
-                ujt_id=ujt_id,
-                augmented_vars=augmented,
-                password_placeholders=password_placeholders,
-                count=len(augmented),
-                message=(
-                    f"Augmented extra_data with {len(augmented)} survey default(s) "
-                    f"for AAP 2.6 compatibility: {augmented}"
-                ),
-            )
-
-        if password_placeholders:
-            schedule_data["_password_placeholder_vars"] = password_placeholders
-
-        return schedule_data
-
-    def _apply_specific_transformations(
-        self,
-        data: dict[str, Any],
-        resource_type: str,
-    ) -> dict[str, Any]:
-        """Apply schedule-specific transformations.
-
-        Logs potential launch config conflicts and augments extra_data with
-        missing required survey variable defaults for AAP 2.6 compatibility.
-        """
-        # Get template type and ID (set by _validate_dependencies)
-        ujt_type = data.get("_ujt_resource_type")
-        ujt_id = data.get("unified_job_template")
-
-        if ujt_type and ujt_id:
-            data = self._strip_non_promptable_overrides(data, ujt_type, ujt_id)
-            data = self._augment_survey_defaults(data, ujt_type, ujt_id)
-
-        return data
 
     def _validate_dependencies(
         self,
@@ -2646,244 +2468,6 @@ class ScheduleTransformer(DataTransformer):
         # We can add a temporary field to data.
         data["_ujt_resource_type"] = ujt_type
 
-        # FIX: Remove inventory field for inventory source schedules
-        # AAP 2.6 rejects the inventory field for inventory source schedules
-        # The inventory relationship is implicit through the inventory source itself
-        if ujt_type == "inventory_sources":
-            if data.pop("inventory", None) is not None:
-                logger.debug(
-                    "removed_inventory_field_for_inv_source_schedule",
-                    source_id=source_id,
-                    source_name=data.get("name"),
-                    message="Removed inventory field - not allowed for inventory source schedules in AAP 2.6",
-                )
-
-
-class WorkflowNodeTransformer(DataTransformer):
-    """Transformer for workflow node resources.
-
-    Workflow nodes can override fields like inventory, extra_data, limit, etc.
-    These overrides must be stripped if the parent template does not allow
-    prompting for those fields (ask_*_on_launch), otherwise AAP 2.6 rejects
-    the node with validation errors like:
-    - 'inventory: Field is not configured to prompt on launch.'
-    - 'extra_data: Variables are not allowed on launch.'
-
-    This mirrors the ScheduleTransformer prompt-on-launch logic.
-    """
-
-    DEPENDENCIES = {
-        "unified_job_template": "unified_job_templates",
-        "inventory": "inventories",
-        "execution_environment": "execution_environments",
-    }
-    # unified_job_template is required (nodes must reference a template)
-    REQUIRED_DEPENDENCIES = set()
-
-    # Cache for template launch configuration (loaded from exported data)
-    # Maps (resource_type, source_id) -> dict of ask_*_on_launch fields
-    _template_launch_config_cache: dict[tuple[str, int], dict[str, bool]] | None = None
-
-    # Field name to ask_*_on_launch attribute mapping
-    _FIELD_TO_LAUNCH_FLAG = {
-        "inventory": "ask_inventory_on_launch",
-        "extra_data": "ask_variables_on_launch",
-        "limit": "ask_limit_on_launch",
-        "diff_mode": "ask_diff_mode_on_launch",
-        "job_tags": "ask_tags_on_launch",
-        "skip_tags": "ask_skip_tags_on_launch",
-        "verbosity": "ask_verbosity_on_launch",
-        "job_type": "ask_job_type_on_launch",
-        "scm_branch": "ask_scm_branch_on_launch",
-        "forks": "ask_forks_on_launch",
-        "timeout": "ask_timeout_on_launch",
-        "job_slice_count": "ask_job_slice_count_on_launch",
-    }
-
-    def _load_template_launch_config(self) -> dict[tuple[str, int], dict[str, bool]]:
-        """Load ask_*_on_launch fields from exported template data.
-
-        Reads job_templates and workflow_job_templates from the input_dir
-        (raw exports) and builds a lookup cache mapping (resource_type, source_id)
-        to a dict of ask_*_on_launch fields.
-
-        Returns:
-            Cache dict mapping (resource_type, source_id) to launch config dict.
-        """
-        if self._template_launch_config_cache is not None:
-            return self._template_launch_config_cache
-
-        cache: dict[tuple[str, int], dict[str, bool]] = {}
-        self._template_launch_config_cache = cache
-
-        if not self.input_dir:
-            logger.debug(
-                "workflow_node_launch_config_no_input_dir",
-                message="No input_dir available - cannot load template launch config",
-            )
-            return cache
-
-        # Load from both job_templates and workflow_job_templates
-        for resource_type in ("job_templates", "workflow_job_templates"):
-            template_dir = self.input_dir / resource_type
-            if not template_dir.exists():
-                continue
-
-            for json_file in sorted(template_dir.glob(f"{resource_type}_*.json")):
-                try:
-                    with open(json_file) as f:
-                        templates = json.load(f)
-
-                    if not isinstance(templates, list):
-                        templates = [templates]
-
-                    for template in templates:
-                        source_id = template.get("_source_id") or template.get("id")
-                        if not source_id:
-                            continue
-
-                        # Extract all ask_*_on_launch fields
-                        launch_config = {}
-                        for key, value in template.items():
-                            if key.startswith("ask_") and key.endswith("_on_launch"):
-                                launch_config[key] = bool(value)
-
-                        # CRITICAL FIX: Also capture survey_enabled for workflow node extra_data validation
-                        # Workflow nodes with survey-enabled templates must preserve survey variable values
-                        # even when ask_variables_on_launch=False
-                        launch_config["survey_enabled"] = bool(
-                            template.get("survey_enabled", False)
-                        )
-
-                        # Extract survey variable names for granular filtering
-                        # Only preserve extra_data variables that are defined in the survey spec
-                        survey_spec = template.get("survey_spec")
-                        if survey_spec and isinstance(survey_spec, dict) and "spec" in survey_spec:
-                            survey_vars = set()
-                            for question in survey_spec["spec"]:
-                                if isinstance(question, dict) and "variable" in question:
-                                    survey_vars.add(question["variable"])
-                            if survey_vars:
-                                launch_config["_survey_vars"] = survey_vars
-                                launch_config["_survey_spec"] = survey_spec["spec"]
-
-                        if launch_config:
-                            cache[(resource_type, int(source_id))] = launch_config
-
-                except Exception as e:
-                    logger.warning(
-                        "workflow_node_launch_config_load_error",
-                        file=str(json_file),
-                        error=str(e),
-                        message="Failed to load template launch config from export file",
-                    )
-
-        logger.debug(
-            "workflow_node_launch_config_loaded",
-            job_templates=sum(1 for k in cache if k[0] == "job_templates"),
-            workflow_templates=sum(1 for k in cache if k[0] == "workflow_job_templates"),
-            total=len(cache),
-        )
-
-        return cache
-
-    def _get_template_launch_config(self, ujt_type: str, ujt_id: int) -> dict[str, bool] | None:
-        """Get the launch configuration for a specific template.
-
-        Args:
-            ujt_type: Resource type (e.g., 'job_templates', 'workflow_job_templates')
-            ujt_id: Source template ID
-
-        Returns:
-            Dict of ask_*_on_launch fields, or None if template not found.
-        """
-        cache = self._load_template_launch_config()
-        return cache.get((ujt_type, int(ujt_id)))
-
-    def _strip_non_promptable_overrides(
-        self,
-        node_data: dict[str, Any],
-        ujt_type: str,
-        ujt_id: int,
-    ) -> dict[str, Any]:
-        """Log workflow node overrides that may conflict with template launch config.
-
-        Data is preserved as-is and passed through to AAP 2.6. If the target
-        API rejects an override, the failure is captured in the migration report.
-        """
-        if ujt_type not in ("job_templates", "workflow_job_templates"):
-            return node_data
-
-        config = self._get_template_launch_config(ujt_type, ujt_id)
-        if config is None:
-            return node_data
-
-        source_id = node_data.get("_source_id") or node_data.get("id")
-
-        for field, launch_flag in self._FIELD_TO_LAUNCH_FLAG.items():
-            if field not in node_data:
-                continue
-
-            value = node_data[field]
-            if value is None:
-                continue
-            if isinstance(value, str) and not value.strip():
-                continue
-            if isinstance(value, dict) and not value:
-                continue
-
-            if not config.get(launch_flag, False):
-                logger.info(
-                    f"workflow_node_{field}_override_preserved",
-                    source_id=source_id,
-                    ujt_type=ujt_type,
-                    ujt_id=ujt_id,
-                    field=field,
-                    launch_flag=launch_flag,
-                    message=(
-                        f"Preserving '{field}' override as-is — template does not "
-                        f"have '{launch_flag}' enabled. If AAP 2.6 rejects this, "
-                        f"the failure will appear in the migration report."
-                    ),
-                )
-
-        return node_data
-
-    def _apply_specific_transformations(
-        self,
-        data: dict[str, Any],
-        resource_type: str,
-    ) -> dict[str, Any]:
-        """Apply workflow node-specific transformations.
-
-        Logs potential launch config conflicts but preserves all data as-is.
-        """
-        # Determine the template type and ID
-        # Workflow nodes reference a unified_job_template which could be
-        # a job_template or workflow_job_template
-        ujt_id = data.get("unified_job_template")
-
-        if ujt_id:
-            # Try to determine template type from _ujt_resource_type metadata
-            ujt_type = data.get("_ujt_resource_type")
-
-            if not ujt_type:
-                # Fallback: Try summary_fields to determine type
-                if "summary_fields" in data and "unified_job_template" in data["summary_fields"]:
-                    ujt_summary = data["summary_fields"]["unified_job_template"]
-                    if isinstance(ujt_summary, dict):
-                        api_type = ujt_summary.get("type")
-                        type_map = {
-                            "job_template": "job_templates",
-                            "workflow_job_template": "workflow_job_templates",
-                        }
-                        ujt_type = type_map.get(api_type)
-
-            if ujt_type:
-                data = self._strip_non_promptable_overrides(data, ujt_type, ujt_id)
-
-        return data
-
 
 class SystemJobTemplateTransformer(DataTransformer):
     """Transformer for system job template resources.
@@ -2953,14 +2537,36 @@ class CredentialInputSourceTransformer(DataTransformer):
     """Transformer for credential input source resources.
 
     These resources link one credential's input field to another credential.
-    They depend on both the "parent" credential and the "source" credential.
+    They depend on both the target credential and the source credential.
+    AAP API field names are ``target_credential`` and ``source_credential``.
     """
 
     DEPENDENCIES = {
-        "credential": "credentials",  # The credential being modified
-        "source_credential": "credentials",  # The credential providing the input
+        "target_credential": "credentials",
+        "source_credential": "credentials",
     }
-    REQUIRED_DEPENDENCIES = {"credential", "source_credential"}
+    REQUIRED_DEPENDENCIES = {"target_credential", "source_credential"}
+
+    def _normalize_target_credential_field(self, data: dict[str, Any]) -> None:
+        """Normalize legacy ``credential`` alias to ``target_credential``."""
+        if not data.get("target_credential") and data.get("credential"):
+            data["target_credential"] = data.pop("credential")
+        elif "credential" in data and data.get("target_credential"):
+            data.pop("credential", None)
+
+    def _validate_dependencies(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> None:
+        self._normalize_target_credential_field(data)
+        super()._validate_dependencies(data, resource_type)
+
+    def _apply_specific_transformations(
+        self, data: dict[str, Any], resource_type: str
+    ) -> dict[str, Any]:
+        self._normalize_target_credential_field(data)
+        return data
 
 
 class JobsTransformer(DataTransformer):
@@ -3079,9 +2685,9 @@ class ApplicationTransformer(DataTransformer):
 
         # Add migration notes
         data["_migration_notes"] = {
-            "client_secret_action": "will_be_auto_generated"
-            if data.get("_requires_new_secret")
-            else "none",
+            "client_secret_action": (
+                "will_be_auto_generated" if data.get("_requires_new_secret") else "none"
+            ),
             "redirect_uris_action": "review_for_environment",
             "external_systems_action": "update_with_new_client_id_secret",
         }
@@ -3181,9 +2787,9 @@ class SettingsTransformer(DataTransformer):
             "safe_to_copy_count": len(categorized["safe_to_copy"]),
             "review_required_count": len(categorized["review_required"]),
             "sensitive_count": len(categorized["sensitive"]),
-            "auto_import_percentage": round(len(categorized["safe_to_copy"]) / len(data) * 100, 1)
-            if len(data) > 0
-            else 0,
+            "auto_import_percentage": (
+                round(len(categorized["safe_to_copy"]) / len(data) * 100, 1) if len(data) > 0 else 0
+            ),
         }
 
         return categorized
@@ -3212,7 +2818,6 @@ TRANSFORMER_CLASSES: dict[str, type[DataTransformer]] = {
     "projects": ProjectTransformer,
     "job_templates": JobTemplateTransformer,
     "workflow_job_templates": WorkflowTransformer,
-    "workflow_nodes": WorkflowNodeTransformer,
     "schedules": ScheduleTransformer,
     "system_job_templates": SystemJobTemplateTransformer,
     "notification_templates": NotificationTemplateTransformer,

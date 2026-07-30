@@ -63,7 +63,7 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                     "count": len(items),
                 }
             )
-        resource_summary.sort(key=lambda x: x["display"])
+        resource_summary.sort(key=lambda x: str(x["display"]))
 
         # Dependencies grouped by source org, each dependency a resource with
         # the list of local resources that require it.
@@ -88,7 +88,7 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                     }
                 )
             # Sort: by type then name for stable list order
-            resources.sort(key=lambda r: (r["type_display"], r["name"].lower()))
+            resources.sort(key=lambda r: (str(r["type_display"]), str(r["name"]).lower()))
             dependencies.append(
                 {
                     "org": dep_org,

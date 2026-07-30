@@ -167,6 +167,10 @@ exclude_dirs = [
 skips = [
     "B101",  # assert_used - OK in tests
     "B601",  # paramiko_calls - we don't use paramiko
+    "B110",  # try_except_pass - intentional in migration batch paths
+    "B112",  # try_except_continue - intentional in migration batch paths
+    "B603",  # subprocess - CLI invokes trusted local patch-projects command
+    "B311",  # random.sample - statistical sampling in IAM benchmark, not crypto
 ]
 # Security severity levels: LOW, MEDIUM, HIGH
 # Confidence levels: LOW, MEDIUM, HIGH

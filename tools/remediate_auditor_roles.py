@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -63,10 +62,12 @@ def find_auditors_in_xformed(data_dir: Path) -> list[dict]:
             users = json.load(f)
         for user in users:
             if user.get("is_system_auditor") is True:
-                auditors.append({
-                    "username": user.get("username", "unknown"),
-                    "source_id": user.get("_source_id", user.get("id")),
-                })
+                auditors.append(
+                    {
+                        "username": user.get("username", "unknown"),
+                        "source_id": user.get("_source_id", user.get("id")),
+                    }
+                )
     return auditors
 
 
@@ -92,7 +93,9 @@ def resolve_target_ids(data_dir: Path, auditors: list[dict]) -> list[dict]:
             auditor["target_id"] = row[0]
             resolved.append(auditor)
         else:
-            print(f"  WARNING: No target_id for {auditor['username']} (source_id={auditor['source_id']})")
+            print(
+                f"  WARNING: No target_id for {auditor['username']} (source_id={auditor['source_id']})"
+            )
     conn.close()
     return resolved
 
@@ -141,8 +144,8 @@ async def main(args: argparse.Namespace) -> int:
     print()
 
     # Create a minimal async client
-    from aap_migration.config import AAPInstanceConfig
     from aap_migration.client.aap_target_client import AAPTargetClient
+    from aap_migration.config import AAPInstanceConfig
 
     config = AAPInstanceConfig(url=target_url, token=target_token, verify_ssl=False)
     client = AAPTargetClient(config)
@@ -180,11 +183,14 @@ def cli():
         description="Remediate: assign Gateway Platform Auditor roles for already-migrated users"
     )
     parser.add_argument(
-        "--data-dir", required=True,
-        help="Migration data directory (contains xformed/, database/)"
+        "--data-dir", required=True, help="Migration data directory (contains xformed/, database/)"
     )
-    parser.add_argument("--target-url", default="", help="Target AAP URL (or set TARGET__URL in .env)")
-    parser.add_argument("--target-token", default="", help="Gateway-capable token (or set TARGET__TOKEN in .env)")
+    parser.add_argument(
+        "--target-url", default="", help="Target AAP URL (or set TARGET__URL in .env)"
+    )
+    parser.add_argument(
+        "--target-token", default="", help="Gateway-capable token (or set TARGET__TOKEN in .env)"
+    )
     return parser.parse_args()
 
 
