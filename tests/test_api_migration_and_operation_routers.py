@@ -32,7 +32,9 @@ class FakeJob:
 
 
 @pytest.mark.asyncio
-async def test_migration_router_preview_run_and_state(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_migration_router_preview_run_and_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     svc = FakeJobService()
     source = SimpleNamespace(id="src", name="Source", url="https://source.example.com")
     target = SimpleNamespace(id="dst", name="Target", url="https://target.example.com")
@@ -44,11 +46,28 @@ async def test_migration_router_preview_run_and_state(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         migration.ConnectionService,
         "build_instance_config",
-        lambda conn: SimpleNamespace(url=conn.url),
+        lambda conn: SimpleNamespace(
+            url=conn.url,
+            token="tok",
+            verify_ssl=True,
+            timeout=30,
+        ),
     )
     monkeypatch.setattr(migration.ConnectionService, "_auth_scheme", lambda conn: "Token")
     monkeypatch.setattr(migration, "get_job_service", lambda: svc)
-    monkeypatch.setattr(migration, "get_exportable_types", lambda: ["organizations", "users"])
+    monkeypatch.setattr(migration, "get_db_url", lambda: f"sqlite:///{tmp_path / 'preview.db'}")
+    monkeypatch.setattr(
+        "aap_migration.resources.get_fully_supported_types",
+        lambda: ["organizations", "users"],
+    )
+
+    async def _async_zero(*_a, **_k):
+        return 0
+
+    monkeypatch.setattr(
+        "aap_migration.migration.credential_type_utils.map_managed_credential_types",
+        _async_zero,
+    )
 
     class FakeSourceClient:
         def __init__(self, config, auth_scheme=None):
@@ -65,10 +84,16 @@ async def test_migration_router_preview_run_and_state(monkeypatch: pytest.Monkey
                 return [{"id": 1, "name": "Default"}]
             if endpoint == "users/":
                 return [
-                    {"id": 2, "username": "alice", "organization": 1},
-                    {"id": 3, "username": "bob", "organization": 2},
+                    {"id": 2, "username": "alice"},
+                    {"id": 3, "username": "bob"},
                 ]
             return []
+
+        async def list_resources(self, resource_type, page_size=200):
+            endpoint = {"organizations": "organizations/", "users": "users/"}.get(
+                resource_type, f"{resource_type}/"
+            )
+            return await self.get_paginated(endpoint, page_size=page_size)
 
     class FakeTargetClient(FakeSourceClient):
         async def get_paginated(self, endpoint, page_size=200):
@@ -91,14 +116,65 @@ async def test_migration_router_preview_run_and_state(monkeypatch: pytest.Monkey
     preview_result = await preview_callback(FakeJob(), logs.append)
     assert preview_result["resources"]["organizations"][0]["action"] == "create"
     assert preview_result["resources"]["users"][0]["action"] == "skip"
-    assert (
-        "users" not in preview_result["resources"] or len(preview_result["resources"]["users"]) == 1
-    )
+    assert preview_result["resources"]["users"][0]["name"] == "alice"
+    assert preview_result["bootstrap"]["mapped"] >= 1
     assert any("Filtering to organizations: [1]" in line for line in logs)
+    assert any("Scanning source and target" in line for line in logs)
 
     svc.jobs["preview-job"] = FakeJob(status="completed", result={"hello": "world"})
     merged = migration.get_migration_preview("preview-job")
     assert merged["hello"] == "world"
+
+    captured: dict[str, object] = {}
+
+    def fake_build_source_contexts(source_configs, dest_cfg, dest_auth_scheme, db_url):
+        captured["source_configs"] = source_configs
+        sources = [
+            {
+                **cfg,
+                "src_client": object(),
+                "state": object(),
+                "migration_config": SimpleNamespace(performance=None, resource_mappings={}),
+            }
+            for cfg in source_configs
+        ]
+        return dest_cfg, object(), sources
+
+    async def fake_migrate_resource_type(
+        rtype, sources, target_client, phase_num, emit, log, created_creds
+    ):
+        captured.setdefault("migrated_types", []).append(rtype)  # type: ignore[union-attr]
+        assert sources[0].get("excluded_ids") == {"users": [2]}
+        assert sources[0].get("name_prefix") == "pre-"
+        emit(
+            {
+                "_event": "resource_result",
+                "phase_num": phase_num,
+                "name": "pre-Default" if rtype == "organizations" else "alice",
+                "resource_type": rtype,
+                "result": "created" if rtype == "organizations" else "skipped",
+                "detail": "" if rtype == "organizations" else "Excluded by user",
+            }
+        )
+        if rtype == "organizations":
+            return 1, 0, 0, 1
+        return 0, 1, 0, 0
+
+    async def fake_run_cac_org_update(sources, target_client, phase_num, emit, log):
+        return 0
+
+    monkeypatch.setattr(
+        "aap_migration.api.routers.planner._build_source_contexts",
+        fake_build_source_contexts,
+    )
+    monkeypatch.setattr(
+        "aap_migration.api.routers.planner._migrate_resource_type",
+        fake_migrate_resource_type,
+    )
+    monkeypatch.setattr(
+        "aap_migration.api.routers.planner._run_cac_org_update",
+        fake_run_cac_org_update,
+    )
 
     run_response = await migration.migration_run(
         MigrationRunRequest(
@@ -115,10 +191,22 @@ async def test_migration_router_preview_run_and_state(monkeypatch: pytest.Monkey
     _, _, run_callback = svc.started[1]
     run_logs = []
     run_result = await run_callback(FakeJob(), run_logs.append)
-    assert run_result == {"total_created": 1, "total_skipped": 0, "total_failed": 0}
+    assert run_result == {
+        "total_created": 1,
+        "total_skipped": 1,
+        "total_failed": 0,
+        "total_updated": 0,
+    }
+    assert captured["migrated_types"] == ["organizations", "users"]
+    assert captured["source_configs"][0]["name_prefix"] == "pre-"  # type: ignore[index]
+    assert captured["source_configs"][0]["org_ids"] == [1]  # type: ignore[index]
     events = [json.loads(line[1:]) for line in run_logs if line.startswith("\t{")]
     assert any(event["_event"] == "migration_start" for event in events)
-    assert all(event.get("resource_type") != "users" for event in events if "_event" in event)
+    assert any(
+        event.get("resource_type") == "organizations" and event.get("result") == "created"
+        for event in events
+    )
+    assert any("Applying name prefix: 'pre-'" in line for line in run_logs)
 
     class DeleteQuery:
         def __init__(self, value):

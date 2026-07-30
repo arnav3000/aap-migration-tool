@@ -1,7 +1,7 @@
 .PHONY: help install install-dev clean format lint typecheck test test-unit test-integration \
        test-performance test-cov test-watch check pre-commit docs docs-serve run-example \
        init-env setup version venv install-editable all \
-       build build-api build-ui build-test prepare-pgdata prepare-volumes up up-dev down down-images destroy shell shell-engine logs \
+       build build-api build-ui build-test prepare-pgdata prepare-volumes check-container-env up up-dev down down-images destroy shell shell-engine logs \
        c-test c-test-backend c-test-frontend c-test-smoke c-test-all c-ci-full c-lint c-format c-typecheck c-check \
        web-install web-dev web-build serve
 
@@ -173,10 +173,13 @@ prepare-pgdata: prepare-volumes ## Prepare PostgreSQL volume ownership for rootl
 	@podman volume inspect $(PGDATA_VOLUME) >/dev/null 2>&1 || podman volume create $(PGDATA_VOLUME) >/dev/null
 	@podman unshare chown -R 26:26 "$$(podman volume inspect $(PGDATA_VOLUME) --format '{{.Mountpoint}}')"
 
-up: prepare-pgdata ## Start db + engine + ui (web interface)
+check-container-env: ## Validate container/.env exists and has required values
+	@$(PYTHON) scripts/check_container_env.py
+
+up: prepare-pgdata check-container-env ## Start db + engine + ui (web interface)
 	$(COMPOSE) up -d db engine ui
 
-up-dev: prepare-pgdata ## Start db + bridge (CLI dev container)
+up-dev: prepare-pgdata check-container-env ## Start db + bridge (CLI dev container)
 	$(COMPOSE) up -d db bridge
 
 down: ## Stop containers (keeps volumes and images — migration state is preserved)

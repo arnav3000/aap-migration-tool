@@ -119,8 +119,11 @@ async def test_jobs_router_resume_and_exports(monkeypatch: pytest.MonkeyPatch) -
             async for chunk in csv_response.body_iterator
         ]
     ).decode()
-    assert "Credential Name,Credential Type,Organization,Used By Type,Used By Name" in csv_body
-    assert "Machine,ssh,Default,job_template,Deploy" in csv_body
+    assert (
+        "Source,Name Prefix,Credential Name,Credential Type,Organization,"
+        "Used By Type,Used By Name" in csv_body
+    )
+    assert ",,Machine,ssh,Default,job_template,Deploy" in csv_body
 
 
 def test_jobs_router_error_cases(monkeypatch: pytest.MonkeyPatch) -> None:

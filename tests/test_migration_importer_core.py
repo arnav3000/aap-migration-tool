@@ -5,6 +5,7 @@ from aap_migration.config import PerformanceConfig
 from aap_migration.migration.importer import (
     CredentialImporter,
     CredentialTypeImporter,
+    InstanceImporter,
     ProjectImporter,
     ResourceImporter,
     UserImporter,
@@ -33,6 +34,8 @@ class FakeState:
     def mark_completed(self, **kwargs):
         self.completed.append(kwargs)
         self.migrated.add((kwargs["resource_type"], kwargs["source_id"]))
+        if "target_id" in kwargs and kwargs["target_id"] is not None:
+            self.mapped_ids[(kwargs["resource_type"], kwargs["source_id"])] = kwargs["target_id"]
 
     def mark_failed(self, **kwargs):
         self.failed.append(kwargs)
@@ -46,6 +49,18 @@ class FakeState:
 
     def get_mapped_id(self, resource_type, source_id):
         return self.mapped_ids.get((resource_type, source_id))
+
+    def get_id_mapping(self, resource_type, source_id):
+        target_id = self.mapped_ids.get((resource_type, source_id))
+        if target_id is None and (resource_type, source_id) not in self.mapped_ids:
+            return None
+        return {
+            "source_id": source_id,
+            "target_id": target_id,
+            "source_name": None,
+            "target_name": None,
+            "resource_type": resource_type,
+        }
 
 
 class FakeTargetClient:
@@ -88,6 +103,9 @@ class FakeTargetClient:
         if isinstance(result, Exception):
             raise result
         return result
+
+    async def list_resources(self, resource_type, **kwargs):
+        return list(self.get_results.get(("list", resource_type), []))
 
     async def post(self, endpoint, json_data=None):
         self.post_calls.append((endpoint, dict(json_data or {})))
@@ -180,7 +198,10 @@ async def test_resource_importer_import_resource_handles_duplicates_conflicts_an
         resolve_dependencies=False,
     )
     assert duplicate["id"] == 900
-    assert state.skipped[-1]["target_id"] == 900
+    assert duplicate["_already_migrated"] is True
+    assert state.completed[-1]["target_id"] == 900
+    assert state.get_mapped_id("teams", 2) == 900
+    assert importer.stats["skipped_count"] == 1
 
     async def fake_handle_conflict(resource_type, source_id, data):
         return {"id": 901, "name": data["name"]}
@@ -284,16 +305,37 @@ async def test_specialized_importers_cover_credential_type_user_and_credential_p
     credential_client.get_results[
         ("credentials/", (("credential_type", 330), ("name", "Vault"), ("organization", 107)))
     ] = {"results": [{"id": 44, "managed": True}]}
+    # Builtin type IDs differ across versions — resolve Source Control by name (2 → 6)
+    credential_client.find_results[("credential_types", "Source Control", None, None, None)] = {
+        "id": 6,
+        "name": "Source Control",
+    }
     credential_importer = CredentialImporter(credential_client, credential_state, performance)
 
     resolved_credential = await credential_importer._resolve_dependencies(
         "credentials",
-        {"name": "Vault", "credential_type": 5, "organization": 7, "user": 9, "team": 999},
+        {
+            "name": "git-cred",
+            "credential_type": 2,
+            "organization": 7,
+            "user": 9,
+            "team": 999,
+            "_dependency_names": {"credential_type": "Source Control"},
+        },
     )
-    assert resolved_credential["credential_type"] == 5
+    assert resolved_credential["credential_type"] == 6
+    assert credential_state.mapped_ids[("credential_types", 2)] == 6
     assert resolved_credential["organization"] == 107
     assert resolved_credential["user"] == 109
     assert "team" not in resolved_credential
+
+    # Without mapping or type name, refuse to reuse the source builtin ID
+    unresolved = await credential_importer._resolve_dependencies(
+        "credentials",
+        {"name": "orphan", "credential_type": 5, "organization": 7},
+    )
+    assert "credential_type" not in unresolved
+
     assert credential_importer._detect_encrypted_fields(
         {"_encrypted_fields": ["password"], "inputs": {"ssh_key_unlock": "$encrypted$"}}
     ) == ["password", "ssh_key_unlock"]
@@ -326,6 +368,173 @@ async def test_specialized_importers_cover_credential_type_user_and_credential_p
         {"name": "Create Me", "organization": 7, "credential_type": 30},
     )
     assert created_credential["id"] == 500
+
+
+@pytest.mark.asyncio
+async def test_credential_importer_defaults_owner_to_admin_when_missing():
+    performance = PerformanceConfig()
+    state = FakeState(mapped_ids={("credential_types", 30): 330})
+    client = FakeTargetClient()
+    client.get_results[("users/", (("username", "admin"),))] = {
+        "results": [{"id": 1, "username": "admin"}]
+    }
+    # Lookup by name+type with no org (owner will be admin user)
+    client.get_results[("credentials/", (("credential_type", 330), ("name", "Orphan Cred")))] = {
+        "results": []
+    }
+    importer = CredentialImporter(client, state, performance)
+
+    created = await importer.import_resource(
+        "credentials",
+        50,
+        {"name": "Orphan Cred", "credential_type": 30},
+    )
+
+    assert created["id"] == 500
+    # create_resource should have been called with user=admin
+    assert ("users/", {"username": "admin"}) in client.get_calls
+
+
+@pytest.mark.asyncio
+async def test_credential_import_failure_logs_credential_type():
+    performance = PerformanceConfig()
+    state = FakeState(mapped_ids={("credential_types", 2): 102})
+    client = FakeTargetClient()
+    client.get_results[("credentials/", (("credential_type", 102), ("name", "SCM Cred")))] = {
+        "results": []
+    }
+    client.get_results[("credential_types/102/", ())] = {
+        "id": 102,
+        "name": "Galaxy Server Token",
+    }
+    client.create_error = APIError(
+        "Additional properties are not allowed "
+        "('ssh_key_data', 'ssh_key_unlock', 'username' were unexpected)"
+    )
+    importer = CredentialImporter(client, state, performance)
+
+    result = await importer.import_resource(
+        "credentials",
+        99,
+        {
+            "name": "SCM Cred",
+            "credential_type": 2,
+            "inputs": {
+                "username": "git",
+                "ssh_key_data": "KEY",
+                "ssh_key_unlock": "pass",
+            },
+            "_dependency_names": {"credential_type": "Source Control"},
+            "user": 1,
+        },
+    )
+
+    assert result is None
+    assert len(importer.import_errors) == 1
+    err = importer.import_errors[0]["error"]
+    assert "Galaxy Server Token" in err or "Source Control" in err
+    assert "credential_type=" in err
+    assert "ssh_key_data" in err
+
+
+@pytest.mark.asyncio
+async def test_team_importer_reports_unmapped_organization_clearly():
+    from aap_migration.migration.importer import TeamImporter
+
+    performance = PerformanceConfig()
+    state = FakeState()  # no org mapping
+    client = FakeTargetClient()
+    importer = TeamImporter(client, state, performance)
+    result = await importer.import_resource(
+        "teams",
+        25,
+        {"name": "Ops", "organization": 5},
+    )
+    assert result is None
+    assert "source id 5" in importer.import_errors[-1]["error"]
+    assert importer.import_errors[-1]["error_type"] == "ValidationError"
+
+
+@pytest.mark.asyncio
+async def test_instance_importer_maps_by_hostname_instead_of_create():
+    performance = PerformanceConfig()
+    state = FakeState()
+    client = FakeTargetClient()
+    client.get_results[("list", "instances")] = [
+        {"id": 9, "hostname": "controller.example.com"},
+    ]
+    importer = InstanceImporter(client, state, performance, resource_mappings={})
+
+    mapped = await importer.import_resource(
+        "instances",
+        1,
+        {"id": 1, "hostname": "controller.example.com"},
+    )
+    assert mapped["id"] == 9
+    assert state.get_mapped_id("instances", 1) == 9
+    assert client.create_error is None
+
+
+@pytest.mark.asyncio
+async def test_user_importer_maps_existing_username_on_400():
+    performance = PerformanceConfig()
+    state = FakeState()
+    client = FakeTargetClient()
+    client.create_error = APIError(
+        "already exists",
+        status_code=400,
+        response={"username": ["A user with that username already exists."]},
+    )
+    client.get_results[("users/", (("username", "alice"),))] = {
+        "results": [{"id": 42, "username": "alice"}]
+    }
+    importer = UserImporter(client, state, performance)
+
+    result = await importer.import_resource(
+        "users",
+        10,
+        {"username": "alice", "is_superuser": False},
+    )
+    assert result["id"] == 42
+    assert state.get_mapped_id("users", 10) == 42
+    assert importer.stats["conflict_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_project_importer_attaches_credential_on_already_migrated():
+    """Re-runs must PATCH SCM credential onto projects created without one."""
+    state = FakeState(
+        mapped_ids={
+            ("projects", 1): 101,
+            ("organizations", 7): 107,
+            ("credentials", 9): 209,
+        },
+        migrated={("projects", 1)},
+    )
+    client = FakeTargetClient()
+    client.get_results[("projects/101/", ())] = {
+        "id": 101,
+        "name": "dev_Project",
+        "credential": None,
+    }
+    importer = ProjectImporter(client, state, PerformanceConfig())
+
+    result = await importer.import_resource(
+        "projects",
+        1,
+        {
+            "name": "dev_Project",
+            "organization": 7,
+            "credential": 9,
+            "scm_type": "git",
+            "scm_url": "https://example.com/repo.git",
+        },
+    )
+
+    assert result is not None
+    assert result["_already_migrated"] is True
+    assert "credential attached" in result["_skip_reason"]
+    assert client.update_calls == [("projects", 101, {"credential": 209})]
 
 
 @pytest.mark.asyncio

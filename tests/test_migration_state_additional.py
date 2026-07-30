@@ -8,8 +8,12 @@ from aap_migration.migration.models import IDMapping, MigrationProgress
 from aap_migration.migration.state import MigrationState, StateError
 
 
-def build_state(db_url: str, migration_id: str = "test-migration") -> MigrationState:
-    return MigrationState(StateConfig(db_path=db_url), migration_id=migration_id)
+def build_state(
+    db_url: str, migration_id: str = "test-migration", source_key: str = ""
+) -> MigrationState:
+    return MigrationState(
+        StateConfig(db_path=db_url), migration_id=migration_id, source_key=source_key
+    )
 
 
 def get_progress(
@@ -18,7 +22,11 @@ def get_progress(
     with get_session(state.database_url) as session:
         return (
             session.query(MigrationProgress)
-            .filter_by(resource_type=resource_type, source_id=source_id)
+            .filter_by(
+                resource_type=resource_type,
+                source_id=source_id,
+                source_key=state.source_key,
+            )
             .first()
         )
 
@@ -27,7 +35,11 @@ def get_mapping(state: MigrationState, resource_type: str, source_id: int) -> ID
     with get_session(state.database_url) as session:
         return (
             session.query(IDMapping)
-            .filter_by(resource_type=resource_type, source_id=source_id)
+            .filter_by(
+                resource_type=resource_type,
+                source_id=source_id,
+                source_key=state.source_key,
+            )
             .first()
         )
 
@@ -237,7 +249,16 @@ def test_state_covers_seed_and_update_branches(sqlite_db_url, tmp_path):
     assert skipped_progress.status == "skipped"
     assert skipped_progress.target_id == 2100
 
-    assert state.get_id_mapping("users", 21) is None
+    # Duplicate-detection skip must populate id_mappings so dependents can resolve FKs
+    assert state.get_mapped_id("users", 21) == 2100
+    assert state.is_migrated("users", 21) is True
+    assert state.get_id_mapping("users", 21) == {
+        "source_id": 21,
+        "target_id": 2100,
+        "source_name": "user21",
+        "target_name": "User Twenty One",
+        "resource_type": "users",
+    }
     assert state.get_mapping_by_name("users", "missing") is None
 
     state.save_id_mapping(
@@ -312,3 +333,27 @@ def test_state_covers_seed_and_update_branches(sqlite_db_url, tmp_path):
     assert imported_progress.target_id == 2222
     assert state.get_mapped_id("organizations", 30) == 4444
     assert state.get_id_mapping("projects", 31)["target_name"] == "Proj Thirty One"
+
+
+def test_source_key_isolates_multi_source_mappings(sqlite_db_url):
+    """Two plan sources with overlapping numeric IDs must not collide in state."""
+    source_a = build_state(sqlite_db_url, migration_id="mig-a", source_key="conn-a")
+    source_b = build_state(sqlite_db_url, migration_id="mig-b", source_key="conn-b")
+
+    source_a.create_source_mapping("organizations", 1, "Org From A")
+    source_a.mark_in_progress("organizations", 1, "Org From A")
+    source_a.mark_completed("organizations", 1, target_id=101, source_name="Org From A")
+
+    # Same source_id=1 on a different connection must be independent
+    assert source_b.has_source_mapping("organizations", 1) is False
+    assert source_b.get_mapped_id("organizations", 1) is None
+    assert source_b.is_migrated("organizations", 1) is False
+
+    source_b.create_source_mapping("organizations", 1, "Org From B")
+    source_b.mark_in_progress("organizations", 1, "Org From B")
+    source_b.mark_completed("organizations", 1, target_id=202, source_name="Org From B")
+
+    assert source_a.get_mapped_id("organizations", 1) == 101
+    assert source_b.get_mapped_id("organizations", 1) == 202
+    assert get_mapping(source_a, "organizations", 1).source_key == "conn-a"
+    assert get_mapping(source_b, "organizations", 1).source_key == "conn-b"

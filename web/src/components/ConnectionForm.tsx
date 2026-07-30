@@ -28,7 +28,9 @@ export function ConnectionForm({ isOpen, initial, onSave, onClose, error }: Prop
   const isEdit = !!initial?.name;
   const [name, setName] = useState(initial?.name || '');
   const [type, setType] = useState<'awx' | 'aap'>(initial?.type || 'awx');
-  const [role, setRole] = useState<'source' | 'destination'>(initial?.role || 'source');
+  const [role, setRole] = useState<'source' | 'destination'>(
+    initial?.role === 'target' ? 'destination' : (initial?.role || 'source')
+  );
   const [url, setUrl] = useState(initial?.url || '');
   const [token, setToken] = useState('');
   const [verifySsl, setVerifySsl] = useState(initial?.verify_ssl ?? true);

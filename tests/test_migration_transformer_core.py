@@ -164,10 +164,16 @@ def test_generate_keys_and_base_transformer_schema_flow(tmp_path):
     assert transformer.stats["fields_added"] == 1
     assert transformer.stats["fields_renamed"] == 2
 
-    with pytest.raises(SkipResourceError, match="references non-exported organizations 404"):
+    with pytest.raises(SkipResourceError, match="organizations \\(source id 404\\)"):
         transformer.transform_resource(
             "widgets",
             {"id": 56, "name": "Missing Org", "organization": 404},
+        )
+
+    with pytest.raises(SkipResourceError, match="required field 'organization'"):
+        transformer.transform_resource(
+            "widgets",
+            {"id": 57, "name": "No Org Field"},
         )
 
 
@@ -286,9 +292,10 @@ def test_credential_transformer_handles_external_types_recovery_and_encrypted_fi
         },
         "credentials",
     )
-    assert defaulted["organization"] == 1
+    # Null org is left unset — import assigns the target admin user when needed
+    assert defaulted.get("organization") is None
 
-    with pytest.raises(SkipResourceError, match="references non-exported credential_types 99"):
+    with pytest.raises(SkipResourceError, match="credential_types \\(source id 99\\)"):
         transformer.transform_resource(
             "credentials",
             {
@@ -298,6 +305,110 @@ def test_credential_transformer_handles_external_types_recovery_and_encrypted_fi
                 "credential_type": 99,
                 "inputs": {},
             },
+        )
+
+
+def test_credential_transformer_allows_builtin_credential_type_without_mapping():
+    """Built-in types (e.g. Source Control id=2) must not block credential transform."""
+    state = FakeState(source_mappings={("organizations", 7)})
+    transformer = CredentialTransformer(state=state)
+
+    transformed = transformer.transform_resource(
+        "credentials",
+        {
+            "id": 10,
+            "name": "scm-cred",
+            "organization": 7,
+            "credential_type": 2,
+            "inputs": {"username": "git"},
+        },
+    )
+
+    assert transformed["credential_type"] == 2
+    assert ("credentials", 10, "scm-cred") in state.created
+
+
+def test_team_transformer_extracts_organization_from_summary_fields():
+    from aap_migration.migration.transformer import TeamTransformer
+
+    state = FakeState(source_mappings={("organizations", 5)})
+    transformer = TeamTransformer(state=state)
+
+    transformed = transformer.transform_resource(
+        "teams",
+        {
+            "id": 25,
+            "name": "Ops",
+            "organization": None,
+            "summary_fields": {"organization": {"id": 5, "name": "Default"}},
+        },
+    )
+
+    assert transformed["organization"] == 5
+    assert "summary_fields" not in transformed
+
+    with pytest.raises(SkipResourceError, match="organizations"):
+        transformer.transform_resource(
+            "teams",
+            {
+                "id": 26,
+                "name": "Missing Org Mapping",
+                "organization": 99,
+            },
+        )
+
+
+def test_credential_transformer_boolean_and_vault_id_handling():
+    state = FakeState(
+        source_mappings={("organizations", 7), ("credential_types", 18)},
+        mapping_info={
+            ("credential_types", 18): {"source_name": "Machine"},
+        },
+    )
+    transformer = CredentialTransformer(state=state)
+
+    transformed = transformer._apply_specific_transformations(
+        {
+            "id": 1,
+            "name": "Machine Cred",
+            "organization": 7,
+            "credential_type": 18,
+            "summary_fields": {"credential_type": {"name": "Machine"}},
+            "inputs": {
+                "verify_ssl": "$encrypted$",
+                "vault_id": "prod",
+                "ssh_key_data": "$encrypted$",
+            },
+        },
+        "credentials",
+    )
+
+    assert transformed["inputs"]["verify_ssl"] is True
+    assert "vault_id" not in transformed["inputs"]
+    assert transformed["inputs"]["ssh_key_data"] != "$encrypted$"
+
+
+def test_credential_type_transformer_strips_dependencies_and_skips_galaxy_kind():
+    transformer = CredentialTypeTransformer(state=FakeState())
+
+    cleaned = transformer._apply_specific_transformations(
+        {
+            "id": 1,
+            "name": "Custom",
+            "managed": False,
+            "kind": "cloud",
+            "inputs": {"fields": [], "dependencies": ["other"]},
+            "injectors": {"env": {}, "dependencies": ["x"]},
+        },
+        "credential_types",
+    )
+    assert "dependencies" not in cleaned["inputs"]
+    assert "dependencies" not in cleaned["injectors"]
+
+    with pytest.raises(SkipResourceError, match="kind 'galaxy'"):
+        transformer._apply_specific_transformations(
+            {"id": 2, "name": "Galaxy Custom", "managed": False, "kind": "galaxy"},
+            "credential_types",
         )
 
 

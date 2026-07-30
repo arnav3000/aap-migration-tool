@@ -284,6 +284,111 @@ async def test_migration_service_preview_and_run_paths(
 
 
 @pytest.mark.asyncio
+async def test_migration_service_cascades_host_membership_skip(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import aap_migration.api.services.migration_service as migration_module
+
+    job_service = FakeJobService()
+    preview_job = SimpleNamespace(
+        job_metadata={
+            "resources": {
+                "hosts": [{"source_id": 1}, {"source_id": 2}],
+            }
+        }
+    )
+    session_factory = FakeSessionFactory(preview_job)
+    loop = asyncio.get_running_loop()
+    service = MigrationService(job_service, session_factory, loop)
+
+    monkeypatch.setattr(migration_module, "Connection", DummyConn)
+    monkeypatch.setattr(api_models, "Connection", DummyConn)
+    monkeypatch.setattr(
+        service, "_create_job", lambda job_type, connection_id=None: f"{job_type}-job"
+    )
+    finished = []
+    monkeypatch.setattr(
+        service,
+        "_finish_job",
+        lambda job_id, status, error=None, metadata=None: finished.append((job_id, status, error)),
+    )
+
+    class FakeSourceClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class FakeTargetClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    migrate_calls = []
+
+    class FakeState:
+        def __init__(self, config):
+            pass
+
+        def create_source_mapping(self, *args, **kwargs):
+            pass
+
+        def mark_skipped(self, *args, **kwargs):
+            pass
+
+    class FakeCoordinator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def migrate_all(self, skip_phases=None, generate_report=True, report_dir="./reports"):
+            migrate_calls.append(skip_phases)
+            return {
+                "status": "completed",
+                "total_resources_exported": 0,
+                "total_resources_imported": 0,
+                "total_resources_failed": 0,
+                "total_resources_skipped": 0,
+            }
+
+    monkeypatch.setattr(
+        "aap_migration.api.services.engine_adapter.build_migration_config",
+        lambda src, dst, db_url: SimpleNamespace(source="src", target="dst", state="state"),
+    )
+    monkeypatch.setattr("aap_migration.client.aap_source_client.AAPSourceClient", FakeSourceClient)
+    monkeypatch.setattr("aap_migration.client.aap_target_client.AAPTargetClient", FakeTargetClient)
+    monkeypatch.setattr("aap_migration.migration.state.MigrationState", FakeState)
+    monkeypatch.setattr("aap_migration.migration.coordinator.MigrationCoordinator", FakeCoordinator)
+
+    source = SimpleNamespace(
+        id="src",
+        name="Source",
+        url="https://src.example.com",
+        token="",
+        verify_ssl=True,
+        type="awx",
+        api_prefix="/api/v2",
+    )
+    dest = SimpleNamespace(
+        id="dst",
+        name="Destination",
+        url="https://dest.example.com",
+        token="",
+        verify_ssl=True,
+        type="awx",
+        api_prefix="/api/v2",
+    )
+    run_job_id = service.start_run(
+        source,
+        dest,
+        "preview-job",
+        exclusions={"hosts": [1, 2]},
+    )
+    await job_service.tasks[run_job_id]
+
+    assert migrate_calls == [["hosts", "host_inventory_memberships"]]
+    run_logs = "\n".join(msg for jid, msg in job_service.logs if jid == run_job_id)
+    assert "Skipping entire phase: hosts" in run_logs
+    assert "Skipping entire phase: host_inventory_memberships" in run_logs
+
+
+@pytest.mark.asyncio
 async def test_migration_service_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     import aap_migration.api.services.migration_service as migration_module
 

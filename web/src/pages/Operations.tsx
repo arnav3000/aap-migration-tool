@@ -103,7 +103,10 @@ export function Operations() {
 
   const selected = connections.find(c => c.id === selectedId);
   const sources = useMemo(() => connections.filter(c => c.role === 'source'), [connections]);
-  const destinations = useMemo(() => connections.filter(c => c.role === 'destination'), [connections]);
+  const destinations = useMemo(
+    () => connections.filter(c => c.role === 'destination' || c.role === 'target'),
+    [connections],
+  );
 
   // Load JTs when source selection changes
   useEffect(() => {

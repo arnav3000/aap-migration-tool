@@ -84,6 +84,7 @@ class MigrationPreviewRequest(BaseModel):
     source_id: str
     destination_id: str
     organizations: list[int] | None = None
+    name_prefix: str | None = None
 
 
 class MigrationRunRequest(BaseModel):
