@@ -118,6 +118,7 @@ class SelectiveMigrateRequest(BaseModel):
     source_id: str
     destination_id: str
     job_template_ids: list[int] = Field(min_length=1)
+    force_update: bool = False
 
 
 # --- Migration Planner Schemas ---

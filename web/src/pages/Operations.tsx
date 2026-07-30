@@ -69,6 +69,7 @@ export function Operations() {
   const [smFilter, setSmFilter] = useState('');
   const [smError, setSmError] = useState<string | null>(null);
   const [smRunning, setSmRunning] = useState(false);
+  const [smForceUpdate, setSmForceUpdate] = useState(false);
 
   const loadConnections = useCallback(async () => {
     const conns = await api.listConnections() as Connection[];
@@ -167,7 +168,7 @@ export function Operations() {
     setSmError(null);
     setSmRunning(true);
     try {
-      const result = await api.selectiveMigrate(smSourceId, smDestId, Array.from(smSelectedJTIds));
+      const result = await api.selectiveMigrate(smSourceId, smDestId, Array.from(smSelectedJTIds), smForceUpdate);
       const srcConn = connections.find(c => c.id === smSourceId);
       const destConn = connections.find(c => c.id === smDestId);
       setActiveJobs(prev => [...prev, {
@@ -436,14 +437,26 @@ export function Operations() {
             <Alert variant="info" isInline title="No job templates found on this source." style={{ marginBottom: 16 }} />
           )}
 
-          <Button
-            variant="primary"
-            isDisabled={!smSourceId || !smDestId || smSelectedJTIds.size === 0 || smRunning}
-            isLoading={smRunning}
-            onClick={handleSelectiveMigrate}
-          >
-            Migrate {smSelectedJTIds.size || 0} Job Template{smSelectedJTIds.size !== 1 ? 's' : ''}
-          </Button>
+          <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ gap: 16, marginBottom: 8 }}>
+            <FlexItem>
+              <Button
+                variant="primary"
+                isDisabled={!smSourceId || !smDestId || smSelectedJTIds.size === 0 || smRunning}
+                isLoading={smRunning}
+                onClick={handleSelectiveMigrate}
+              >
+                Migrate {smSelectedJTIds.size || 0} Job Template{smSelectedJTIds.size !== 1 ? 's' : ''}
+              </Button>
+            </FlexItem>
+            <FlexItem>
+              <Checkbox
+                id="sm-force-update"
+                label="Force update (re-migrate previously imported resources)"
+                isChecked={smForceUpdate}
+                onChange={(_event, checked) => setSmForceUpdate(checked)}
+              />
+            </FlexItem>
+          </Flex>
         </>
       )}
 
