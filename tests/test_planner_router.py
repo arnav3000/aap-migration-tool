@@ -640,6 +640,66 @@ async def test_migrate_resource_type_applies_name_prefix_and_tags_source(
     ]
 
 
+@pytest.mark.asyncio
+async def test_migrate_skips_name_prefix_for_managed_credential_types(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_names: list[str] = []
+
+    class FakeExporter:
+        async def export(self):
+            yield {"id": 1, "name": "Machine", "managed": True}
+            yield {"id": 50, "name": "MyCustomVault", "managed": False}
+
+    class FakeImporter:
+        async def import_resource(self, resource_type, source_id, data):
+            imported_names.append(data["name"])
+            return True
+
+    monkeypatch.setattr(
+        "aap_migration.migration.exporter.create_exporter", lambda **kwargs: FakeExporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.importer.create_importer", lambda **kwargs: FakeImporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.transformer.create_transformer", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "aap_migration.resources.RESOURCE_REGISTRY",
+        {
+            "credential_types": SimpleNamespace(
+                description="Credential Types",
+                has_transformer=False,
+            )
+        },
+    )
+
+    sources = [
+        {
+            "src_client": object(),
+            "state": object(),
+            "migration_config": SimpleNamespace(performance=None, resource_mappings={}),
+            "name_prefix": "dev_",
+            "connection_name": "Dev AAP",
+            "org_ids": [],
+            "url": "https://dev.example.com",
+        }
+    ]
+
+    await planner._migrate_resource_type(
+        "credential_types",
+        sources,
+        object(),
+        1,
+        lambda _e: None,
+        lambda _line: None,
+        [],
+    )
+
+    assert imported_names == ["Machine", "dev_MyCustomVault"]
+
+
 def test_planner_update_phase_status(session_factory, db_session) -> None:
     phase = api_models.MigrationPlanPhase(
         id="phase-status",

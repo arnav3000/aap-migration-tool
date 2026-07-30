@@ -222,13 +222,10 @@ async def migration_run(
                     for item in items or []:
                         item_id = item.get("id", 0)
 
-                        if name_prefix and rtype not in (
-                            "users",
-                            "settings",
-                            "host_inventory_memberships",
-                        ):
-                            if "name" in item:
-                                item["name"] = f"{name_prefix}{item['name']}"
+                        if name_prefix:
+                            from aap_migration.utils.naming import apply_name_prefix
+
+                            apply_name_prefix(rtype, item, name_prefix)
 
                         item_name = item.get("name", item.get("username", str(item_id)))
 
