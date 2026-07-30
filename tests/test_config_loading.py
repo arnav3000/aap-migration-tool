@@ -150,4 +150,6 @@ def test_save_config_to_yaml_round_trips(tmp_path) -> None:
 
     saved = yaml.safe_load(output.read_text())
     assert saved["source"]["url"] == "https://source.example.com"
-    assert saved["target"]["token"] == "target-token"
+    assert "token" not in saved["source"]
+    assert saved["target"]["url"] == "https://target.example.com"
+    assert "token" not in saved["target"]

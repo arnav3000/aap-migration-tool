@@ -233,6 +233,42 @@ async def test_migration_router_preview_run_and_state(
 
 
 @pytest.mark.asyncio
+async def test_operations_cleanup_returns_404_for_missing_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(
+        operations.ConnectionService,
+        "get",
+        lambda db, conn_id: None,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await operations.run_cleanup("missing", db=None)
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_operations_export_returns_404_for_missing_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(
+        operations.ConnectionService,
+        "get",
+        lambda db, conn_id: None,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await operations.run_export("missing", db=None)
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_operations_router_cleanup_and_export(monkeypatch: pytest.MonkeyPatch) -> None:
     svc = FakeJobService()
     conn = SimpleNamespace(id="conn-1", name="Target", url="https://target.example.com")
@@ -442,3 +478,96 @@ async def test_should_skip_migrated_resource_when_target_exists() -> None:
     )
 
     assert should_skip is True
+
+
+@pytest.mark.asyncio
+async def test_selective_migrate_returns_404_when_connection_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from aap_migration.api.schemas import SelectiveMigrateRequest
+
+    monkeypatch.setattr(
+        operations.ConnectionService,
+        "get",
+        lambda db, conn_id: None,
+    )
+
+    body = SelectiveMigrateRequest(
+        source_id="missing-src",
+        destination_id="missing-dst",
+        job_template_ids=[1],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await operations.selective_migrate(body, db=None)
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_selective_migrate_returns_404_when_destination_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from aap_migration.api.schemas import SelectiveMigrateRequest
+
+    source = SimpleNamespace(id="src-1", name="Source", url="https://source.example.com")
+    monkeypatch.setattr(
+        operations.ConnectionService,
+        "get",
+        lambda db, conn_id: source if conn_id == "src-1" else None,
+    )
+
+    body = SelectiveMigrateRequest(
+        source_id="src-1",
+        destination_id="dst-missing",
+        job_template_ids=[1],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await operations.selective_migrate(body, db=None)
+
+    assert exc_info.value.status_code == 404
+    assert "Destination" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_selective_migrate_starts_background_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aap_migration.api.schemas import SelectiveMigrateRequest
+
+    svc = FakeJobService()
+    source = SimpleNamespace(id="src-1", name="Source", url="https://source.example.com")
+    dest = SimpleNamespace(id="dst-1", name="Dest", url="https://dest.example.com")
+
+    monkeypatch.setattr(
+        operations.ConnectionService,
+        "get",
+        lambda db, conn_id: source if conn_id == "src-1" else dest,
+    )
+    monkeypatch.setattr(operations, "get_job_service", lambda: svc)
+    monkeypatch.setattr(operations, "get_db_url", lambda: "sqlite:///:memory:")
+    monkeypatch.setattr(
+        operations.ConnectionService,
+        "build_instance_config",
+        lambda conn: SimpleNamespace(url=conn.url, token="token"),
+    )
+    monkeypatch.setattr(
+        operations.ConnectionService,
+        "_auth_scheme",
+        lambda conn: "Bearer",
+    )
+
+    body = SelectiveMigrateRequest(
+        source_id="src-1",
+        destination_id="dst-1",
+        job_template_ids=[1],
+    )
+    response = await operations.selective_migrate(body, db=None)
+    assert response.job_id == "selective-migration-job"
+    assert len(svc.started) == 1
+    assert "Selective migrate" in svc.started[0][0]

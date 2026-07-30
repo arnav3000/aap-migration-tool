@@ -19,9 +19,11 @@ from aap_migration.schema.persistence import (
 
 
 class FakeVaultClientImpl:
-    def __init__(self, url=None, namespace=None):
+    def __init__(self, url=None, namespace=None, verify=None, cert=None):
         self.url = url
         self.namespace = namespace
+        self.verify = verify
+        self.cert = cert
         self.token = None
         self.storage = {}
         self.adapter = type("Adapter", (), {"close": lambda self: None})()
@@ -150,8 +152,8 @@ def test_vault_client_happy_path_and_batch_helpers(monkeypatch):
 
 def test_vault_client_error_paths(monkeypatch):
     class AuthFailureClient(FakeVaultClientImpl):
-        def __init__(self, url=None, namespace=None):
-            super().__init__(url=url, namespace=namespace)
+        def __init__(self, url=None, namespace=None, verify=None, cert=None):
+            super().__init__(url=url, namespace=namespace, verify=verify, cert=cert)
             self.auth.approle.login = lambda role_id, secret_id: (_ for _ in ()).throw(
                 HvacVaultError("bad auth")
             )

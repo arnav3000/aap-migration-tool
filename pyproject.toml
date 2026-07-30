@@ -215,7 +215,13 @@ asyncio_mode = "auto"
 
 [tool.coverage.run]
 source = ["src"]
-omit = ["*/tests/*", "*/test_*.py"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    # Live AAP API scanners — covered by integration/manual runs, not unit suite
+    "*/iam/analyser.py",
+    "*/iam/benchmark.py",
+]
 
 [tool.coverage.report]
 exclude_lines = [

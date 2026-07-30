@@ -23,6 +23,15 @@ class FakeMigrationState:
     def has_source_mapping(self, resource_type, source_id):
         return (resource_type, source_id) in self.source_mappings
 
+    def mark_transform_skipped(
+        self,
+        resource_type,
+        source_id,
+        source_name,
+        reason,
+    ):
+        return None
+
 
 class FakeExporter:
     def __init__(self, items):

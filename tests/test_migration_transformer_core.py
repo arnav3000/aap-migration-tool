@@ -766,24 +766,20 @@ def test_inventory_source_transformer_requires_target_mappings_for_scm():
         },
     }
 
-    with pytest.raises(SkipResourceError, match="unmapped projects 20"):
-        transformer.transform_resource("inventory_sources", payload)
-
-    state.mapped_ids[("projects", 20)] = 200
+    # source_project is optional — unmapped projects do not block transform
     transformed = transformer.transform_resource("inventory_sources", payload)
     assert transformed["inventory"] == 10
     assert transformed["source_project"] == 20
     assert "id" not in transformed
 
-    state_no_target = FakeState(source_mappings={("inventories", 10)})
-    with pytest.raises(SkipResourceError, match="unmapped inventories 10"):
-        InventorySourceTransformer(state=state_no_target).transform_resource(
+    state_no_inventory = FakeState(source_mappings={("projects", 20)})
+    with pytest.raises(SkipResourceError, match="required field 'inventory'"):
+        InventorySourceTransformer(state=state_no_inventory).transform_resource(
             "inventory_sources",
             {
                 "id": 2,
-                "name": "no-target-inv",
+                "name": "no-inventory",
                 "source": "scm",
-                "inventory": 10,
-                "source_project": 20,
+                "summary_fields": {"source_project": {"id": 20}},
             },
         )
