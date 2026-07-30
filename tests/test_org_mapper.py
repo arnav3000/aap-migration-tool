@@ -120,3 +120,15 @@ def test_org_mapper_handles_missing_organization_export(tmp_path: Path) -> None:
     transform_dir = tmp_path / "xformed"
     mapper = OrganizationMapper(export_dir, transform_dir)
     assert mapper.org_names == {}
+
+
+def test_org_mapper_returns_unknown_when_resource_export_missing(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    transform_dir = tmp_path / "xformed"
+    _write_json(
+        export_dir / "organizations/org.json",
+        [{"id": 1, "name": "Default"}],
+    )
+
+    mapper = OrganizationMapper(export_dir, transform_dir)
+    assert mapper.get_organization_name("projects", 99) == "(Unknown)"

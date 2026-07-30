@@ -5,9 +5,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
+
+
+def minimum_covered_lines(total: int, threshold_pct: float) -> int:
+    """Lines required to meet threshold without floating-point rounding surprises."""
+    if total == 0:
+        return 0
+    return math.ceil(threshold_pct / 100.0 * total)
+
+
+def meets_threshold(covered: int, total: int, threshold_pct: float) -> bool:
+    return covered >= minimum_covered_lines(total, threshold_pct)
 
 
 def parse_backend_coverage(path: Path) -> tuple[int, int]:
@@ -55,6 +67,7 @@ def main() -> int:
     backend_pct = format_percent(backend_covered, backend_total)
     frontend_pct = format_percent(frontend_covered, frontend_total)
     combined_pct = format_percent(total_covered, total_lines)
+    required_covered = minimum_covered_lines(total_lines, args.threshold)
 
     print(
         f"Backend line coverage: {backend_covered}/{backend_total} ({backend_pct:.2f}%)",
@@ -65,10 +78,15 @@ def main() -> int:
     print(
         f"Combined repo line coverage: {total_covered}/{total_lines} ({combined_pct:.2f}%)",
     )
+    print(
+        f"Combined coverage threshold: at least {required_covered}/{total_lines} lines "
+        f"({format_percent(required_covered, total_lines):.2f}%)",
+    )
 
-    if combined_pct < args.threshold:
+    if not meets_threshold(total_covered, total_lines, args.threshold):
         print(
-            f"Combined repo coverage {combined_pct:.2f}% is below the required {args.threshold:.2f}%.",
+            f"Combined repo coverage {combined_pct:.2f}% is below the required "
+            f"{args.threshold:.2f}% (need {required_covered} covered lines, have {total_covered}).",
             file=sys.stderr,
         )
         return 1
