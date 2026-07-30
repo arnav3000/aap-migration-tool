@@ -198,13 +198,16 @@ async def _resolve_jt_dependencies(
             continue
         jt_data_list.append(jt)
 
-        _add("organizations", jt.get("organization"))
-        _add("projects", jt.get("project"))
-        _add("inventories", jt.get("inventory"))
-        _add("execution_environments", jt.get("execution_environment"))
+        sf = jt.get("summary_fields", {})
+        _add("organizations", jt.get("organization") or sf.get("organization", {}).get("id"))
+        _add("projects", jt.get("project") or sf.get("project", {}).get("id"))
+        _add("inventories", jt.get("inventory") or sf.get("inventory", {}).get("id"))
+        _add(
+            "execution_environments",
+            jt.get("execution_environment") or sf.get("execution_environment", {}).get("id"),
+        )
         _add("credentials", jt.get("webhook_credential"))
 
-        sf = jt.get("summary_fields", {})
         for label in sf.get("labels", {}).get("results", []):
             _add("labels", label.get("id"))
 
@@ -212,7 +215,7 @@ async def _resolve_jt_dependencies(
             creds = await client.get_job_template_credentials(jt_id)
             for cred in creds:
                 _add("credentials", cred.get("id"))
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     project_ids = list(deps.get("projects", set()))
@@ -222,7 +225,7 @@ async def _resolve_jt_dependencies(
             _add("organizations", proj.get("organization"))
             _add("credentials", proj.get("credential"))
             _add("execution_environments", proj.get("default_environment"))
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     inventory_ids = list(deps.get("inventories", set()))
@@ -230,7 +233,7 @@ async def _resolve_jt_dependencies(
         try:
             inv = await client.get_resource_by_id("inventories", inv_id)
             _add("organizations", inv.get("organization"))
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     cred_ids = list(deps.get("credentials", set()))
@@ -239,7 +242,7 @@ async def _resolve_jt_dependencies(
             cred = await client.get_resource_by_id("credentials", cred_id)
             _add("credential_types", cred.get("credential_type"))
             _add("organizations", cred.get("organization"))
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     ee_ids = list(deps.get("execution_environments", set()))
@@ -247,7 +250,7 @@ async def _resolve_jt_dependencies(
         try:
             ee = await client.get_resource_by_id("execution_environments", ee_id)
             _add("organizations", ee.get("organization"))
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     deps.pop("job_templates", None)
@@ -319,43 +322,51 @@ async def selective_migrate(
             num_phases = len(migration_order)
 
             if force_update:
-                from sqlalchemy import text as sa_text
+                from aap_migration.migration.models import IDMapping, MigrationProgress
 
-                from aap_migration.api.dependencies import get_app_state
-
-                app_state = get_app_state()
-                session = app_state.db_session_factory()
+                all_force_types = list(deps.keys()) + ["job_templates"]
+                cleared_progress = 0
+                reset_mappings = 0
                 try:
-                    all_force_types = list(deps.keys()) + ["job_templates"]
-                    for rt in all_force_types:
-                        source_id_list = (
-                            [jt.get("id") for jt in jt_data if jt.get("id") is not None]
-                            if rt == "job_templates"
-                            else list(deps.get(rt, set()))
-                        )
-                        if not source_id_list:
-                            continue
-                        session.execute(
-                            sa_text(
-                                "DELETE FROM migration_progress "
-                                "WHERE resource_type = :rt AND source_id = ANY(:ids)"
-                            ),
-                            {"rt": rt, "ids": source_id_list},
-                        )
-                        session.execute(
-                            sa_text(
-                                "UPDATE id_mappings SET target_id = NULL, target_name = NULL "
-                                "WHERE resource_type = :rt AND source_id = ANY(:ids)"
-                            ),
-                            {"rt": rt, "ids": source_id_list},
-                        )
-                    session.commit()
-                    log("Force mode: cleared prior state for selected resources")
+                    with state._lock:
+                        from aap_migration.migration.database import get_session
+
+                        with get_session(state.database_url) as session:
+                            for rt in all_force_types:
+                                source_id_list = (
+                                    [jt.get("id") for jt in jt_data if jt.get("id") is not None]
+                                    if rt == "job_templates"
+                                    else list(deps.get(rt, set()))
+                                )
+                                if not source_id_list:
+                                    continue
+                                cleared_progress += (
+                                    session.query(MigrationProgress)
+                                    .filter(
+                                        MigrationProgress.resource_type == rt,
+                                        MigrationProgress.source_id.in_(source_id_list),
+                                    )
+                                    .delete(synchronize_session=False)
+                                )
+                                reset_mappings += (
+                                    session.query(IDMapping)
+                                    .filter(
+                                        IDMapping.resource_type == rt,
+                                        IDMapping.source_id.in_(source_id_list),
+                                    )
+                                    .update(
+                                        {"target_id": None, "target_name": None},
+                                        synchronize_session=False,
+                                    )
+                                )
+                            session.commit()
+                    log(
+                        "Force mode: cleared "
+                        f"{cleared_progress} progress record(s), "
+                        f"reset {reset_mappings} mapping(s)"
+                    )
                 except Exception as exc:
-                    session.rollback()
                     log(f"Warning: failed to clear prior state: {exc}")
-                finally:
-                    session.close()
 
             emit({"_event": "migration_start", "total_phases": num_phases})
 
@@ -413,6 +424,25 @@ async def selective_migrate(
                     if source_id is None:
                         continue
 
+                    if state.is_migrated(rtype, int(source_id)):
+                        skipped += 1
+                        res_name = resource.get("name", resource.get("username", str(source_id)))
+                        log(
+                            f"  Skipping {rtype}/{source_id} ({res_name}): "
+                            "already migrated (enable Force update to re-import)"
+                        )
+                        emit(
+                            {
+                                "_event": "resource_result",
+                                "phase_num": phase_num,
+                                "name": res_name,
+                                "resource_type": rtype,
+                                "result": "skipped",
+                                "detail": "Already migrated",
+                            }
+                        )
+                        continue
+
                     if transformer:
                         try:
                             resource = transformer.transform_resource(
@@ -420,8 +450,12 @@ async def selective_migrate(
                                 data=resource,
                                 validate=True,
                             )
-                        except SkipResourceError:
+                        except SkipResourceError as exc:
                             skipped += 1
+                            res_name = resource.get(
+                                "name", resource.get("username", str(source_id))
+                            )
+                            log(f"  Skipping {rtype}/{source_id} ({res_name}): {exc}")
                             continue
                         except Exception:
                             failed += 1
@@ -437,15 +471,22 @@ async def selective_migrate(
                         )
                         res_name = resource.get("name", resource.get("username", str(source_id)))
                         if result:
-                            created += 1
+                            if result.get("_skipped"):
+                                skipped += 1
+                                result_action = "skipped"
+                                detail = "Duplicate exists in target"
+                            else:
+                                created += 1
+                                result_action = "created"
+                                detail = ""
                             emit(
                                 {
                                     "_event": "resource_result",
                                     "phase_num": phase_num,
                                     "name": res_name,
                                     "resource_type": rtype,
-                                    "result": "created",
-                                    "detail": "",
+                                    "result": result_action,
+                                    "detail": detail,
                                 }
                             )
                         else:
