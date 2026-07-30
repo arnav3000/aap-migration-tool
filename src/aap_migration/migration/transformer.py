@@ -287,6 +287,10 @@ class DataTransformer:
         # Raises SkipResourceError if a required dependency is missing
         self._validate_dependencies(transformed, resource_type)
 
+        # Preserve related object names for import-time FK recovery (ID map miss /
+        # name_prefix). Must run before summary_fields is stripped as read-only.
+        self._stash_dependency_names(transformed)
+
         # Step 2: Apply transformations in order
         # NOTE: specific transformations run BEFORE read-only and deprecated field removal
         # so they can inspect all fields for migration logic (e.g., extracting IDs from summary_fields)
@@ -335,6 +339,43 @@ class DataTransformer:
             info = summary.get(field)
             if isinstance(info, dict) and info.get("id") is not None:
                 data[field] = info["id"]
+
+    def _stash_dependency_names(self, data: dict[str, Any]) -> None:
+        """Keep related object names after summary_fields is stripped.
+
+        Import resolves FKs by source ID first. When that mapping is missing
+        (common after clear-state / partial runs, and with name_prefix), import
+        can recover by looking up the related resource by name — including the
+        prefixed name when the source uses name_prefix.
+        """
+        summary = data.get("summary_fields")
+        if not isinstance(summary, dict):
+            return
+
+        names: dict[str, str] = {}
+        for field in self.DEPENDENCIES:
+            info = summary.get(field)
+            if isinstance(info, dict):
+                name = info.get("name") or info.get("username")
+                if name:
+                    names[field] = str(name)
+
+        # Job templates / similar: M2M credentials live under summary_fields.credentials
+        creds = summary.get("credentials")
+        if isinstance(creds, list):
+            cred_names: dict[str, str] = {}
+            for cred in creds:
+                if isinstance(cred, dict) and cred.get("id") is not None and cred.get("name"):
+                    cred_names[str(cred["id"])] = str(cred["name"])
+            if cred_names:
+                data.setdefault("_credential_names", {}).update(cred_names)
+
+        if names:
+            existing = data.get("_dependency_names")
+            if isinstance(existing, dict):
+                existing.update(names)
+            else:
+                data["_dependency_names"] = names
 
     def _validate_dependencies(
         self,
@@ -1551,8 +1592,16 @@ class JobTemplateTransformer(DataTransformer):
                             source="summary_fields",
                         )
 
-        # Remove _credentials field as it's replaced by credentials with full details
+        # Exporter may only set _credentials as a list of source IDs — promote
+        # those into credentials before the helper field is dropped.
         if "_credentials" in data:
+            if "credentials" not in data:
+                raw_creds = data["_credentials"]
+                if isinstance(raw_creds, list) and raw_creds:
+                    if all(isinstance(c, int) for c in raw_creds):
+                        data["credentials"] = [{"id": c} for c in raw_creds]
+                    elif all(isinstance(c, dict) and "id" in c for c in raw_creds):
+                        data["credentials"] = list(raw_creds)
             del data["_credentials"]
 
         # Ensure boolean fields are proper booleans
@@ -1638,6 +1687,8 @@ class ProjectTransformer(DataTransformer):
     DEPENDENCIES = {
         "organization": "organizations",
         "credential": "credentials",
+        "default_environment": "execution_environments",
+        "signature_validation_credential": "credentials",
     }
     # Organization is required; credential (for SCM auth) is optional
     REQUIRED_DEPENDENCIES = {"organization"}
@@ -1665,6 +1716,11 @@ class ProjectTransformer(DataTransformer):
         Returns:
             Transformed project data
         """
+        # Extract org / credential / EE IDs from summary_fields before they are
+        # stripped as read-only. ProjectTransformer overrides the base router, so
+        # call the shared extractor explicitly.
+        data = self._transform_projects(data)
+
         source_id = data.get("_source_id") or data.get("id")
 
         # Ensure scm_update_on_launch is boolean

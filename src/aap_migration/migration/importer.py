@@ -66,6 +66,7 @@ class ResourceImporter:
         state: MigrationState,
         performance_config: PerformanceConfig,
         resource_mappings: dict[str, dict[str, str]] | None = None,
+        name_prefix: str = "",
     ):
         """Initialize resource importer.
 
@@ -74,11 +75,13 @@ class ResourceImporter:
             state: Migration state manager
             performance_config: Performance configuration
             resource_mappings: Optional resource name mappings from config/mappings.yaml
+            name_prefix: Optional source name prefix (for FK recovery by prefixed name)
         """
         self.client = client
         self.state = state
         self.performance_config = performance_config
         self.resource_mappings = resource_mappings or {}
+        self.name_prefix = name_prefix or ""
         self.stats = {
             "imported_count": 0,
             "error_count": 0,
@@ -592,6 +595,10 @@ class ResourceImporter:
     ) -> dict[str, Any]:
         """Resolve foreign key dependencies using ID mappings.
 
+        When an ID mapping is missing, attempt recovery by looking up the related
+        target resource by name — trying the configured ``name_prefix`` first so
+        prepended sources still attach credentials/projects/etc.
+
         Args:
             resource_type: Type of resource
             data: Resource data
@@ -602,6 +609,10 @@ class ResourceImporter:
         resolved = dict(data)
         dependencies = self._get_dependencies(resource_type)
         resource_source_id = data.get("_source_id") or data.get("id")
+        name_prefix = str(data.get("_name_prefix") or self.name_prefix or "")
+        dependency_names = data.get("_dependency_names")
+        if not isinstance(dependency_names, dict):
+            dependency_names = {}
 
         logger.debug(
             "dependency_resolution_start",
@@ -650,6 +661,41 @@ class ResourceImporter:
                         target_id=target_id,
                     )
                 else:
+                    # Scope name lookups by target organization when we have one.
+                    # Never treat a still-unmapped source org id as a target filter.
+                    lookup_org_id = None
+                    if field != "organization":
+                        org_val = resolved.get("organization")
+                        if org_val is not None:
+                            mapped_org = self.state.get_mapped_id("organizations", org_val)
+                            if mapped_org is not None:
+                                lookup_org_id = mapped_org
+                            elif org_val != data.get("organization"):
+                                # Already rewritten to a target id earlier in this pass
+                                lookup_org_id = org_val
+
+                    recovered_id = await self._recover_dependency_by_name(
+                        dep_resource_type=dep_resource_type,
+                        dep_source_id=dep_source_id,
+                        dep_name=dependency_names.get(field),
+                        name_prefix=name_prefix,
+                        organization_id=lookup_org_id,
+                    )
+                    if recovered_id is not None:
+                        resolved[field] = recovered_id
+                        logger.info(
+                            "dependency_recovered_by_name",
+                            resource_type=resource_type,
+                            source_id=resource_source_id,
+                            field=field,
+                            dep_resource_type=dep_resource_type,
+                            dep_source_id=dep_source_id,
+                            target_id=recovered_id,
+                            dep_name=dependency_names.get(field),
+                            name_prefix=name_prefix or None,
+                        )
+                        continue
+
                     # Track unresolved dependency for reporting
                     self.unresolved_dependencies.append(
                         {
@@ -671,6 +717,8 @@ class ResourceImporter:
                         field=field,
                         dep_source_id=dep_source_id,
                         dep_resource_type=dep_resource_type,
+                        dep_name=dependency_names.get(field),
+                        name_prefix=name_prefix or None,
                     )
 
                     # Remove the field to allow partial import
@@ -681,7 +729,85 @@ class ResourceImporter:
                         resolved["_unresolved_required_organization"] = dep_source_id
                     resolved.pop(field, None)
 
+        resolved.pop("_dependency_names", None)
+        resolved.pop("_credential_names", None)
+        resolved.pop("_name_prefix", None)
+
         return resolved
+
+    async def _recover_dependency_by_name(
+        self,
+        *,
+        dep_resource_type: str,
+        dep_source_id: Any,
+        dep_name: str | None,
+        name_prefix: str,
+        organization_id: Any = None,
+        parent_field: str | None = None,
+        parent_id: Any = None,
+    ) -> int | None:
+        """Find a related target resource by name when ID mapping is missing.
+
+        Tries the prefixed name first (when ``name_prefix`` is set), then the
+        original source name. On success, persists an ID mapping for later use.
+        """
+        if not dep_name:
+            return None
+
+        candidates: list[str] = []
+        if name_prefix:
+            candidates.append(f"{name_prefix}{dep_name}")
+        if dep_name not in candidates:
+            candidates.append(dep_name)
+
+        org_id = None
+        if organization_id is not None:
+            try:
+                org_id = int(organization_id)
+            except (TypeError, ValueError):
+                org_id = None
+
+        for candidate in candidates:
+            try:
+                existing = await self.client.find_resource_by_name(
+                    dep_resource_type,
+                    candidate,
+                    organization_id=org_id,
+                    parent_id=parent_id,
+                    parent_field=parent_field,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "dependency_name_lookup_failed",
+                    dep_resource_type=dep_resource_type,
+                    name=candidate,
+                    error=str(exc),
+                )
+                continue
+
+            if not existing or existing.get("id") is None:
+                continue
+
+            target_id = int(existing["id"])
+            try:
+                self.state.save_id_mapping(
+                    resource_type=dep_resource_type,
+                    source_id=int(dep_source_id),
+                    target_id=target_id,
+                    source_name=dep_name,
+                    target_name=existing.get("name") or candidate,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "dependency_name_mapping_persist_failed",
+                    dep_resource_type=dep_resource_type,
+                    dep_source_id=dep_source_id,
+                    target_id=target_id,
+                    error=str(exc),
+                )
+            return target_id
+
+        return None
 
     def _get_dependencies(self, resource_type: str) -> dict[str, str]:
         """Get dependency mapping for resource type.
@@ -2893,6 +3019,7 @@ class HostImporter(ResourceImporter):
         state: MigrationState,
         performance_config: PerformanceConfig,
         resource_mappings: dict[str, dict[str, str]] | None = None,
+        name_prefix: str = "",
     ):
         """Initialize host importer with bulk operations.
 
@@ -2901,8 +3028,11 @@ class HostImporter(ResourceImporter):
             state: Migration state manager
             performance_config: Performance configuration
             resource_mappings: Optional resource name mappings from config/mappings.yaml
+            name_prefix: Optional source name prefix
         """
-        super().__init__(client, state, performance_config, resource_mappings)
+        super().__init__(
+            client, state, performance_config, resource_mappings, name_prefix=name_prefix
+        )
         self.bulk_ops = BulkOperations(client, performance_config)
 
     async def import_hosts_bulk(
@@ -3710,6 +3840,11 @@ class CredentialImporter(ResourceImporter):
                     resolved.pop("credential_type", None)
 
         # Resolve other dependencies (organization, user, team) using base logic
+        name_prefix = str(data.get("_name_prefix") or self.name_prefix or "")
+        dependency_names = data.get("_dependency_names")
+        if not isinstance(dependency_names, dict):
+            dependency_names = {}
+
         for field, dep_resource_type in self.DEPENDENCIES.items():
             # Skip credential_type - already handled above
             if field == "credential_type":
@@ -3727,6 +3862,15 @@ class CredentialImporter(ResourceImporter):
                         target_id=target_id,
                     )
                 else:
+                    recovered_id = await self._recover_dependency_by_name(
+                        dep_resource_type=dep_resource_type,
+                        dep_source_id=source_id,
+                        dep_name=dependency_names.get(field),
+                        name_prefix=name_prefix,
+                    )
+                    if recovered_id is not None:
+                        resolved[field] = recovered_id
+                        continue
                     logger.warning(
                         "unresolved_dependency",
                         resource_name=data.get("name"),
@@ -3736,6 +3880,10 @@ class CredentialImporter(ResourceImporter):
                     )
                     # Remove field to allow partial import
                     resolved.pop(field, None)
+
+        resolved.pop("_dependency_names", None)
+        resolved.pop("_credential_names", None)
+        resolved.pop("_name_prefix", None)
 
         return resolved
 
@@ -3820,6 +3968,7 @@ class ProjectImporter(ResourceImporter):
         "organization": "organizations",
         "credential": "credentials",
         "default_environment": "execution_environments",
+        "signature_validation_credential": "credentials",
     }
 
     async def import_resource(
@@ -4602,12 +4751,23 @@ class JobTemplateImporter(ResourceImporter):
             target_cred_id = self.state.get_mapped_id("credentials", source_cred_id)
 
             if not target_cred_id:
+                # Name/prefix fallback — same pattern as FK resolve for projects etc.
+                target_cred_id = await self._recover_dependency_by_name(
+                    dep_resource_type="credentials",
+                    dep_source_id=source_cred_id,
+                    dep_name=cred_data.get("name"),
+                    name_prefix=str(self.name_prefix or ""),
+                )
+
+            if not target_cred_id:
                 logger.warning(
                     "credential_mapping_missing_for_association",
                     job_template_id=job_template_id,
                     source_credential_id=source_cred_id,
+                    credential_name=cred_data.get("name"),
+                    name_prefix=self.name_prefix or None,
                     template_name=template_name,
-                    message="Skipping association - credential not found in map",
+                    message="Skipping association - credential not found in map or by name",
                 )
                 continue
 
@@ -7130,6 +7290,7 @@ def create_importer(
     state: MigrationState,
     performance_config: PerformanceConfig,
     resource_mappings: dict[str, dict[str, str]] | None = None,
+    name_prefix: str = "",
 ) -> ResourceImporter:
     """Create appropriate importer for resource type."""
     importer_class = IMPORTER_REGISTRY.get(resource_type)
@@ -7139,4 +7300,10 @@ def create_importer(
             f"Available importers: {', '.join(sorted(IMPORTER_REGISTRY.keys()))}"
         )
 
-    return importer_class(client, state, performance_config, resource_mappings)
+    return importer_class(
+        client,
+        state,
+        performance_config,
+        resource_mappings,
+        name_prefix=name_prefix,
+    )
