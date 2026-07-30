@@ -63,6 +63,7 @@ scripts/
 !scripts/
 scripts/*
 !scripts/check_repo_coverage.py
+!scripts/check_container_env.py
 
 # AI config
 .claude/
