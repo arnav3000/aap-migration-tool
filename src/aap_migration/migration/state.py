@@ -140,21 +140,22 @@ class MigrationState:
                         .first()
                     )
 
-                    if progress is None:
-                        return False
+                    # completed / in_progress are migrated. "skipped" (or missing progress)
+                    # with a mapped target_id means duplicate detection linked an existing
+                    # target resource — treat as migrated so re-runs do not recreate and
+                    # dependents can resolve FKs via get_mapped_id().
+                    if progress is not None:
+                        if progress.status in ("completed", "in_progress"):
+                            return True
+                        if progress.target_id is not None:
+                            return True
 
-                    # Consider completed or in_progress as "migrated" to avoid duplicates
-                    is_migrated = progress.status in ("completed", "in_progress")
-
-                    logger.debug(
-                        "Checked migration status",
-                        resource_type=resource_type,
-                        source_id=source_id,
-                        status=progress.status if progress else "not_found",
-                        is_migrated=is_migrated,
+                    mapping = (
+                        session.query(IDMapping)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
+                        .first()
                     )
-
-                    return is_migrated
+                    return mapping is not None and mapping.target_id is not None
 
             except Exception as e:
                 logger.error(
@@ -888,6 +889,41 @@ class MigrationState:
                             progress.target_name = target_name
                         if source_name is not None:
                             progress.source_name = source_name
+
+                    # Duplicate detection must also populate id_mappings — otherwise
+                    # dependents call get_mapped_id(), get None, and skip with
+                    # "organization was not migrated" even though the org exists.
+                    if target_id is not None:
+                        session.flush()
+                        mapping = (
+                            session.query(IDMapping)
+                            .filter_by(
+                                **self._scoped(resource_type=resource_type, source_id=source_id)
+                            )
+                            .first()
+                        )
+                        mapped_source_name = source_name or (
+                            progress.source_name if progress is not None else None
+                        )
+                        if mapping:
+                            mapping.target_id = target_id
+                            if target_name:
+                                mapping.target_name = target_name
+                            if mapped_source_name:
+                                mapping.source_name = mapped_source_name
+                            if progress is not None:
+                                mapping.migration_progress_id = progress.id
+                        else:
+                            mapping = IDMapping(
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_key=self.source_key,
+                                target_id=target_id,
+                                source_name=mapped_source_name,
+                                target_name=target_name,
+                                migration_progress_id=progress.id if progress else None,
+                            )
+                            session.add(mapping)
 
                     session.commit()
 
