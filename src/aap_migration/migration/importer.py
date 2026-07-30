@@ -1162,7 +1162,15 @@ class CredentialTypeImporter(ResourceImporter):
                     )
                     self.stats["skipped_count"] += 1
                     # Return skipped signal
-                    return {"id": target_id, "name": name, "_skipped": True}
+                    return {
+                        "id": target_id,
+                        "name": name,
+                        "_skipped": True,
+                        "_skip_reason": (
+                            f"Managed credential type on target (id {target_id}) — "
+                            "mapped only, not patched"
+                        ),
+                    }
 
                 # Resolve dependencies (organization)
                 if resolve_dependencies:
@@ -3215,13 +3223,33 @@ class CredentialImporter(ResourceImporter):
         """
         # Check if already imported
         if self.state.is_migrated(resource_type, source_id):
-            logger.debug(
-                "resource_already_imported",
+            target_id = self.state.get_mapped_id(resource_type, source_id)
+            name = data.get("name") or "unknown"
+            if target_id is not None:
+                logger.debug(
+                    "resource_already_imported",
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    target_id=target_id,
+                )
+                self.stats["skipped_count"] += 1
+                # Return a truthy marker so callers can list the credential for the
+                # secret-pause review instead of treating it as a hard skip/failure.
+                return {
+                    "id": target_id,
+                    "name": name,
+                    "_already_migrated": True,
+                    "_skip_reason": (
+                        f"Already migrated (target id {target_id}) — update secrets if needed"
+                    ),
+                }
+            # Stuck in_progress/completed without a target mapping — retry import.
+            logger.warning(
+                "credential_migrated_without_mapping_retrying",
                 resource_type=resource_type,
                 source_id=source_id,
+                source_name=name,
             )
-            self.stats["skipped_count"] += 1
-            return None
 
         name = data.get("name")
 
@@ -3275,7 +3303,7 @@ class CredentialImporter(ResourceImporter):
 
             if resources:
                 # Credential exists - PATCH it
-                target_id = resources[0]["id"]
+                target_id = int(resources[0]["id"])
                 is_managed = resources[0].get("managed", False)
 
                 logger.info(
@@ -3313,7 +3341,15 @@ class CredentialImporter(ResourceImporter):
                     )
                     self.stats["skipped_count"] += 1
                     # Return skipped signal
-                    return {"id": target_id, "name": name, "_skipped": True}
+                    return {
+                        "id": target_id,
+                        "name": name,
+                        "_skipped": True,
+                        "_skip_reason": (
+                            f"Managed credential on target (id {target_id}) — "
+                            "mapped only, not patched"
+                        ),
+                    }
 
                 # Build PATCH payload (organization, description only)
                 # Note: Dependencies already resolved above before lookup
@@ -3363,7 +3399,7 @@ class CredentialImporter(ResourceImporter):
                     check_exists=False,  # We already checked with composite key
                 )
 
-                target_id = result["id"]
+                target_id = int(result["id"])
                 logger.info(
                     "credential_created",
                     name=name,
