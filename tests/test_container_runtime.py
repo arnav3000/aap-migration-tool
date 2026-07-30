@@ -15,6 +15,9 @@ def test_docker_compose_declares_expected_services_and_healthchecks() -> None:
     services = compose["services"]
 
     assert {"db", "engine", "ui", "bridge"} <= set(services)
+    assert compose.get("name") == "aap-bridge"
+    assert compose["volumes"]["postgres-data"]["name"] == "container_postgres-data"
+    assert services["engine"]["env_file"] == [".env"]
     assert services["engine"]["healthcheck"]["test"][0] == "CMD"
     assert services["ui"]["healthcheck"]["test"] == [
         "CMD",
