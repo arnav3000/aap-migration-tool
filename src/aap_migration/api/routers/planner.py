@@ -602,6 +602,24 @@ async def _migrate_resource_type(
     last_progress = time.monotonic()
     PROGRESS_INTERVAL = 2.0
 
+    # Credentials depend on built-in credential types that may never be
+    # "migrated". Map them by name onto the target before export/transform.
+    if rtype in ("credentials", "credential_types"):
+        from aap_migration.migration.credential_type_utils import map_managed_credential_types
+
+        for src in sources:
+            try:
+                mapped = await map_managed_credential_types(
+                    src["src_client"], target_client, src["state"]
+                )
+                if mapped:
+                    log(
+                        f"  Mapped {mapped} managed credential type(s) "
+                        f"for {src.get('connection_name') or src['url']}"
+                    )
+            except Exception as exc:
+                log(f"  Warning: could not map managed credential types: {exc}")
+
     for src in sources:
         src_client = src["src_client"]
         state = src["state"]

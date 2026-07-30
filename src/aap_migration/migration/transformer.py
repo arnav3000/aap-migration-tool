@@ -1100,7 +1100,33 @@ class CredentialTransformer(DataTransformer):
         resource_type: str,
     ) -> None:
         self._extract_credential_fks(data)
-        super()._validate_dependencies(data, resource_type)
+        # Built-in credential types are managed by AAP and are often never
+        # written to id_mappings (they aren't "migrated"). Allow them through
+        # so import can resolve via name mapping or the builtin ID fallback.
+        from aap_migration.migration.credential_type_utils import is_builtin_credential_type_id
+
+        cred_type_id = data.get("credential_type")
+        original_deps = self.DEPENDENCIES
+        original_required = self.REQUIRED_DEPENDENCIES
+        if (
+            cred_type_id is not None
+            and is_builtin_credential_type_id(cred_type_id)
+            and self.state
+            and not self.state.has_source_mapping("credential_types", int(cred_type_id))
+        ):
+            self.DEPENDENCIES = {k: v for k, v in original_deps.items() if k != "credential_type"}
+            self.REQUIRED_DEPENDENCIES = original_required - {"credential_type"}
+            logger.debug(
+                "builtin_credential_type_dependency_allowed",
+                credential_name=data.get("name"),
+                credential_type_id=cred_type_id,
+                message="Built-in credential type has no source mapping; allowing transform",
+            )
+        try:
+            super()._validate_dependencies(data, resource_type)
+        finally:
+            self.DEPENDENCIES = original_deps
+            self.REQUIRED_DEPENDENCIES = original_required
 
     def _load_external_credential_types(self) -> None:
         """Load IDs of external credential types from export files.

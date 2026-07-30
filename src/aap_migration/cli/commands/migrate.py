@@ -28,6 +28,7 @@ from aap_migration.cli.utils import (
     print_table,
 )
 from aap_migration.migration.coordinator import MigrationCoordinator
+from aap_migration.migration.credential_type_utils import map_managed_credential_types
 from aap_migration.migration.state import MigrationState
 from aap_migration.resources import (
     ALL_RESOURCE_TYPES,
@@ -80,63 +81,10 @@ async def _map_managed_credential_types(
 ) -> int:
     """Create ID mappings for managed (built-in) credential types.
 
-    Managed credential types (Machine, Source Control, Vault, etc.) exist on both
-    source and target systems but may have different IDs. This function fetches
-    them from both systems and creates mappings based on name matching.
-
-    Args:
-        source_client: AAP 2.3 source client
-        target_client: AAP 2.6 target client
-        state: Migration state manager
-
-    Returns:
-        Number of credential types successfully mapped
+    Thin wrapper kept for CLI callers / tests; implementation lives in
+    ``migration.credential_type_utils``.
     """
-    try:
-        # Fetch managed types from source (AAP 2.3)
-        source_types_response = await source_client.get(
-            "credential_types/", params={"managed": "true", "page_size": 200}
-        )
-        source_types = source_types_response.get("results", [])
-
-        # Fetch managed types from target (AAP 2.6)
-        target_types_response = await target_client.get(
-            "credential_types/", params={"managed": "true", "page_size": 200}
-        )
-        target_types = target_types_response.get("results", [])
-
-        # Create name -> id mapping for target
-        target_by_name = {t["name"]: t["id"] for t in target_types}
-
-        # Map source IDs to target IDs by name
-        mapped_count = 0
-        for source_type in source_types:
-            source_name = source_type["name"]
-            source_id = source_type["id"]
-            target_id = target_by_name.get(source_name)
-
-            if target_id:
-                state.create_or_update_mapping(
-                    resource_type="credential_types",
-                    source_id=source_id,
-                    target_id=target_id,
-                    source_name=source_name,
-                )
-                mapped_count += 1
-                logger.debug(
-                    f"Mapped managed credential type '{source_name}': {source_id} -> {target_id}"
-                )
-            else:
-                logger.warning(
-                    f"Managed credential type '{source_name}' (ID {source_id}) "
-                    f"not found on target system"
-                )
-
-        return mapped_count
-
-    except Exception as e:
-        logger.error(f"Failed to map managed credential types: {e}")
-        return 0
+    return await map_managed_credential_types(source_client, target_client, state)
 
 
 def _scan_scm_inventory_source_projects(xformed_dir: Path) -> set[int]:
