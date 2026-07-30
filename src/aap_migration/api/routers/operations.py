@@ -172,6 +172,18 @@ async def run_export(conn_id: str, db: Session = Depends(get_db)) -> JobStartRes
     return JobStartResponse(job_id=job_id)
 
 
+def _fk_id(data: dict[str, Any], field: str) -> int | None:
+    """Read a foreign-key ID from a resource, falling back to summary_fields."""
+    value = data.get(field)
+    if value is not None:
+        return int(value)
+    summary = data.get("summary_fields", {}).get(field, {})
+    if isinstance(summary, dict):
+        sid = summary.get("id")
+        return int(sid) if sid is not None else None
+    return None
+
+
 async def _resolve_jt_dependencies(
     client: Any,
     jt_ids: list[int],
@@ -222,36 +234,36 @@ async def _resolve_jt_dependencies(
     for pid in project_ids:
         try:
             proj = await client.get_resource_by_id("projects", pid)
-            _add("organizations", proj.get("organization"))
+            _add("organizations", _fk_id(proj, "organization"))
             _add("credentials", proj.get("credential"))
             _add("execution_environments", proj.get("default_environment"))
-        except Exception:  # nosec B110
-            pass
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not fetch project/{pid}: {exc}")
 
     inventory_ids = list(deps.get("inventories", set()))
     for inv_id in inventory_ids:
         try:
             inv = await client.get_resource_by_id("inventories", inv_id)
-            _add("organizations", inv.get("organization"))
-        except Exception:  # nosec B110
-            pass
+            _add("organizations", _fk_id(inv, "organization"))
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not fetch inventory/{inv_id}: {exc}")
 
     cred_ids = list(deps.get("credentials", set()))
     for cred_id in cred_ids:
         try:
             cred = await client.get_resource_by_id("credentials", cred_id)
             _add("credential_types", cred.get("credential_type"))
-            _add("organizations", cred.get("organization"))
-        except Exception:  # nosec B110
-            pass
+            _add("organizations", _fk_id(cred, "organization"))
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not fetch credential/{cred_id}: {exc}")
 
     ee_ids = list(deps.get("execution_environments", set()))
     for ee_id in ee_ids:
         try:
             ee = await client.get_resource_by_id("execution_environments", ee_id)
-            _add("organizations", ee.get("organization"))
-        except Exception:  # nosec B110
-            pass
+            _add("organizations", _fk_id(ee, "organization"))
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not fetch execution_environment/{ee_id}: {exc}")
 
     deps.pop("job_templates", None)
 
@@ -424,7 +436,9 @@ async def selective_migrate(
                     if source_id is None:
                         continue
 
-                    if state.is_migrated(rtype, int(source_id)):
+                    if state.is_migrated(rtype, int(source_id)) and state.has_source_mapping(
+                        rtype, int(source_id)
+                    ):
                         skipped += 1
                         res_name = resource.get("name", resource.get("username", str(source_id)))
                         log(
@@ -460,6 +474,15 @@ async def selective_migrate(
                         except Exception:
                             failed += 1
                             continue
+                    elif not state.has_source_mapping(rtype, int(source_id)):
+                        # Types without a transformer (orgs, credential_types, etc.)
+                        # never register mappings during transform — do it here so
+                        # downstream types can validate dependencies.
+                        state.create_source_mapping(
+                            resource_type=rtype,
+                            source_id=int(source_id),
+                            source_name=resource.get("name", resource.get("username")),
+                        )
 
                     exported += 1
 
@@ -471,6 +494,17 @@ async def selective_migrate(
                         )
                         res_name = resource.get("name", resource.get("username", str(source_id)))
                         if result:
+                            target_id = result.get("id")
+                            if target_id is not None and not state.get_mapped_id(
+                                rtype, int(source_id)
+                            ):
+                                state.save_id_mapping(
+                                    resource_type=rtype,
+                                    source_id=int(source_id),
+                                    target_id=int(target_id),
+                                    source_name=res_name,
+                                    target_name=result.get("name", result.get("username")),
+                                )
                             if result.get("_skipped"):
                                 skipped += 1
                                 result_action = "skipped"
