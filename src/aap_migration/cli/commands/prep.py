@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 
 import click
+from rich.console import Console
 from rich.logging import RichHandler
 
 from aap_migration.cli.context import MigrationContext
@@ -37,6 +38,7 @@ from aap_migration.utils.version_validation import (
 )
 
 logger = get_logger(__name__)
+console = Console()
 
 
 @click.command(name="prep", hidden=True)

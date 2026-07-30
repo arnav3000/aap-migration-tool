@@ -11,6 +11,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -90,7 +91,7 @@ def seed_builtin_credential_types(ctx: MigrationContext, state: MigrationState) 
             logger.info(
                 "credential_type_mappings_already_exist",
                 count=len(existing_mappings),
-                message="Credential types already migrated in earlier phase - using existing mappings"
+                message="Credential types already migrated in earlier phase - using existing mappings",
             )
             return len(existing_mappings)
 
@@ -99,7 +100,7 @@ def seed_builtin_credential_types(ctx: MigrationContext, state: MigrationState) 
         # when credential_types are actually migrated.
         logger.info(
             "credential_type_mappings_not_found",
-            message="No credential type mappings found - will be created when credential_types are migrated"
+            message="No credential type mappings found - will be created when credential_types are migrated",
         )
         return 0
 
@@ -280,7 +281,7 @@ def transform(
         defer_project_sync=defer_project_sync,
     )
 
-    async def run_transform():
+    async def run_transform() -> None:
         import logging
 
         # Suppress console logging for cleaner output
@@ -373,7 +374,7 @@ def transform(
                     )
 
                     # Create progress callback
-                    def progress_callback(rtype: str, stats: dict):
+                    def progress_callback(rtype: str, stats: dict[str, Any]) -> None:
                         if progress_enabled:
                             total_skipped = (
                                 stats.get("skipped_pending_deletion", 0)
@@ -463,12 +464,12 @@ def transform(
 
                     # Create resource-specific transformer (credentials → CredentialTransformer, etc.)
                     # Pass state to enable id_mappings registration during transformation
-                    state = ctx.migration_state if ctx.config_path else None
+                    transform_state = ctx.migration_state if ctx.config_path else None
                     transformer = create_transformer(
                         resource_type=rtype,
                         dry_run=False,
                         schema_comparison_file=schema_file_path,
-                        state=state,
+                        state=transform_state,
                         input_dir=input_dir,
                         config=ctx.config,
                         defer_project_sync=defer_project_sync,

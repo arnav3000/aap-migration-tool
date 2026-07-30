@@ -7,6 +7,7 @@ containing configuration, clients, and state management.
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
 
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.aap_target_client import AAPTargetClient
@@ -130,6 +131,11 @@ class MigrationContext:
         """Context manager entry."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Context manager exit."""
         self.cleanup()

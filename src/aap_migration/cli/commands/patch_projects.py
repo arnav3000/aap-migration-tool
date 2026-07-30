@@ -90,8 +90,7 @@ async def patch_project_scm_details(
     if project_source_ids is not None:
         original_count = len(projects_to_patch)
         projects_to_patch = [
-            p for p in projects_to_patch
-            if p.get("_source_id") in project_source_ids
+            p for p in projects_to_patch if p.get("_source_id") in project_source_ids
         ]
         logger.info(
             "selective_project_patching",
@@ -174,7 +173,9 @@ async def patch_project_scm_details(
                         "scm_delete_on_update": deferred.get("scm_delete_on_update", False),
                         "scm_update_on_launch": deferred.get("scm_update_on_launch", False),
                         "scm_update_cache_timeout": deferred.get("scm_update_cache_timeout", 0),
-                        "scm_track_submodules": deferred.get("scm_track_submodules", False),  # CRITICAL FIX
+                        "scm_track_submodules": deferred.get(
+                            "scm_track_submodules", False
+                        ),  # CRITICAL FIX
                     }
 
                     # Resolve credential dependency

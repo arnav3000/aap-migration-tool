@@ -4,6 +4,7 @@ This module provides real-time progress tracking using tqdm progress bars
 and live statistics display during migration.
 """
 
+from types import TracebackType
 from typing import Any
 
 from tqdm import tqdm
@@ -169,11 +170,16 @@ class ProgressTracker:
 
         logger.info("progress_tracker_closed", final_stats=self.stats)
 
-    def __enter__(self):
+    def __enter__(self) -> "ProgressTracker":
         """Context manager entry."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Context manager exit."""
         self.close()
 
@@ -203,7 +209,7 @@ class LiveStats:
             "estimated_completion": None,
         }
 
-    def update(self, **kwargs) -> None:
+    def update(self, **kwargs: Any) -> None:
         """Update statistics.
 
         Args:

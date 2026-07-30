@@ -84,7 +84,7 @@ class ParallelExportCoordinator:
         Returns:
             Export statistics for this resource type
         """
-        stats = {
+        stats: dict[str, Any] = {
             "resource_type": resource_type,
             "exported": 0,
             "failed": 0,
@@ -258,7 +258,7 @@ class ParallelExportCoordinator:
             # The coordinator tracks exported/failed, but exporter tracks what it skipped internally
             exporter_stats = exporter.get_stats()
             # Only add skipped count, as we tracked exported/failed ourselves
-            stats["skipped"] += exporter_stats.get("skipped_count", 0)
+            stats["skipped"] += int(exporter_stats.get("skipped_count", 0))
 
             # Commit remaining mappings
             if pending_mappings:

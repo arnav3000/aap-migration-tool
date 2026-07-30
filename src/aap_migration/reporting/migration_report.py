@@ -10,7 +10,7 @@ manual intervention, including:
 import csv
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +65,7 @@ class MigrationReport:
     """Complete migration report with all issues requiring attention."""
 
     # Metadata
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     source_url: str = ""
     target_url: str = ""
 

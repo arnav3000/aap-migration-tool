@@ -10,6 +10,7 @@ import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import Engine, create_engine, event, pool, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -25,7 +26,7 @@ _engine: Engine | None = None
 _SessionFactory: sessionmaker | None = None
 
 
-def _enable_sqlite_foreign_keys(dbapi_conn, connection_record):
+def _enable_sqlite_foreign_keys(dbapi_conn: Any, connection_record: Any) -> None:
     """
     Enable foreign key constraints for SQLite connections.
 

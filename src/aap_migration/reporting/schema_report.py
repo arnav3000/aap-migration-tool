@@ -1,6 +1,5 @@
 """Schema comparison report generation and display."""
 
-
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table

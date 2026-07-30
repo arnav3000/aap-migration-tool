@@ -7,7 +7,7 @@ and extracting field definitions from the responses.
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.aap_target_client import AAPTargetClient
@@ -245,4 +245,4 @@ def load_schema(schema_file: Path) -> dict[str, Any]:
         schema_count=len(data.get("schemas", {})),
     )
 
-    return data
+    return cast(dict[str, Any], data)

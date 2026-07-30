@@ -56,6 +56,7 @@ class BaseAPIClient:
         max_keepalive_connections: int | None = None,
         log_payloads: bool = False,
         max_payload_size: int = 10000,
+        auth_scheme: str = "Bearer",
     ):
         """Initialize base API client.
 
@@ -69,10 +70,12 @@ class BaseAPIClient:
             max_keepalive_connections: Maximum keep-alive connections (default: 20)
             log_payloads: Enable request/response payload logging at DEBUG level
             max_payload_size: Maximum payload size (chars) to log before truncation
+            auth_scheme: Authorization header scheme (Bearer or Token)
         """
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.verify_ssl = verify_ssl
+        self.auth_scheme = auth_scheme
 
         # Payload logging configuration
         self.log_payloads = log_payloads
@@ -116,7 +119,7 @@ class BaseAPIClient:
             Dictionary of HTTP headers
         """
         return {
-            "Authorization": f"Bearer {self.token}",
+            "Authorization": f"{self.auth_scheme} {self.token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
@@ -341,7 +344,15 @@ class BaseAPIClient:
                 self._handle_error_response(response)
 
             # Return JSON response
-            return response.json() if response.text else {}
+            if not response.text:
+                return {}
+            content_type = response.headers.get("content-type", "")
+            if "json" not in content_type and response.text.lstrip()[:1] not in ("{", "["):
+                raise NetworkError(
+                    f"Non-JSON response (content-type: {content_type}): {response.text[:200]}"
+                )
+            result: dict[str, Any] = response.json()
+            return result
 
         except httpx.NetworkError as e:
             logger.error("network_error", method=method, url=url, error=str(e))

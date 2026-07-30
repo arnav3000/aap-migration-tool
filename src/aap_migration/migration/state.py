@@ -10,7 +10,8 @@ import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, cast
 
 from sqlalchemy import func
 
@@ -95,7 +96,12 @@ class MigrationState:
         """Context manager entry."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Context manager exit."""
         # No cleanup needed as sessions are managed per operation
         pass
@@ -305,7 +311,7 @@ class MigrationState:
                         max_id=result,
                     )
 
-                    return result
+                    return cast(int | None, result)
 
             except Exception as e:
                 logger.error(
@@ -696,7 +702,9 @@ class MigrationState:
                             progress.status = "completed"
                         progress.phase = "import"  # Mark phase as import when target_id is set
                         progress.target_id = target_id
-                        progress.error_message = None  # Clear any previous error (e.g., from a retry)
+                        progress.error_message = (
+                            None  # Clear any previous error (e.g., from a retry)
+                        )
                         progress.completed_at = datetime.now(UTC)
 
                     # Update or create ID mapping IN THE SAME TRANSACTION
@@ -1486,7 +1494,7 @@ class MigrationState:
                     if mapping:
                         session.expunge(mapping)
 
-                    return mapping
+                    return cast(IDMapping | None, mapping)
 
             except Exception as e:
                 logger.error(
@@ -1661,7 +1669,7 @@ class MigrationState:
                         mappings_reset=mapping_count,
                     )
 
-                    return progress_count
+                    return int(progress_count)
 
             except Exception as e:
                 logger.error(
@@ -1722,7 +1730,7 @@ class MigrationState:
                         progress_reset=progress_count,
                     )
 
-                    return mapping_count
+                    return int(mapping_count)
 
             except Exception as e:
                 logger.error(

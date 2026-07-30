@@ -4,35 +4,41 @@
 awxkit==24.6.1
 
 # HTTP Clients
-httpx==0.25.0
-requests==2.31.0
-aiofiles==23.2.1
+httpx==0.28.1
+h11>=0.16.0
+requests>=2.33.0
+aiofiles==25.1.0
 
 # CLI Framework
-click==8.1.7
+click==8.4.2
 
 # Logging
-structlog==24.1.0
+structlog==26.1.0
 
 # Retry Logic
 tenacity==8.2.3
 
 # Configuration Management
-pydantic==2.5.0
-pydantic-settings==2.1.0
-PyYAML==6.0.1
-python-dotenv==1.0.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+PyYAML==6.0.3
+python-dotenv>=1.2.2
 
 # Progress Tracking
-tqdm==4.66.1
+tqdm>=4.66.3
 
 # HashiCorp Vault Client
 hvac==2.1.0
 
 # Database
-sqlalchemy==2.0.23
-alembic==1.13.0
+sqlalchemy==2.0.51
+alembic==1.18.5
+
+# Version Parsing
+packaging>=24.0
 
 # Utilities
-python-dateutil==2.8.2
-psutil==6.1.1
+python-dateutil==2.9.0.post0
+psutil==7.2.2
+psycopg2-binary>=2.9.11
+cryptography>=48.0.1

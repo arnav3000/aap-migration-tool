@@ -13,11 +13,11 @@ from dotenv import load_dotenv
 
 from aap_migration import __version__
 from aap_migration.cli.commands import analyze_dependencies as analyze_dependencies_commands
-from aap_migration.cli.commands import iam as iam_commands
 from aap_migration.cli.commands import cleanup as cleanup_commands
 from aap_migration.cli.commands import config as config_commands
 from aap_migration.cli.commands import credentials as credentials_commands
 from aap_migration.cli.commands import export_import
+from aap_migration.cli.commands import iam as iam_commands
 from aap_migration.cli.commands import migrate as migrate_commands
 from aap_migration.cli.commands import migration_report as migration_report_commands
 from aap_migration.cli.commands import patch_projects as patch_projects_commands
@@ -26,6 +26,7 @@ from aap_migration.cli.commands import project_failures as project_failures_comm
 from aap_migration.cli.commands import retry as retry_commands
 from aap_migration.cli.commands import state as state_commands
 from aap_migration.cli.commands import transform as transform_commands
+from aap_migration.cli.commands.serve import serve as serve_command
 from aap_migration.cli.context import MigrationContext
 from aap_migration.cli.menu import interactive_menu
 from aap_migration.utils.logging import configure_logging, get_logger
@@ -41,7 +42,7 @@ logger = get_logger(__name__)
 @click.option(
     "--config",
     "-c",
-    type=click.Path(exists=True, path_type=Path),
+    type=click.Path(path_type=Path),
     help="Path to configuration file",
     envvar="AAP_BRIDGE_CONFIG",
 )
@@ -90,15 +91,16 @@ def cli(
         # Show migration status
         aap-bridge migrate status --config config.yaml
     """
-    # Setup logging with optional file output
-    # If --log-file is provided, use it; otherwise default to logs/migration.log
-    effective_log_file = str(log_file) if log_file else "logs/migration.log"
+    # Skip file logging for serve command — uvicorn handles its own logging
+    is_serve = len(sys.argv) > 1 and sys.argv[1] == "serve"
 
-    # Ensure logs directory exists
-    log_path = Path(effective_log_file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    configure_logging(level=log_level, log_file=effective_log_file)
+    if not is_serve:
+        effective_log_file = str(log_file) if log_file else "logs/migration.log"
+        log_path = Path(effective_log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        configure_logging(level=log_level, log_file=effective_log_file)
+    else:
+        configure_logging(level=log_level)
 
     # Create context
     ctx.obj = MigrationContext(
@@ -139,6 +141,7 @@ cli.add_command(patch_projects_commands.patch_projects)
 cli.add_command(project_failures_commands.analyze_project_failures)
 cli.add_command(migration_report_commands.generate_migration_report)
 cli.add_command(iam_commands.iam)
+cli.add_command(serve_command)
 
 
 def main() -> int:
@@ -148,7 +151,7 @@ def main() -> int:
         return 0
     except click.ClickException as e:
         e.show()
-        return e.exit_code
+        return int(e.exit_code)
     except Exception as e:
         logger.error("Unexpected error", error=str(e), exc_info=True)
         click.echo(f"Error: {e}", err=True)

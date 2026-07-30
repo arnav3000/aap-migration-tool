@@ -1,7 +1,6 @@
 """Enhanced import menu with dependency validation and error handling."""
 
 import sys
-from pathlib import Path
 from typing import Any
 
 from rich.console import Console
@@ -10,12 +9,12 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from aap_migration.cli.granular_import import granular_import_menu
-from aap_migration.cli.utils import echo_error, echo_info, echo_success, echo_warning
+from aap_migration.cli.utils import echo_error, echo_info
 
 
 def run_command(args: list[str], ctx: Any = None) -> int:
     """Run a CLI command and return exit code."""
-    import subprocess
+    import subprocess  # nosec B404
 
     cmd = [sys.argv[0]]
 
@@ -25,7 +24,7 @@ def run_command(args: list[str], ctx: Any = None) -> int:
     cmd.extend(args)
 
     try:
-        result = subprocess.run(cmd, check=False)
+        result = subprocess.run(cmd, check=False)  # nosec B603
         return result.returncode
     except Exception as e:
         echo_error(f"Error running command: {e}")
@@ -43,18 +42,29 @@ def show_import_status(ctx: Any) -> None:
         # Get all resource types with progress
         all_stats = []
         resource_types = [
-            "organizations", "users", "teams", "credential_types",
-            "credentials", "execution_environments", "projects",
-            "inventories", "inventory_sources", "hosts",
-            "instance_groups", "job_templates",
-            "workflow_job_templates", "schedules", "applications",
-            "settings"
+            "organizations",
+            "users",
+            "teams",
+            "credential_types",
+            "credentials",
+            "execution_environments",
+            "projects",
+            "inventories",
+            "inventory_sources",
+            "hosts",
+            "instance_groups",
+            "job_templates",
+            "workflow_job_templates",
+            "schedules",
+            "applications",
+            "settings",
         ]
 
         # Need to query MigrationProgress for completed/failed counts
+        from sqlalchemy import func
+
         from aap_migration.migration.database import get_session
         from aap_migration.migration.models import MigrationProgress
-        from sqlalchemy import func
 
         with get_session(state.database_url) as session:
             for rtype in resource_types:
@@ -65,28 +75,32 @@ def show_import_status(ctx: Any) -> None:
                         session.query(func.count(MigrationProgress.id))
                         .filter(
                             MigrationProgress.resource_type == rtype,
-                            MigrationProgress.status == 'completed'
+                            MigrationProgress.status == "completed",
                         )
-                        .scalar() or 0
+                        .scalar()
+                        or 0
                     )
 
                     failed = (
                         session.query(func.count(MigrationProgress.id))
                         .filter(
                             MigrationProgress.resource_type == rtype,
-                            MigrationProgress.status == 'failed'
+                            MigrationProgress.status == "failed",
                         )
-                        .scalar() or 0
+                        .scalar()
+                        or 0
                     )
 
-                    all_stats.append({
-                        "type": rtype,
-                        "total": stats["total_exported"],
-                        "completed": completed,
-                        "failed": failed,
-                        "pending": stats["pending"],
-                        "percent": stats["percent_complete"]
-                    })
+                    all_stats.append(
+                        {
+                            "type": rtype,
+                            "total": stats["total_exported"],
+                            "completed": completed,
+                            "failed": failed,
+                            "pending": stats["pending"],
+                            "percent": stats["percent_complete"],
+                        }
+                    )
 
         if not all_stats:
             console.print("\n[yellow]No import progress found. Run export first.[/yellow]\n")
@@ -122,7 +136,7 @@ def show_import_status(ctx: Any) -> None:
                 str(stat["completed"]),
                 str(stat["failed"]) if stat["failed"] > 0 else "-",
                 str(stat["pending"]) if stat["pending"] > 0 else "-",
-                f"[{status_color}]{bar}[/{status_color}] {percent:.1f}%"
+                f"[{status_color}]{bar}[/{status_color}] {percent:.1f}%",
             )
 
         console.print("\n")
@@ -137,12 +151,12 @@ def show_import_status(ctx: Any) -> None:
             "pending": sum(s["pending"] for s in all_stats),
         }
 
-        console.print(f"[bold]Overall Progress:[/bold]")
+        console.print("[bold]Overall Progress:[/bold]")
         console.print(f"  Total Resources: {totals['total']}")
         console.print(f"  [green]✓ Completed: {totals['completed']}[/green]")
-        if totals['failed'] > 0:
+        if totals["failed"] > 0:
             console.print(f"  [red]✗ Failed: {totals['failed']}[/red]")
-        if totals['pending'] > 0:
+        if totals["pending"] > 0:
             console.print(f"  [yellow]⧗ Pending: {totals['pending']}[/yellow]")
         console.print()
 
@@ -150,14 +164,17 @@ def show_import_status(ctx: Any) -> None:
         inv_src_stat = next((s for s in all_stats if s["type"] == "inventory_sources"), None)
         if inv_src_stat and inv_src_stat["completed"] > 0:
             console.print("[bold yellow]⚠️  Important Note:[/bold yellow]")
-            console.print("Check inventory sources manually for outdated EE's which are pointing to")
+            console.print(
+                "Check inventory sources manually for outdated EE's which are pointing to"
+            )
             console.print("older AAP-2.4 automation hub address.")
             console.print()
 
     except Exception as e:
         import traceback
+
         echo_error(f"Failed to get import status: {e}")
-        console.print(f"\n[red]Error details:[/red]")
+        console.print("\n[red]Error details:[/red]")
         console.print(traceback.format_exc())
 
 
@@ -180,9 +197,9 @@ def show_failed_resources(ctx: Any) -> None:
                     MigrationProgress.source_id,
                     MigrationProgress.source_name,
                     MigrationProgress.error_message,
-                    MigrationProgress.updated_at
+                    MigrationProgress.updated_at,
                 )
-                .filter(MigrationProgress.status == 'failed')
+                .filter(MigrationProgress.status == "failed")
                 .order_by(MigrationProgress.resource_type, MigrationProgress.source_id)
                 .all()
             )
@@ -208,7 +225,7 @@ def show_failed_resources(ctx: Any) -> None:
                 row[0],  # resource_type
                 str(row[1]),  # source_id
                 row[2] if row[2] else "N/A",  # source_name
-                error
+                error,
             )
 
         console.print("\n")
@@ -217,8 +234,9 @@ def show_failed_resources(ctx: Any) -> None:
 
     except Exception as e:
         import traceback
+
         echo_error(f"Failed to get error details: {e}")
-        console.print(f"\n[red]Error details:[/red]")
+        console.print("\n[red]Error details:[/red]")
         console.print(traceback.format_exc())
 
 
@@ -241,11 +259,7 @@ def import_submenu(ctx: Any) -> None:
             )
         )
 
-        choice = Prompt.ask(
-            "Select an option",
-            choices=["1", "2", "3", "4", "b"],
-            default="b"
-        )
+        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "b"], default="b")
 
         if choice.lower() == "b":
             break
@@ -266,7 +280,9 @@ def import_submenu(ctx: Any) -> None:
 
         elif choice == "3":
             # Granular step-by-step import
-            console.print("[yellow]Import resources one phase at a time with full control.[/yellow]")
+            console.print(
+                "[yellow]Import resources one phase at a time with full control.[/yellow]"
+            )
             console.print("[dim]You can skip, retry, or abort at any phase.[/dim]")
             confirm = Prompt.ask("Continue?", choices=["y", "n"], default="n")
             if confirm == "y":

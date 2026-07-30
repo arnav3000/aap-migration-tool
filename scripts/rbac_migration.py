@@ -10,20 +10,21 @@ This script:
 4. Verifies all assignments
 """
 
-import json
 import os
 import sqlite3
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from collections.abc import MutableMapping
+from typing import Any, cast
 
 import requests
+
+# Disable SSL warnings for testing environments
+import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Disable SSL warnings for testing environments
-requests.packages.urllib3.disable_warnings()
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class RBACMigrator:
@@ -35,11 +36,11 @@ class RBACMigrator:
         source_token: str,
         target_url: str,
         target_token: str,
-        state_db_path: str = "migration_state.db"
+        state_db_path: str = "migration_state.db",
     ):
-        self.source_url = source_url.rstrip('/')
+        self.source_url = source_url.rstrip("/")
         self.source_token = source_token
-        self.target_url = target_url.rstrip('/')
+        self.target_url = target_url.rstrip("/")
         self.target_token = target_token
         self.state_db_path = state_db_path
 
@@ -48,34 +49,30 @@ class RBACMigrator:
         self.target_session = self._create_session()
 
         # ID mapping cache
-        self.id_mappings = {}
+        self.id_mappings: dict[str, dict[int, int]] = {}
         self._load_id_mappings()
 
         # Statistics
-        self.stats = {
-            'users_processed': 0,
-            'roles_found': 0,
-            'roles_created': 0,
-            'roles_skipped': 0,
-            'roles_failed': 0,
-            'errors': [],
-            'skipped_details': []
+        self.stats: dict[str, Any] = {
+            "users_processed": 0,
+            "roles_found": 0,
+            "roles_created": 0,
+            "roles_skipped": 0,
+            "roles_failed": 0,
+            "errors": [],
+            "skipped_details": [],
         }
 
     def _create_session(self) -> requests.Session:
         """Create requests session with retry logic"""
         session = requests.Session()
-        retry = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[502, 503, 504]
-        )
+        retry = Retry(total=3, backoff_factor=1, status_forcelist=[502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry)
-        session.mount('http://', adapter)
-        session.mount('https://', adapter)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
         return session
 
-    def _load_id_mappings(self):
+    def _load_id_mappings(self) -> None:
         """Load ID mappings from migration state database"""
         print("📊 Loading ID mappings from state database...")
 
@@ -111,15 +108,11 @@ class RBACMigrator:
         except Exception as e:
             print(f"⚠️  Error loading ID mappings: {e}")
 
-    def _get_target_id(self, resource_type: str, source_id: int) -> Optional[int]:
+    def _get_target_id(self, resource_type: str, source_id: int) -> int | None:
         """Get target ID for a source ID"""
         return self.id_mappings.get(resource_type, {}).get(source_id)
 
-    def _discover_target_id_by_name(
-        self,
-        resource_type: str,
-        resource_name: str
-    ) -> Optional[int]:
+    def _discover_target_id_by_name(self, resource_type: str, resource_name: str) -> int | None:
         """Discover target ID by querying for resource name"""
         endpoint = f"{self.target_url}/{resource_type}/"
 
@@ -130,21 +123,24 @@ class RBACMigrator:
             response = self.target_session.get(
                 endpoint,
                 headers={"Authorization": f"Bearer {self.target_token}"},
-                params={param_name: resource_name, "page_size": 1},
+                params=cast(
+                    MutableMapping[str, Any],
+                    {param_name: resource_name, "page_size": 1},
+                ),
                 verify=False,
-                timeout=60
+                timeout=60,
             )
 
             if response.status_code == 200:
-                results = response.json().get('results', [])
+                results = response.json().get("results", [])
                 if results:
-                    return results[0]['id']
+                    return cast(int | None, results[0]["id"])
         except Exception as e:
             print(f"   ⚠️  Error discovering {resource_type} '{resource_name}': {e}")
 
         return None
 
-    def get_source_users(self) -> List[Dict]:
+    def get_source_users(self) -> list[dict]:
         """Get all users from source AAP"""
         print("\n📥 Fetching users from source AAP...")
 
@@ -158,7 +154,7 @@ class RBACMigrator:
                     headers={"Authorization": f"Bearer {self.source_token}"},
                     params={"page_size": 100},
                     verify=False,
-                    timeout=60
+                    timeout=60,
                 )
 
                 if response.status_code != 200:
@@ -166,10 +162,10 @@ class RBACMigrator:
                     break
 
                 data = response.json()
-                users.extend(data.get('results', []))
-                url = data.get('next')
+                users.extend(data.get("results", []))
+                url = data.get("next")
 
-                if url and not url.startswith('http'):
+                if url and not url.startswith("http"):
                     # Handle relative URLs
                     url = f"{self.source_url}{url}"
 
@@ -180,7 +176,7 @@ class RBACMigrator:
         print(f"✅ Found {len(users)} users")
         return users
 
-    def get_user_roles(self, user_id: int, username: str) -> List[Dict]:
+    def get_user_roles(self, user_id: int, username: str) -> list[dict]:
         """Get all role assignments for a user from source AAP"""
         roles = []
         url = f"{self.source_url}/users/{user_id}/roles/"
@@ -192,18 +188,20 @@ class RBACMigrator:
                     headers={"Authorization": f"Bearer {self.source_token}"},
                     params={"page_size": 100},
                     verify=False,
-                    timeout=60
+                    timeout=60,
                 )
 
                 if response.status_code != 200:
-                    print(f"   ⚠️  Failed to fetch roles for {username}: HTTP {response.status_code}")
+                    print(
+                        f"   ⚠️  Failed to fetch roles for {username}: HTTP {response.status_code}"
+                    )
                     break
 
                 data = response.json()
-                roles.extend(data.get('results', []))
-                url = data.get('next')
+                roles.extend(data.get("results", []))
+                url = data.get("next")
 
-                if url and not url.startswith('http'):
+                if url and not url.startswith("http"):
                     url = f"{self.source_url}{url}"
 
             except Exception as e:
@@ -213,11 +211,7 @@ class RBACMigrator:
         return roles
 
     def create_role_assignment(
-        self,
-        role_definition: str,
-        object_id: int,
-        user_id: int,
-        username: str
+        self, role_definition: str, object_id: int, user_id: int, username: str
     ) -> bool:
         """Create a role assignment in target AAP"""
 
@@ -231,7 +225,7 @@ class RBACMigrator:
                 object_roles_url,
                 headers={"Authorization": f"Bearer {self.target_token}"},
                 verify=False,
-                timeout=60
+                timeout=60,
             )
 
             if response.status_code != 200:
@@ -239,7 +233,6 @@ class RBACMigrator:
                 return False
 
             # Find the role we want to assign
-            roles = response.json().get('results', [])
             # role_definition is like "organization", we need to find role with same name
             # Actually, the role name in AAP is like "Admin", "Member", "Read", etc.
             # We need to match based on the role type
@@ -254,11 +247,7 @@ class RBACMigrator:
             return False
 
     def assign_role_to_user(
-        self,
-        target_user_id: int,
-        role_id: int,
-        role_name: str,
-        resource_name: str
+        self, target_user_id: int, role_id: int, role_name: str, resource_name: str
     ) -> bool:
         """Assign a role to a user in target AAP"""
 
@@ -269,19 +258,19 @@ class RBACMigrator:
                 url,
                 headers={
                     "Authorization": f"Bearer {self.target_token}",
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
                 },
                 json={"id": target_user_id},
                 verify=False,
-                timeout=60
+                timeout=60,
             )
 
             if response.status_code in [200, 201, 204]:
                 return True
             elif response.status_code == 400:
                 # Might already be assigned
-                error_msg = response.json().get('error', '')
-                if 'already' in error_msg.lower():
+                error_msg = response.json().get("error", "")
+                if "already" in error_msg.lower():
                     return True  # Already assigned, treat as success
 
             print(f"      ⚠️  Failed to assign role: HTTP {response.status_code}")
@@ -294,49 +283,44 @@ class RBACMigrator:
             print(f"      ❌ Error assigning role: {e}")
             return False
 
-    def find_and_assign_role(
-        self,
-        source_role: Dict,
-        target_user_id: int,
-        username: str
-    ) -> bool:
+    def find_and_assign_role(self, source_role: dict, target_user_id: int, username: str) -> bool:
         """Find the equivalent role in target and assign it"""
 
-        role_name = source_role.get('name', '')
-        summary = source_role.get('summary_fields', {})
-        resource_type = summary.get('resource_type', '')
-        resource_name = summary.get('resource_name', '')
-        resource_id = summary.get('resource_id')
+        role_name = source_role.get("name", "")
+        summary = source_role.get("summary_fields", {})
+        resource_type = summary.get("resource_type", "")
+        resource_name = summary.get("resource_name", "")
+        resource_id = summary.get("resource_id")
 
         # Skip implicit/inherited roles
         if not resource_id:
             skip_reason = f"{username}: Implicit/inherited role '{role_name}' (no resource_id)"
             print(f"      ⏭️  Skipped: {skip_reason}")
-            self.stats['roles_skipped'] += 1
-            self.stats['skipped_details'].append(skip_reason)
+            self.stats["roles_skipped"] += 1
+            self.stats["skipped_details"].append(skip_reason)
             return True
 
         # Map resource type to API endpoint
         resource_type_map = {
-            'organization': 'organizations',
-            'team': 'teams',
-            'project': 'projects',
-            'inventory': 'inventories',
-            'job_template': 'job_templates',
-            'credential': 'credentials',
-            'workflow_job_template': 'workflow_job_templates'
+            "organization": "organizations",
+            "team": "teams",
+            "project": "projects",
+            "inventory": "inventories",
+            "job_template": "job_templates",
+            "credential": "credentials",
+            "workflow_job_template": "workflow_job_templates",
         }
 
         endpoint = resource_type_map.get(resource_type)
         if not endpoint:
             skip_reason = f"{username}: Unknown resource type '{resource_type}' for '{resource_name}' (role: {role_name})"
             print(f"      ⏭️  Skipped: {skip_reason}")
-            self.stats['roles_skipped'] += 1
-            self.stats['skipped_details'].append(skip_reason)
+            self.stats["roles_skipped"] += 1
+            self.stats["skipped_details"].append(skip_reason)
             return True
 
         # Get target resource ID
-        target_resource_id = self._get_target_id(endpoint, resource_id)
+        target_resource_id = self._get_target_id(endpoint, int(resource_id))
 
         if not target_resource_id:
             # Try to discover by name
@@ -344,8 +328,8 @@ class RBACMigrator:
 
         if not target_resource_id:
             print(f"      ⚠️  Cannot find target resource: {resource_type} '{resource_name}'")
-            self.stats['roles_failed'] += 1
-            self.stats['errors'].append(
+            self.stats["roles_failed"] += 1
+            self.stats["errors"].append(
                 f"{username}: Missing {resource_type} '{resource_name}' (source ID: {resource_id})"
             )
             return False
@@ -358,65 +342,60 @@ class RBACMigrator:
                 object_roles_url,
                 headers={"Authorization": f"Bearer {self.target_token}"},
                 verify=False,
-                timeout=60
+                timeout=60,
             )
 
             if response.status_code != 200:
                 print(f"      ⚠️  Cannot get object roles: HTTP {response.status_code}")
-                self.stats['roles_failed'] += 1
+                self.stats["roles_failed"] += 1
                 return False
 
             # Find matching role by name
-            object_roles = response.json().get('results', [])
+            object_roles = response.json().get("results", [])
             target_role = None
 
             for role in object_roles:
-                if role.get('name') == role_name:
+                if role.get("name") == role_name:
                     target_role = role
                     break
 
             if not target_role:
                 print(f"      ⚠️  Role '{role_name}' not found on {resource_type} '{resource_name}'")
-                self.stats['roles_failed'] += 1
+                self.stats["roles_failed"] += 1
                 return False
 
             # Assign the role
-            role_id = target_role['id']
-            success = self.assign_role_to_user(
-                target_user_id,
-                role_id,
-                role_name,
-                resource_name
-            )
+            role_id = target_role["id"]
+            success = self.assign_role_to_user(target_user_id, role_id, role_name, resource_name)
 
             if success:
-                self.stats['roles_created'] += 1
+                self.stats["roles_created"] += 1
                 return True
             else:
-                self.stats['roles_failed'] += 1
+                self.stats["roles_failed"] += 1
                 return False
 
         except Exception as e:
             print(f"      ❌ Error processing role: {e}")
-            self.stats['roles_failed'] += 1
+            self.stats["roles_failed"] += 1
             return False
 
-    def migrate_user_roles(self, source_user: Dict) -> bool:
+    def migrate_user_roles(self, source_user: dict) -> bool:
         """Migrate all roles for a single user"""
 
-        source_user_id = source_user['id']
-        username = source_user['username']
+        source_user_id = source_user["id"]
+        username = source_user["username"]
 
         # Get target user ID
-        target_user_id = self._get_target_id('users', source_user_id)
+        target_user_id = self._get_target_id("users", source_user_id)
 
         if not target_user_id:
             # Try to find by username
-            target_user_id = self._discover_target_id_by_name('users', username)
+            target_user_id = self._discover_target_id_by_name("users", username)
 
         if not target_user_id:
             print(f"   ❌ User '{username}' not found in target AAP")
-            self.stats['errors'].append(f"User '{username}' not found in target")
+            self.stats["errors"].append(f"User '{username}' not found in target")
             return False
 
         # Get roles from source
@@ -427,12 +406,12 @@ class RBACMigrator:
             return True
 
         print(f"   👤 {username}: {len(roles)} roles")
-        self.stats['roles_found'] += len(roles)
+        self.stats["roles_found"] += len(roles)
 
         success_count = 0
         for role in roles:
-            role_name = role.get('name', '')
-            resource_name = role.get('summary_fields', {}).get('resource_name', 'N/A')
+            role_name = role.get("name", "")
+            resource_name = role.get("summary_fields", {}).get("resource_name", "N/A")
 
             print(f"      - {role_name} on {resource_name}...", end=" ")
 
@@ -446,12 +425,12 @@ class RBACMigrator:
 
         return success_count > 0
 
-    def migrate_all(self):
+    def migrate_all(self) -> None:
         """Migrate all user roles from source to target"""
 
-        print("\n" + "="*70)
+        print("\n" + "=" * 70)
         print("   AAP RBAC MIGRATION")
-        print("="*70)
+        print("=" * 70)
 
         # Get all users
         users = self.get_source_users()
@@ -465,8 +444,8 @@ class RBACMigrator:
 
         # Process each user
         for user in users:
-            username = user['username']
-            self.stats['users_processed'] += 1
+            username = user["username"]
+            self.stats["users_processed"] += 1
 
             print(f"\n{self.stats['users_processed']}/{len(users)}: {username}")
 
@@ -475,56 +454,56 @@ class RBACMigrator:
                 time.sleep(0.5)  # Rate limiting
             except Exception as e:
                 print(f"   ❌ Error migrating {username}: {e}")
-                self.stats['errors'].append(f"{username}: {str(e)}")
+                self.stats["errors"].append(f"{username}: {str(e)}")
 
         # Print summary
         self.print_summary()
 
-    def print_summary(self):
+    def print_summary(self) -> None:
         """Print migration summary"""
 
-        print("\n" + "="*70)
+        print("\n" + "=" * 70)
         print("   MIGRATION SUMMARY")
-        print("="*70)
+        print("=" * 70)
 
-        print(f"\n📊 Statistics:")
+        print("\n📊 Statistics:")
         print(f"   Users processed:    {self.stats['users_processed']}")
         print(f"   Roles found:        {self.stats['roles_found']}")
         print(f"   Roles created:      {self.stats['roles_created']} ✅")
         print(f"   Roles skipped:      {self.stats['roles_skipped']} ⏭️")
         print(f"   Roles failed:       {self.stats['roles_failed']} ❌")
 
-        if self.stats['roles_found'] > 0:
-            success_rate = (self.stats['roles_created'] / self.stats['roles_found']) * 100
+        if self.stats["roles_found"] > 0:
+            success_rate = (self.stats["roles_created"] / self.stats["roles_found"]) * 100
             print(f"\n   Success Rate: {success_rate:.1f}%")
 
-        if self.stats['skipped_details']:
+        if self.stats["skipped_details"]:
             print(f"\n⏭️  Skipped Roles ({len(self.stats['skipped_details'])}):")
-            for skip in self.stats['skipped_details'][:20]:  # Show first 20
+            for skip in self.stats["skipped_details"][:20]:  # Show first 20
                 print(f"   - {skip}")
 
-            if len(self.stats['skipped_details']) > 20:
+            if len(self.stats["skipped_details"]) > 20:
                 print(f"   ... and {len(self.stats['skipped_details']) - 20} more")
 
-        if self.stats['errors']:
+        if self.stats["errors"]:
             print(f"\n❌ Failed Roles ({len(self.stats['errors'])}):")
-            for error in self.stats['errors'][:20]:  # Show first 20
+            for error in self.stats["errors"][:20]:  # Show first 20
                 print(f"   - {error}")
 
-            if len(self.stats['errors']) > 20:
+            if len(self.stats["errors"]) > 20:
                 print(f"   ... and {len(self.stats['errors']) - 20} more")
 
-        print("\n" + "="*70)
+        print("\n" + "=" * 70)
 
 
-def main():
+def main() -> None:
     """Main entry point"""
 
     # Load configuration from environment
-    source_url = os.getenv('SOURCE__URL', 'https://localhost:8443/api/v2')
-    source_token = os.getenv('SOURCE__TOKEN', '')
-    target_url = os.getenv('TARGET__URL', 'https://localhost:10443/api/controller/v2')
-    target_token = os.getenv('TARGET__TOKEN', '')
+    source_url = os.getenv("SOURCE__URL", "https://localhost:8443/api/v2")
+    source_token = os.getenv("SOURCE__TOKEN", "")
+    target_url = os.getenv("TARGET__URL", "https://localhost:10443/api/controller/v2")
+    target_token = os.getenv("TARGET__TOKEN", "")
 
     if not all([source_token, target_token]):
         print("❌ Error: SOURCE__TOKEN and TARGET__TOKEN environment variables required")
@@ -539,7 +518,7 @@ def main():
         source_url=source_url,
         source_token=source_token,
         target_url=target_url,
-        target_token=target_token
+        target_token=target_token,
     )
 
     # Run migration
@@ -552,9 +531,10 @@ def main():
     except Exception as e:
         print(f"\n❌ Fatal error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

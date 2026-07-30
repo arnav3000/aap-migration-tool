@@ -418,8 +418,8 @@ def should_log_payloads(logger: structlog.stdlib.BoundLogger, log_payloads_enabl
     # Check if logger is at DEBUG level
     # structlog loggers have _logger._logger attribute for stdlib logger
     try:
-        stdlib_logger = logger._logger  # type: ignore
-        return stdlib_logger.isEnabledFor(logging.DEBUG)
+        stdlib_logger = logger._logger
+        return bool(stdlib_logger.isEnabledFor(logging.DEBUG))
     except AttributeError:
         # Fallback: assume enabled if flag is True
         return True

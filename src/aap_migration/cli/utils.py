@@ -9,7 +9,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import click
 from rich.console import Console
@@ -247,7 +247,7 @@ def confirm_overwrite(path: Path, force: bool = False) -> bool:
     if force:
         return True
 
-    return click.confirm(f"File {path} already exists. Overwrite?")
+    return bool(click.confirm(f"File {path} already exists. Overwrite?"))
 
 
 def load_json_or_yaml(path: Path) -> dict[str, Any]:
@@ -271,11 +271,11 @@ def load_json_or_yaml(path: Path) -> dict[str, Any]:
 
     if suffix == ".json":
         with open(path) as f:
-            return json.load(f)
+            return cast(dict[str, Any], json.load(f))
 
     elif suffix in [".yaml", ".yml"]:
         with open(path) as f:
-            return yaml.safe_load(f)
+            return cast(dict[str, Any], yaml.safe_load(f))
 
     else:
         raise click.BadParameter(f"Unsupported file format: {suffix}. Use .json, .yaml, or .yml")

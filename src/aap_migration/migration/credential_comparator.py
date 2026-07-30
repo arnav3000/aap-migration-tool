@@ -64,7 +64,9 @@ class CredentialComparator:
         self.target_client = target_client
         self.state = state
 
-    async def fetch_credentials(self, client: AAPSourceClient | AAPTargetClient) -> list[dict[str, Any]]:
+    async def fetch_credentials(
+        self, client: AAPSourceClient | AAPTargetClient
+    ) -> list[dict[str, Any]]:
         """Fetch all credentials from an AAP instance.
 
         Args:
@@ -176,42 +178,62 @@ class CredentialComparator:
                 target_cred = target_index[key]
 
                 # Store ID mapping if not already stored
-                source_id = source_cred.get("id")
-                target_id = target_cred.get("id")
+                source_id_val = source_cred.get("id")
+                target_id_val = target_cred.get("id")
                 source_name = source_cred.get("name")
+                if source_id_val is None or target_id_val is None:
+                    logger.warning(
+                        "credential_missing_ids_for_mapping",
+                        name=source_name,
+                    )
+                    continue
 
-                if not self.state.is_migrated("credentials", source_id):
-                    self.state.save_id_mapping("credentials", source_id, target_id, source_name=source_name)
+                source_id_i = int(source_id_val)
+                target_id_i = int(target_id_val)
+
+                if not self.state.is_migrated("credentials", source_id_i):
+                    self.state.save_id_mapping(
+                        "credentials", source_id_i, target_id_i, source_name=source_name
+                    )
                     # Mark as completed to prevent orphaned ID mapping
                     self.state.mark_completed(
                         resource_type="credentials",
-                        source_id=source_id,
-                        target_id=target_id,
+                        source_id=source_id_i,
+                        target_id=target_id_i,
                         target_name=source_name,
                         source_name=source_name,
                     )
                     logger.debug(
                         "credential_mapping_stored",
                         name=source_name,
-                        source_id=source_id,
-                        target_id=target_id,
+                        source_id=source_id_i,
+                        target_id=target_id_i,
                     )
             else:
                 # Credential missing in target
+                sid_raw = source_cred.get("id")
+                if sid_raw is None:
+                    continue
+                sid_int = int(sid_raw)
+                ct_raw = source_cred.get("credential_type")
+                ct_int = int(ct_raw) if ct_raw is not None else 0
+                org_raw = source_cred.get("organization")
+                org_val = int(org_raw) if org_raw is not None else None
+
                 diff = CredentialDiff(
-                    source_id=source_cred.get("id"),
-                    name=source_cred.get("name"),
-                    credential_type=source_cred.get("credential_type"),
+                    source_id=sid_int,
+                    name=str(source_cred.get("name") or ""),
+                    credential_type=ct_int,
                     credential_type_name=source_cred.get("summary_fields", {})
                     .get("credential_type", {})
                     .get("name", "Unknown"),
-                    organization=source_cred.get("organization"),
+                    organization=org_val,
                     organization_name=source_cred.get("summary_fields", {})
                     .get("organization", {})
                     .get("name"),
-                    description=source_cred.get("description", ""),
+                    description=str(source_cred.get("description") or ""),
                     inputs=source_cred.get("inputs", {}),
-                    managed=source_cred.get("managed", False),
+                    managed=bool(source_cred.get("managed", False)),
                 )
                 missing_credentials.append(diff)
 
@@ -257,14 +279,16 @@ class CredentialComparator:
         ]
 
         if result.missing_in_target:
-            report_lines.extend([
-                "## Missing Credentials",
-                "",
-                "The following credentials exist in source but are missing in target:",
-                "",
-                "| Source ID | Name | Type | Organization | Description |",
-                "|-----------|------|------|--------------|-------------|",
-            ])
+            report_lines.extend(
+                [
+                    "## Missing Credentials",
+                    "",
+                    "The following credentials exist in source but are missing in target:",
+                    "",
+                    "| Source ID | Name | Type | Organization | Description |",
+                    "|-----------|------|------|--------------|-------------|",
+                ]
+            )
 
             for diff in result.missing_in_target:
                 org_name = diff.organization_name or "None"
@@ -274,50 +298,66 @@ class CredentialComparator:
                     f"{org_name} | {description} |"
                 )
 
-            report_lines.extend([
-                "",
-                "### Details",
-                "",
-            ])
+            report_lines.extend(
+                [
+                    "",
+                    "### Details",
+                    "",
+                ]
+            )
 
             for i, diff in enumerate(result.missing_in_target, 1):
-                org_info = f"Organization: {diff.organization_name} (ID: {diff.organization})" if diff.organization else "Organization: None (Global)"
+                org_info = (
+                    f"Organization: {diff.organization_name} (ID: {diff.organization})"
+                    if diff.organization
+                    else "Organization: None (Global)"
+                )
 
-                report_lines.extend([
-                    f"#### {i}. {diff.name}",
-                    f"- **Source ID:** {diff.source_id}",
-                    f"- **Type:** {diff.credential_type_name} (ID: {diff.credential_type})",
-                    f"- **{org_info}**",
-                    f"- **Description:** {diff.description}",
-                    f"- **Inputs:** `{list(diff.inputs.keys())}` (values are encrypted)",
-                    "",
-                ])
+                report_lines.extend(
+                    [
+                        f"#### {i}. {diff.name}",
+                        f"- **Source ID:** {diff.source_id}",
+                        f"- **Type:** {diff.credential_type_name} (ID: {diff.credential_type})",
+                        f"- **{org_info}**",
+                        f"- **Description:** {diff.description}",
+                        f"- **Inputs:** `{list(diff.inputs.keys())}` (values are encrypted)",
+                        "",
+                    ]
+                )
         else:
-            report_lines.extend([
-                "## All Credentials Present",
-                "",
-                "All source credentials already exist in the target instance.",
-                "",
-            ])
+            report_lines.extend(
+                [
+                    "## All Credentials Present",
+                    "",
+                    "All source credentials already exist in the target instance.",
+                    "",
+                ]
+            )
 
-        report_lines.extend([
-            "---",
-            "",
-            "## Next Steps",
-            "",
-        ])
+        report_lines.extend(
+            [
+                "---",
+                "",
+                "## Next Steps",
+                "",
+            ]
+        )
 
         if result.missing_in_target:
-            report_lines.extend([
-                "1. Review missing credentials above",
-                "2. Run migration to create missing credentials",
-                "3. Note: Secret values will need manual entry (API returns `$encrypted$`)",
-                "",
-            ])
+            report_lines.extend(
+                [
+                    "1. Review missing credentials above",
+                    "2. Run migration to create missing credentials",
+                    "3. Note: Secret values will need manual entry (API returns `$encrypted$`)",
+                    "",
+                ]
+            )
         else:
-            report_lines.extend([
-                "No action required - all credentials are present in target.",
-                "",
-            ])
+            report_lines.extend(
+                [
+                    "No action required - all credentials are present in target.",
+                    "",
+                ]
+            )
 
         return "\n".join(report_lines)
