@@ -146,7 +146,7 @@ async def test_analyze_all_organizations_and_serialize_report(
 
 
 @pytest.mark.asyncio
-async def test_analyze_all_organizations_propagates_task_exceptions(
+async def test_analyze_all_organizations_continues_after_org_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = FakeClient()
@@ -167,5 +167,10 @@ async def test_analyze_all_organizations_propagates_task_exceptions(
 
     monkeypatch.setattr(analyzer, "analyze_organization", sometimes_fail)
 
-    with pytest.raises(RuntimeError, match="boom"):
-        await analyzer.analyze_all_organizations()
+    report = await analyzer.analyze_all_organizations()
+
+    assert report.total_organizations == 2
+    assert "OrgA" in report.org_reports
+    assert "OrgB" in report.org_reports
+    assert report.org_reports["OrgA"].org_id == 1
+    assert report.org_reports["OrgB"].org_id == -1
