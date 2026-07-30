@@ -73,7 +73,7 @@ curl -k https://your-target-aap/api/controller/v2/ping/
 - **🎯 Interactive TUI**: User-friendly Text User Interface with guided workflows, real-time progress tracking, and step-by-step control
 - **🔐 Credential-First Migration**: Ensures credentials are checked, compared, and migrated BEFORE all other resources
 - **Bulk Operations**: Leverages AAP bulk APIs for high-performance migrations
-- **State Management**: SQLite or PostgreSQL-backed state tracking with checkpoint/resume capability
+- **State Management**: PostgreSQL-backed state tracking with checkpoint/resume and source→target ID mappings
 - **Idempotency**: Safely resume interrupted migrations without creating duplicates
 - **Automatic Credential Comparison**: Pre-flight checks to identify missing credentials with detailed reports
 - **Dynamic Inventories**: Full support for migrating dynamic inventories including:
@@ -102,7 +102,7 @@ The tool is organized into several key components:
   for all AAP resource types
 - **Credential Comparator**: Dedicated module for credential diff and validation
 - **State Management**: Database-backed progress tracking, checkpoint creation,
-  and ID mapping
+  and ID mapping ([why state exists](docs/architecture/migration-state.md))
 - **CLI**: User-friendly command-line interface for all operations
 
 ## Quick Start
@@ -113,7 +113,7 @@ The tool is organized into several key components:
 - **Hardware**: Minimum 8GB RAM recommended for large migrations
 - **Network**: Access to Source AAP and Target AAP
 - **Credentials**: Admin access to both Source and Target AAP instances
-- **Database**: SQLite (built-in, no setup) or PostgreSQL (optional, for 100k+ resources)
+- **Database**: PostgreSQL for migration state (compose spins this up by default)
 - **HashiCorp Vault** (Optional but recommended): For migrating encrypted
   credentials securely
 
@@ -190,39 +190,21 @@ The project includes configuration files with recommended default values. You ne
 
 #### 1. Database Setup
 
-The tool uses a database to track migration state (ID mappings, checkpoints, progress). **SQLite is the default** - no setup required!
+The tool uses **PostgreSQL** to track migration state (ID mappings, checkpoints, progress).
+See [docs/architecture/migration-state.md](docs/architecture/migration-state.md) for why
+state is an ID graph (not just “does the name exist on the target”).
 
-**Database Comparison:**
+**Container default:** `make up` starts the compose `db` service. Set:
 
-| Feature | SQLite (Default) | PostgreSQL (Optional) |
-|---------|------------------|----------------------|
-| **Setup** | ✅ Zero configuration | Requires PostgreSQL server |
-| **Capacity** | Large migrations | Very large migrations |
-| **Location** | Local file | Local or remote |
-| **Backup** | Copy single file | Database dump |
-| **Best For** | Most migrations | Enterprise scale |
+```bash
+MIGRATION_STATE_DB_PATH=postgresql://aap_user:changeme@localhost:5432/aap_migration
+```
 
-##### Option A: SQLite (Default - Zero Configuration) ⭐ Recommended
-
-SQLite is a file-based database that requires no server setup. Perfect for most migrations.
-
-- ✅ **No installation required** - Built into Python
-- ✅ **Automatic setup** - Database file created on first run
-- ✅ **Handles large migrations** - Supports substantial workloads
-- ✅ **Easy backup** - Just copy the `migration_state.db` file
-- ✅ **Production-ready** - Successfully used in AAP migrations
-
-**No configuration needed!** The default `.env` uses SQLite.
-
-##### Option B: PostgreSQL (Optional - For Enterprise Scale)
-
-Consider PostgreSQL only if you need:
-
-- Very large migrations
-- Distributed/remote state access
-- Cloud RDS integration
+(Inside containers use host `db` instead of `localhost` — see `container/.env.container`.)
 
 **Important:** This is a separate PostgreSQL instance for migration state tracking, NOT AAP's internal database.
+
+Optional: create your own Postgres role/database if not using compose:
 
 ```bash
 # Create PostgreSQL database and user
@@ -345,8 +327,8 @@ TARGET__TOKEN=xYz987WvU654TsR321qPoNmL...  # Your actual token from step 2
 TARGET__VERIFY_SSL=false  # Use 'true' for production with valid SSL certs
 TARGET__TIMEOUT=300
 
-# Database: SQLite (default - no setup needed!)
-MIGRATION_STATE_DB_PATH=sqlite:///./migration_state.db
+# Database: PostgreSQL (compose default — see make up / container/.env.container)
+MIGRATION_STATE_DB_PATH=postgresql://aap_user:changeme@localhost:5432/aap_migration
 
 # Vault: Not using (credentials will need manual secret updates after migration)
 # VAULT__URL=
@@ -367,7 +349,7 @@ VAULT__MOUNT_POINT=secret
 VAULT__PATH=aap/credentials
 ```
 
-**Example 3: Enterprise Scale with PostgreSQL**
+**Example 3: Remote PostgreSQL**
 
 ```bash
 # Source and Target configs (same as Example 1)
@@ -379,7 +361,7 @@ TARGET__URL=https://aap26-prod.company.com/api/controller/v2
 TARGET__TOKEN=xYz987WvU654TsR321qPoNmL...
 # ... (other TARGET settings)
 
-# Database: PostgreSQL (for very large migrations)
+# Database: remote PostgreSQL
 MIGRATION_STATE_DB_PATH=postgresql://aap_migration_user:SecurePass123!@db-server.company.com:5432/aap_migration
 ```
 
@@ -618,7 +600,7 @@ aap-bridge import -r organizations
 
 - Exported data: `exports/<resource_type>/`
 - Transformed data: `xformed/<resource_type>/`
-- State database: `migration_state.db`
+- State database: PostgreSQL (`MIGRATION_STATE_DB_PATH`)
 
 ---
 

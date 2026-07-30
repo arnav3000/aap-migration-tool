@@ -140,6 +140,14 @@ def create_database_engine(
         is_sqlite = database_url.startswith("sqlite")
         is_postgresql = database_url.startswith("postgresql")
 
+        if is_sqlite:
+            logger.warning(
+                "sqlite_engine_deprecated",
+                message=(
+                    "SQLite engines are for unit tests only; use PostgreSQL for migration state"
+                ),
+            )
+
         # Configure engine based on database type
         if is_sqlite:
             # SQLite-specific configuration

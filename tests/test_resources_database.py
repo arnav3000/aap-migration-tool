@@ -22,6 +22,8 @@ from aap_migration.migration.database import (
 from aap_migration.resources import (
     EXPORTABLE_TYPES,
     FULLY_SUPPORTED_TYPES,
+    apply_host_membership_resource_cascade,
+    cascade_skip_phases_for_hosts,
     get_all_types,
     get_batch_size,
     get_cleanup_order,
@@ -35,6 +37,7 @@ from aap_migration.resources import (
     get_migration_order,
     get_transformable_types,
     has_discovered_endpoints,
+    is_host_inventory_membership_excluded,
     is_valid_type,
     normalize_resource_type,
 )
@@ -56,6 +59,53 @@ def test_resource_registry_fallback_helpers() -> None:
     assert "organizations" in get_fully_supported_types()
     assert EXPORTABLE_TYPES == get_exportable_types()
     assert FULLY_SUPPORTED_TYPES == get_fully_supported_types()
+
+
+def test_host_membership_exclusion_cascade() -> None:
+    assert cascade_skip_phases_for_hosts(["hosts"]) == [
+        "hosts",
+        "host_inventory_memberships",
+    ]
+    assert cascade_skip_phases_for_hosts(["credentials"]) == ["credentials"]
+
+    order = ["hosts", "host_inventory_memberships", "job_templates"]
+    assert apply_host_membership_resource_cascade(
+        ["host_inventory_memberships", "job_templates"]
+    ) == ["job_templates"]
+    assert apply_host_membership_resource_cascade(order) == order
+    assert apply_host_membership_resource_cascade(
+        order,
+        exclusions={"hosts": [1, 2]},
+        preview_resources={
+            "hosts": [{"source_id": 1}, {"source_id": 2}],
+        },
+    ) == ["hosts", "job_templates"]
+    assert (
+        apply_host_membership_resource_cascade(
+            order,
+            exclusions={"hosts": [1]},
+            preview_resources={
+                "hosts": [{"source_id": 1}, {"source_id": 2}],
+            },
+        )
+        == order
+    )
+
+    assert is_host_inventory_membership_excluded({"host_id": 9, "inventory_id": 3}, {"hosts": [9]})
+    assert not is_host_inventory_membership_excluded(
+        {"host_id": 9, "inventory_id": 3}, {"hosts": [8]}
+    )
+    assert not is_host_inventory_membership_excluded({"host_id": 9, "inventory_id": 3}, None)
+
+    from aap_migration.resources import (
+        excluded_preview_count,
+        is_resource_type_fully_excluded,
+    )
+
+    preview = {"hosts": [{"source_id": 1}, {"source_id": 2}]}
+    assert is_resource_type_fully_excluded("hosts", {"hosts": [1, 2]}, preview)
+    assert not is_resource_type_fully_excluded("hosts", {"hosts": [1]}, preview)
+    assert excluded_preview_count("hosts", {"hosts": [1]}, preview) == 1
 
 
 def test_resource_helpers_use_discovered_endpoints(

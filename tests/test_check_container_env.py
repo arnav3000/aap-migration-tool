@@ -49,3 +49,15 @@ def test_validate_container_env_accepts_valid_file(tmp_path: Path) -> None:
     )
 
     assert validate_container_env(env_file) == []
+
+
+def test_validate_container_env_rejects_sqlite_dsn(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "MIGRATION_STATE_DB_PATH=sqlite:///./migration_state.db\n"
+        "AAP_TOKEN_ENCRYPTION_KEY=this-is-a-long-random-secret-value\n",
+        encoding="utf-8",
+    )
+
+    errors = validate_container_env(env_file)
+    assert any("postgresql://" in err for err in errors)

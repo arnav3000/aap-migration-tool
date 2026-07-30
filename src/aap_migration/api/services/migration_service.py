@@ -492,6 +492,16 @@ class MigrationService:
                                 f"Excluded {len(excluded_ids)} {resource_type} resource(s) from migration",
                             )
 
+                    from aap_migration.resources import cascade_skip_phases_for_hosts
+
+                    before_cascade = set(skip_phases)
+                    skip_phases = cascade_skip_phases_for_hosts(skip_phases)
+                    for cascaded in set(skip_phases) - before_cascade:
+                        self.job_service.append_log(  # type: ignore[attr-defined]
+                            job_id,
+                            f"Skipping entire phase: {cascaded} (depends on excluded hosts)",
+                        )
+
                 self.job_service.append_log(job_id, "Running migration...")  # type: ignore[attr-defined]
                 summary = await coordinator.migrate_all(
                     skip_phases=skip_phases if skip_phases else None,

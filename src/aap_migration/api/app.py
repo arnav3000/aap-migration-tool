@@ -74,8 +74,11 @@ def create_app(db_url: str | None = None) -> FastAPI:
 
     effective_url: str = db_url or get_db_url()
 
-    if not effective_url.startswith(("sqlite", "postgresql", "mysql")):
-        effective_url = f"sqlite:///{effective_url}"
+    if not effective_url.startswith(("sqlite://", "postgresql://", "mysql://")):
+        raise ValueError(
+            "Database URL must be a full DSN (postgresql://...). "
+            f"Got {effective_url!r}. Bare file paths are no longer supported."
+        )
 
     engine = create_database_engine(effective_url)
     _migrate_phase_resource_types(engine)
