@@ -50,6 +50,18 @@ class FakeState:
     def get_mapped_id(self, resource_type, source_id):
         return self.mapped_ids.get((resource_type, source_id))
 
+    def get_id_mapping(self, resource_type, source_id):
+        target_id = self.mapped_ids.get((resource_type, source_id))
+        if target_id is None and (resource_type, source_id) not in self.mapped_ids:
+            return None
+        return {
+            "source_id": source_id,
+            "target_id": target_id,
+            "source_name": None,
+            "target_name": None,
+            "resource_type": resource_type,
+        }
+
 
 class FakeTargetClient:
     def __init__(self):
@@ -293,16 +305,37 @@ async def test_specialized_importers_cover_credential_type_user_and_credential_p
     credential_client.get_results[
         ("credentials/", (("credential_type", 330), ("name", "Vault"), ("organization", 107)))
     ] = {"results": [{"id": 44, "managed": True}]}
+    # Builtin type IDs differ across versions — resolve Source Control by name (2 → 6)
+    credential_client.find_results[("credential_types", "Source Control", None, None, None)] = {
+        "id": 6,
+        "name": "Source Control",
+    }
     credential_importer = CredentialImporter(credential_client, credential_state, performance)
 
     resolved_credential = await credential_importer._resolve_dependencies(
         "credentials",
-        {"name": "Vault", "credential_type": 5, "organization": 7, "user": 9, "team": 999},
+        {
+            "name": "git-cred",
+            "credential_type": 2,
+            "organization": 7,
+            "user": 9,
+            "team": 999,
+            "_dependency_names": {"credential_type": "Source Control"},
+        },
     )
-    assert resolved_credential["credential_type"] == 5
+    assert resolved_credential["credential_type"] == 6
+    assert credential_state.mapped_ids[("credential_types", 2)] == 6
     assert resolved_credential["organization"] == 107
     assert resolved_credential["user"] == 109
     assert "team" not in resolved_credential
+
+    # Without mapping or type name, refuse to reuse the source builtin ID
+    unresolved = await credential_importer._resolve_dependencies(
+        "credentials",
+        {"name": "orphan", "credential_type": 5, "organization": 7},
+    )
+    assert "credential_type" not in unresolved
+
     assert credential_importer._detect_encrypted_fields(
         {"_encrypted_fields": ["password"], "inputs": {"ssh_key_unlock": "$encrypted$"}}
     ) == ["password", "ssh_key_unlock"]
@@ -360,6 +393,48 @@ async def test_credential_importer_defaults_owner_to_admin_when_missing():
     assert created["id"] == 500
     # create_resource should have been called with user=admin
     assert ("users/", {"username": "admin"}) in client.get_calls
+
+
+@pytest.mark.asyncio
+async def test_credential_import_failure_logs_credential_type():
+    performance = PerformanceConfig()
+    state = FakeState(mapped_ids={("credential_types", 2): 102})
+    client = FakeTargetClient()
+    client.get_results[("credentials/", (("credential_type", 102), ("name", "SCM Cred")))] = {
+        "results": []
+    }
+    client.get_results[("credential_types/102/", ())] = {
+        "id": 102,
+        "name": "Galaxy Server Token",
+    }
+    client.create_error = APIError(
+        "Additional properties are not allowed "
+        "('ssh_key_data', 'ssh_key_unlock', 'username' were unexpected)"
+    )
+    importer = CredentialImporter(client, state, performance)
+
+    result = await importer.import_resource(
+        "credentials",
+        99,
+        {
+            "name": "SCM Cred",
+            "credential_type": 2,
+            "inputs": {
+                "username": "git",
+                "ssh_key_data": "KEY",
+                "ssh_key_unlock": "pass",
+            },
+            "_dependency_names": {"credential_type": "Source Control"},
+            "user": 1,
+        },
+    )
+
+    assert result is None
+    assert len(importer.import_errors) == 1
+    err = importer.import_errors[0]["error"]
+    assert "Galaxy Server Token" in err or "Source Control" in err
+    assert "credential_type=" in err
+    assert "ssh_key_data" in err
 
 
 @pytest.mark.asyncio
