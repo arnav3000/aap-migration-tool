@@ -351,6 +351,10 @@ def test_apply_name_prefix_skips_managed_credential_types() -> None:
     apply_name_prefix("credentials", cred, "dev_")
     assert cred["name"] == "dev_deploy-key"
 
+    managed_cred = {"name": "Ansible Galaxy", "managed": True}
+    apply_name_prefix("credentials", managed_cred, "dev_")
+    assert managed_cred["name"] == "Ansible Galaxy"
+
     user = {"name": "admin"}
     apply_name_prefix("users", user, "dev_")
     assert user["name"] == "admin"

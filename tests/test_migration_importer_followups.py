@@ -281,38 +281,56 @@ async def test_credential_input_sources_and_settings_importers(monkeypatch):
             {"_source_id": 1},
             {
                 "_source_id": 2,
-                "credential": 999,
+                "target_credential": 999,
                 "input_field_name": "token",
                 "source_credential": 20,
-                "source_credential_field_name": "vault",
+                "metadata": {"path": "secret"},
             },
             {
                 "_source_id": 3,
-                "credential": 10,
+                "target_credential": 10,
                 "input_field_name": "token",
                 "source_credential": 999,
-                "source_credential_field_name": "vault",
             },
             {
                 "_source_id": 4,
-                "credential": 10,
+                "target_credential": 10,
                 "input_field_name": "token",
                 "source_credential": 20,
-                "source_credential_field_name": "vault",
+                "metadata": {"path": "secret/data"},
+            },
+            {
+                # legacy alias still accepted
+                "_source_id": 5,
+                "credential": 10,
+                "input_field_name": "password",
+                "source_credential": 20,
             },
         ],
         progress_callback=lambda success, failed, skipped: progress.append(
             (success, failed, skipped)
         ),
     )
-    assert results == [{"id": 110, "name": "Vault Target"}]
-    assert client.patch_calls[-1] == (
-        "credentials/110/",
-        {"inputs": {"existing": "value", "token": "$220.vault$"}},
+    assert len(results) == 2
+    assert client.post_calls[0] == (
+        "credential_input_sources/",
+        {
+            "target_credential": 110,
+            "source_credential": 220,
+            "input_field_name": "token",
+            "metadata": {"path": "secret/data"},
+        },
     )
-    assert progress[-1] == (1, 3, 0)
+    assert client.post_calls[1][1]["input_field_name"] == "password"
+    assert progress[-1] == (2, 3, 0)
 
     failing_client = FakeClient()
+
+    async def boom_post(endpoint, json_data=None):
+        failing_client.post_calls.append((endpoint, dict(json_data or {})))
+        raise RuntimeError("create failed")
+
+    failing_client.post = boom_post  # type: ignore[method-assign]
     failing_state = FakeState(mapped_ids={("credentials", 99): 999, ("credentials", 20): 220})
     failing_importer = CredentialInputSourceImporter(
         failing_client, failing_state, PerformanceConfig()

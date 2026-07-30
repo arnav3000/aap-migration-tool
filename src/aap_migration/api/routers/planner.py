@@ -514,7 +514,10 @@ def _build_source_contexts(
                     src_config,
                     auth_scheme=src_cfg.get("auth_scheme", "Bearer"),
                 ),
-                "state": MigrationState(migration_config.state),
+                "state": MigrationState(
+                    migration_config.state,
+                    source_key=str(src_cfg.get("source_key") or src_cfg.get("connection_id") or ""),
+                ),
                 "name_prefix": src_cfg.get("name_prefix", ""),
                 "connection_name": src_cfg.get("connection_name", "") or src_cfg["url"],
                 "org_ids": src_cfg["org_ids"],
@@ -640,6 +643,16 @@ async def _migrate_resource_type(
                         continue
 
                 if org_ids and not _resource_in_orgs(rtype, resource, source_id, org_ids):
+                    skipped += 1
+                    _emit_resource_result(
+                        emit,
+                        log,
+                        phase_num=phase_num,
+                        name=_resource_display_name(resource, source_id),
+                        rtype=rtype,
+                        result="skipped",
+                        detail="Not in selected organizations for this phase",
+                    )
                     continue
 
                 raw_summary = resource.get("summary_fields", {})
@@ -849,16 +862,43 @@ async def _migrate_resource_type(
 def _resource_in_orgs(
     rtype: str, resource: dict[str, Any], source_id: Any, org_ids: list[int]
 ) -> bool:
-    """Check whether a resource belongs to one of the selected orgs."""
+    """Check whether a resource belongs to one of the selected orgs.
+
+    Global resource types (settings, instances, instance_groups, credential_types,
+    users) are intentionally included in every phase. Org-scoped types must match
+    an selected org id via ``organization`` or ``summary_fields.organization.id``.
+    """
     if rtype == "organizations":
-        return source_id in org_ids
-    if rtype in ("settings", "host_inventory_memberships"):
+        try:
+            return int(source_id) in org_ids
+        except (TypeError, ValueError):
+            return False
+    # Truly global / infrastructure types — always in scope for a phase
+    if rtype in (
+        "settings",
+        "instances",
+        "instance_groups",
+        "credential_types",
+        "users",
+        "system_job_templates",
+    ):
         return True
+    # Memberships are filtered by their inventory's org during export; allow through
+    # here and let import resolve inventory mapping (missing → skip/fail with reason).
+    if rtype == "host_inventory_memberships":
+        return True
+
     res_org = resource.get("organization")
     sf_org = resource.get("summary_fields", {}).get("organization", {}).get("id")
     if res_org in org_ids or sf_org in org_ids:
         return True
-    return res_org is None and sf_org is None
+    # Credentials/EEs may be user-owned or global (organization=null). Include them
+    # when they have no org so they are not silently dropped from every phase.
+    if rtype in ("credentials", "execution_environments", "applications") and (
+        res_org is None and sf_org is None
+    ):
+        return True
+    return False
 
 
 async def _handle_credential_pause(
@@ -1083,6 +1123,8 @@ async def execute_phase(
                 "connection_name": getattr(conn, "name", None) or cfg.url,
                 "org_ids": org_ids,
                 "auth_scheme": ConnectionService._auth_scheme(conn),
+                "source_key": ps.connection_id or ps.id,
+                "connection_id": ps.connection_id,
             }
         )
 
@@ -1091,6 +1133,12 @@ async def execute_phase(
 
     phase_name = phase.name or f"Phase {phase.phase_number}"
     db_url = get_db_url()
+
+    # Optional per-phase resource-type filter (empty = all fully supported types)
+    phase_resource_types = [
+        row.resource_type
+        for row in db.query(MigrationPlanPhaseResourceType).filter_by(phase_id=phase_id).all()
+    ]
 
     svc = get_job_service()
     session_factory = get_app_state().db_session_factory
@@ -1104,6 +1152,14 @@ async def execute_phase(
         totals = {"created": 0, "skipped": 0, "failed": 0, "updated": 0}
 
         resource_order = get_fully_supported_types()
+        if phase_resource_types:
+            allowed = set(phase_resource_types)
+            resource_order = [r for r in resource_order if r in allowed]
+            if not resource_order:
+                raise ValueError(
+                    "Phase resource_types filter excluded every migratable type — "
+                    "check the phase configuration"
+                )
         num_resource_types = len(resource_order)
         CRED_PAUSE_AFTER = {"credentials", "credential_input_sources"}
         created_creds: list[dict[str, str]] = []

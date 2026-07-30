@@ -304,8 +304,9 @@ async def test_planner_credential_review_and_execute_phase(
             return None
 
     class FakeState:
-        def __init__(self, config):
+        def __init__(self, config, source_key: str = "", **_kwargs):
             self.config = config
+            self.source_key = source_key
 
         def get_mapped_id(self, resource_type, source_id):
             if resource_type == "organizations" and source_id == 1:
@@ -314,7 +315,7 @@ async def test_planner_credential_review_and_execute_phase(
 
     class FakeExporter:
         async def export(self):
-            yield {"id": 1, "name": "Default"}
+            yield {"id": 1, "name": "Default", "organization": 1}
 
     class FakeImporter:
         async def import_resource(self, resource_type, source_id, data):
@@ -920,6 +921,119 @@ async def test_migrate_skips_name_prefix_for_managed_credential_types(
     )
 
     assert imported_names == ["Machine", "dev_MyCustomVault"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_skips_name_prefix_for_managed_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_names: list[str] = []
+
+    class FakeExporter:
+        async def export(self):
+            yield {"id": 1, "name": "Ansible Galaxy", "managed": True}
+            yield {"id": 2, "name": "My SCM Cred", "managed": False}
+
+    class FakeImporter:
+        async def import_resource(self, resource_type, source_id, data):
+            imported_names.append(data["name"])
+            return True
+
+    monkeypatch.setattr(
+        "aap_migration.migration.exporter.create_exporter", lambda **kwargs: FakeExporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.importer.create_importer", lambda **kwargs: FakeImporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.transformer.create_transformer", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "aap_migration.resources.RESOURCE_REGISTRY",
+        {
+            "credentials": SimpleNamespace(
+                description="Credentials",
+                has_transformer=False,
+            )
+        },
+    )
+
+    sources = [
+        {
+            "src_client": object(),
+            "state": object(),
+            "migration_config": SimpleNamespace(performance=None, resource_mappings={}),
+            "name_prefix": "dev_",
+            "connection_name": "Dev AAP",
+            "org_ids": [],
+            "url": "https://dev.example.com",
+        }
+    ]
+
+    await planner._migrate_resource_type(
+        "credentials",
+        sources,
+        object(),
+        1,
+        lambda _e: None,
+        lambda _line: None,
+        [],
+    )
+
+    assert imported_names == ["Ansible Galaxy", "dev_My SCM Cred"]
+
+
+def test_resource_in_orgs_tightened_filter() -> None:
+    # Org-scoped inventory outside selected orgs is excluded
+    assert (
+        planner._resource_in_orgs(
+            "inventories",
+            {"id": 9, "organization": 99, "name": "Other"},
+            9,
+            [1, 2],
+        )
+        is False
+    )
+    # Inventory in selected org is included
+    assert (
+        planner._resource_in_orgs(
+            "inventories",
+            {"id": 9, "organization": 1, "name": "Mine"},
+            9,
+            [1, 2],
+        )
+        is True
+    )
+    # Org-less inventory is NOT auto-included (unlike previous permissive behavior)
+    assert (
+        planner._resource_in_orgs(
+            "inventories",
+            {"id": 9, "organization": None, "name": "NoOrg"},
+            9,
+            [1, 2],
+        )
+        is False
+    )
+    # Global credential types still included
+    assert (
+        planner._resource_in_orgs(
+            "credential_types",
+            {"id": 1, "name": "Machine", "managed": True},
+            1,
+            [1, 2],
+        )
+        is True
+    )
+    # Org-less credentials still included (user/team owned)
+    assert (
+        planner._resource_in_orgs(
+            "credentials",
+            {"id": 3, "organization": None, "name": "UserCred"},
+            3,
+            [1, 2],
+        )
+        is True
+    )
 
 
 def test_planner_update_phase_status(session_factory, db_session) -> None:
