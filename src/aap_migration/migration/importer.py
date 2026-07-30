@@ -3822,6 +3822,92 @@ class ProjectImporter(ResourceImporter):
         "default_environment": "execution_environments",
     }
 
+    async def import_resource(
+        self,
+        resource_type: str,
+        source_id: int,
+        data: dict[str, Any],
+        resolve_dependencies: bool = True,
+    ) -> dict[str, Any] | None:
+        """Import a project, patching SCM credential onto existing targets when needed.
+
+        Name prefixes do not affect credential FKs (those are ID-mapped). Re-runs
+        often find the project already created without a credential (e.g. creds
+        were skipped earlier) — still attach the mapped credential.
+        """
+        working = dict(data)
+        if resolve_dependencies:
+            working = await self._resolve_dependencies(resource_type, working)
+
+        target_id = self.state.get_mapped_id(resource_type, source_id)
+        if self.state.is_migrated(resource_type, source_id) and target_id is not None:
+            patched = await self._ensure_project_credential(int(target_id), working, source_id)
+            self.stats["skipped_count"] += 1
+            return {
+                "id": int(target_id),
+                "name": working.get("name") or "unknown",
+                "_already_migrated": True,
+                "_skip_reason": (
+                    f"Already migrated (target id {target_id})"
+                    + ("; SCM credential attached" if patched else "")
+                ),
+            }
+
+        result = await super().import_resource(
+            resource_type,
+            source_id,
+            working,
+            resolve_dependencies=False,
+        )
+        if result and result.get("id"):
+            await self._ensure_project_credential(int(result["id"]), working, source_id)
+        return result
+
+    async def _ensure_project_credential(
+        self,
+        target_id: int,
+        data: dict[str, Any],
+        source_id: int,
+    ) -> bool:
+        """PATCH ``credential`` onto the target project when missing/mismatched.
+
+        Returns True when an update was applied.
+        """
+        credential_id = data.get("credential")
+        if not credential_id:
+            return False
+
+        try:
+            current = await self.client.get(f"projects/{target_id}/")
+            if not isinstance(current, dict):
+                return False
+            if current.get("credential") == credential_id:
+                return False
+
+            await self.client.update_resource(
+                "projects",
+                target_id,
+                {"credential": credential_id},
+            )
+            logger.info(
+                "project_credential_attached",
+                source_id=source_id,
+                target_id=target_id,
+                credential_id=credential_id,
+                previous_credential=current.get("credential"),
+                project_name=data.get("name"),
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "project_credential_attach_failed",
+                source_id=source_id,
+                target_id=target_id,
+                credential_id=credential_id,
+                error=str(exc),
+            )
+            return False
+
     async def import_projects(
         self,
         projects: list[dict[str, Any]],
@@ -4121,6 +4207,23 @@ class JobTemplateImporter(ResourceImporter):
         # Extract credentials before import (they're not valid API fields)
         credentials = data.pop("credentials", [])
         template_name = data.get("name")
+
+        # Already-migrated templates still need credential associations (re-runs
+        # after credentials become available, or after name-prefixed cred import).
+        target_id = self.state.get_mapped_id(resource_type, source_id)
+        if self.state.is_migrated(resource_type, source_id) and target_id is not None:
+            if credentials:
+                await self._associate_credentials(int(target_id), credentials, template_name)
+            self.stats["skipped_count"] += 1
+            return {
+                "id": int(target_id),
+                "name": template_name or "unknown",
+                "_already_migrated": True,
+                "_skip_reason": (
+                    f"Already migrated (target id {target_id})"
+                    + ("; credentials re-associated" if credentials else "")
+                ),
+            }
 
         # Call base import_resource
         result = await super().import_resource(
