@@ -128,7 +128,7 @@ class ResourceDependency:
     org_name: str
     required_by: list[dict[str, Any]] = field(default_factory=list)
 
-    def add_usage(self, resource_type: str, resource_id: int, resource_name: str):
+    def add_usage(self, resource_type: str, resource_id: int, resource_name: str) -> None:
         """Add a resource that requires this dependency."""
         self.required_by.append(
             {
@@ -482,14 +482,15 @@ class CrossOrgDependencyAnalyzer:
 
         if resource_type in self._resource_cache:
             if resource_id in self._resource_cache[resource_type]:
-                return self._resource_cache[resource_type][resource_id].get(
+                name = self._resource_cache[resource_type][resource_id].get(
                     "name", f"{resource_type}_{resource_id}"
                 )
+                return str(name)
 
         try:
             endpoint = f"{resource_type}/{resource_id}/"
             resource = await self.client.get(endpoint)
-            return resource.get("name", f"{resource_type}_{resource_id}")
+            return str(resource.get("name", f"{resource_type}_{resource_id}"))
         except Exception:
             return f"{resource_type}_{resource_id}"
 
@@ -501,7 +502,8 @@ class CrossOrgDependencyAnalyzer:
         try:
             endpoint = f"organizations/{org_id}/"
             org = await self.client.get(endpoint)
-            self._org_cache[org_id] = org["name"]
-            return org["name"]
+            org_name = str(org["name"])
+            self._org_cache[org_id] = org_name
+            return org_name
         except Exception:
             return f"org_{org_id}"

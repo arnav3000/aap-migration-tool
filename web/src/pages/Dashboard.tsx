@@ -98,7 +98,7 @@ export function Dashboard() {
   ];
 
   const sources = connections.filter(c => c.role === 'source');
-  const destinations = connections.filter(c => c.role === 'destination');
+  const destinations = connections.filter(c => c.role === 'destination' || c.role === 'target');
 
   const pingLabel = (conn: Connection) => {
     switch (conn.ping_status) {
