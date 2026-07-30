@@ -171,11 +171,15 @@ async def test_planner_credential_review_and_execute_phase(
                 "credential_type": "ssh",
                 "organization": "Default",
                 "source_id": "100",
+                "source": "Prod AAP",
+                "name_prefix": "prod_",
             }
         ],
         [5],
     )
     assert review[0]["used_by"][0]["resource_type"] == "projects"
+    assert review[0]["source"] == "Prod AAP"
+    assert review[0]["name_prefix"] == "prod_"
     assert any(item["resource_type"] == "instance_groups" for item in review[0]["used_by"])
     assert any(item["resource_type"] == "organizations (galaxy)" for item in review[0]["used_by"])
 
@@ -357,6 +361,283 @@ async def test_planner_credential_review_and_execute_phase(
     assert any(event["_event"] == "migration_complete" for event in events)
     assert status_updates[0][0] == "phase-1"
     assert status_updates[0][1] in {"completed", "completed_with_errors"}
+
+
+@pytest.mark.asyncio
+async def test_execute_phase_persists_job_then_links_phase(
+    db_session,
+    session_factory,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: starting the job must not race a request-session SQLite write lock.
+
+    execute_phase used to flush phase.status=running before start_job. That held the
+    SQLite write lock, so _persist_job_initial failed silently, then setting
+    phase.job_id raised FOREIGN KEY constraint failed — while the in-memory job
+    kept running (visible under Jobs, invisible to the planner).
+    """
+    from aap_migration.api.services.job_service import JobService
+
+    dest = _make_connection(db_session, "dest-fk", "DestFk")
+    source = _make_connection(db_session, "src-fk", "SourceFk")
+    plan = api_models.MigrationPlan(
+        id="plan-fk", name="Plan FK", description="", destination_id=dest.id, status="draft"
+    )
+    db_session.add(plan)
+    plan_source = api_models.MigrationPlanSource(
+        id="plan-source-fk",
+        plan_id=plan.id,
+        connection_id=source.id,
+    )
+    phase = api_models.MigrationPlanPhase(
+        id="phase-fk",
+        plan_id=plan.id,
+        phase_number=1,
+        name="Phase FK",
+        status="pending",
+    )
+    db_session.add_all([plan_source, phase])
+    db_session.flush()
+    db_session.add(
+        api_models.MigrationPlanPhaseOrg(
+            id="phase-org-fk",
+            phase_id=phase.id,
+            source_id=plan_source.id,
+            org_id=1,
+            org_name="Default",
+        )
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(
+        planner.ConnectionService,
+        "get",
+        lambda db, conn_id: {"dest-fk": dest, "src-fk": source}.get(conn_id),
+    )
+    monkeypatch.setattr(
+        planner.ConnectionService,
+        "build_instance_config",
+        lambda conn: SimpleNamespace(url=conn.url, token="secret", verify_ssl=True, timeout=30),
+    )
+    monkeypatch.setattr(planner.ConnectionService, "_auth_scheme", lambda conn: "Token")
+    monkeypatch.setattr(planner, "get_db_url", lambda: str(tmp_path / "planner-fk.db"))
+    monkeypatch.setattr(
+        planner, "get_app_state", lambda: SimpleNamespace(db_session_factory=session_factory)
+    )
+
+    svc = JobService(db_session_factory=session_factory)
+    monkeypatch.setattr(planner, "get_job_service", lambda: svc)
+
+    # Re-open as an uncommitted request session that already loaded the phase
+    # (mirrors FastAPI get_db usage during execute_phase).
+    request_db = session_factory()
+    response = None
+    job_id: str | None = None
+    try:
+        response = await planner.execute_phase(plan.id, phase.id, db=request_db)
+        job_id = response.job_id
+        request_db.commit()
+    finally:
+        if job_id:
+            job = svc.get_job(job_id)
+            if job is not None and job._task is not None:
+                job._task.cancel()
+                try:
+                    await job._task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        request_db.close()
+
+    assert response is not None
+    assert response.job_id
+    linked = session_factory()
+    try:
+        refreshed = linked.get(api_models.MigrationPlanPhase, phase.id)
+        assert refreshed is not None
+        assert refreshed.status == "running"
+        assert refreshed.job_id == response.job_id
+        job_row = linked.get(api_models.JobRecord, response.job_id)
+        assert job_row is not None
+        assert job_row.type == "migration-run"
+        plan_row = linked.get(api_models.MigrationPlan, plan.id)
+        assert plan_row is not None
+        assert plan_row.status == "active"
+    finally:
+        linked.close()
+
+
+@pytest.mark.asyncio
+async def test_credential_pause_reviews_each_source_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-source pause must not query source B with source A's credential IDs."""
+    calls: list[tuple[str, list[str]]] = []
+
+    async def fake_review(src_client, created_creds, org_ids):
+        label = getattr(src_client, "label", "?")
+        calls.append((label, [c["source_id"] for c in created_creds]))
+        return [
+            {
+                "name": c["name"],
+                "credential_type": c["credential_type"],
+                "organization": c["organization"],
+                "source": c.get("source", ""),
+                "name_prefix": c.get("name_prefix", ""),
+                "used_by": [{"resource_type": "projects", "resource_name": f"from-{label}"}],
+            }
+            for c in created_creds
+        ]
+
+    monkeypatch.setattr(planner, "_build_credential_review", fake_review)
+
+    created_creds = [
+        {
+            "name": "dev_Shared",
+            "credential_type": "ssh",
+            "organization": "Default",
+            "source_id": "10",
+            "source": "Dev AAP",
+            "name_prefix": "dev_",
+        },
+        {
+            "name": "prod_Shared",
+            "credential_type": "ssh",
+            "organization": "Default",
+            "source_id": "10",
+            "source": "Prod AAP",
+            "name_prefix": "prod_",
+        },
+    ]
+    sources = [
+        {
+            "connection_name": "Dev AAP",
+            "url": "https://dev.example.com",
+            "name_prefix": "dev_",
+            "org_ids": [1],
+            "src_client": SimpleNamespace(label="Dev AAP"),
+        },
+        {
+            "connection_name": "Prod AAP",
+            "url": "https://prod.example.com",
+            "name_prefix": "prod_",
+            "org_ids": [2],
+            "src_client": SimpleNamespace(label="Prod AAP"),
+        },
+    ]
+
+    job = SimpleNamespace(result=None, status="running", _resume_event=asyncio.Event())
+
+    async def wait_for_resume() -> None:
+        await job._resume_event.wait()
+        job._resume_event.clear()
+
+    job.wait_for_resume = wait_for_resume
+    job._resume_event.set()
+
+    events: list[dict] = []
+    logs: list[str] = []
+
+    class FakeSvc:
+        def persist_job(self, j):
+            return None
+
+    await planner._handle_credential_pause(
+        job,
+        FakeSvc(),
+        created_creds,
+        sources,
+        "plan-x",
+        "phase-x",
+        events.append,
+        logs.append,
+    )
+
+    assert sorted(calls) == [("Dev AAP", ["10"]), ("Prod AAP", ["10"])]
+    pause = next(e for e in events if e.get("_event") == "credential_pause")
+    assert len(pause["credentials"]) == 2
+    by_source = {c["source"]: c for c in pause["credentials"]}
+    assert by_source["Dev AAP"]["name"] == "dev_Shared"
+    assert by_source["Dev AAP"]["name_prefix"] == "dev_"
+    assert by_source["Prod AAP"]["name"] == "prod_Shared"
+    assert job.result["credential_review"][0]["source"] in {"Dev AAP", "Prod AAP"}
+
+
+@pytest.mark.asyncio
+async def test_migrate_resource_type_applies_name_prefix_and_tags_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeExporter:
+        async def export(self):
+            yield {
+                "id": 42,
+                "name": "Machine",
+                "organization": 1,
+                "summary_fields": {
+                    "credential_type": {"name": "Machine"},
+                    "organization": {"name": "Default"},
+                },
+            }
+
+    class FakeImporter:
+        async def import_resource(self, resource_type, source_id, data):
+            assert data["name"] == "dev_Machine"
+            return True
+
+    monkeypatch.setattr(
+        "aap_migration.migration.exporter.create_exporter", lambda **kwargs: FakeExporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.importer.create_importer", lambda **kwargs: FakeImporter()
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.transformer.create_transformer", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "aap_migration.resources.RESOURCE_REGISTRY",
+        {
+            "credentials": SimpleNamespace(
+                description="Credentials",
+                has_transformer=False,
+            )
+        },
+    )
+
+    created_creds: list[dict[str, str]] = []
+    events: list[dict] = []
+    sources = [
+        {
+            "src_client": object(),
+            "state": object(),
+            "migration_config": SimpleNamespace(performance=None, resource_mappings={}),
+            "name_prefix": "dev_",
+            "connection_name": "Dev AAP",
+            "org_ids": [1],
+            "url": "https://dev.example.com",
+        }
+    ]
+
+    created, skipped, failed, exported = await planner._migrate_resource_type(
+        "credentials",
+        sources,
+        object(),
+        1,
+        events.append,
+        lambda _line: None,
+        created_creds,
+    )
+
+    assert (created, skipped, failed, exported) == (1, 0, 0, 1)
+    assert created_creds == [
+        {
+            "name": "dev_Machine",
+            "credential_type": "Machine",
+            "organization": "Default",
+            "source_id": "42",
+            "source": "Dev AAP",
+            "name_prefix": "dev_",
+        }
+    ]
 
 
 def test_planner_update_phase_status(session_factory, db_session) -> None:

@@ -313,9 +313,11 @@ def test_get_job_credentials_csv_streams_rows(monkeypatch: pytest.MonkeyPatch) -
                 result={
                     "credential_review": [
                         {
-                            "name": "Vault",
+                            "name": "dev_Vault",
                             "credential_type": "HashiCorp Vault",
                             "organization": "Default",
+                            "source": "Dev AAP",
+                            "name_prefix": "dev_",
                             "used_by": [
                                 {"resource_type": "job_template", "resource_name": "Deploy"},
                                 {"resource_type": "project", "resource_name": "Website"},
@@ -338,6 +340,9 @@ def test_get_job_credentials_csv_streams_rows(monkeypatch: pytest.MonkeyPatch) -
 
     assert response.media_type == "text/csv"
     assert response.headers["Content-Disposition"] == "attachment; filename=credentials-job-123.csv"
-    assert "Credential Name,Credential Type,Organization,Used By Type,Used By Name" in body
-    assert "Vault,HashiCorp Vault,Default,job_template,Deploy" in body
-    assert "Vault,HashiCorp Vault,Default,project,Website" in body
+    assert (
+        "Source,Name Prefix,Credential Name,Credential Type,Organization,"
+        "Used By Type,Used By Name" in body
+    )
+    assert "Dev AAP,dev_,dev_Vault,HashiCorp Vault,Default,job_template,Deploy" in body
+    assert "Dev AAP,dev_,dev_Vault,HashiCorp Vault,Default,project,Website" in body

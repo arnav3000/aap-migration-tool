@@ -31,6 +31,8 @@ export interface CredentialReviewItem {
   name: string;
   credential_type: string;
   organization: string;
+  source?: string;
+  name_prefix?: string;
   used_by: Array<{ resource_type: string; resource_name: string }>;
 }
 
