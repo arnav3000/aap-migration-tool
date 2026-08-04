@@ -255,7 +255,7 @@ class IAMAnalyser:
     ) -> list[dict]:
         results: list[dict] = []
         url: str | None = f"{base_url}/{endpoint.lstrip('/')}"
-        initial_params: dict[str, Any] = {"page_size": 200}
+        initial_params: dict[str, Any] = {"page_size": 200, "order_by": "id"}
         if params:
             initial_params.update(params)
         is_first_page = True
@@ -345,13 +345,50 @@ class IAMAnalyser:
                 break
 
         if expected_count is not None and len(results) != expected_count:
-            raise PaginationError(
-                endpoint,
-                f"count mismatch: collected {len(results)}, "
-                f"server reported {expected_count}",
-                items_collected=len(results),
-                expected_count=expected_count,
-            )
+            # Deduplicate by id — offset pagination on a live system can return
+            # the same item on two consecutive pages when a record is
+            # created/deleted between page fetches (boundary shift).
+            seen_ids: set = set()
+            deduped: list = []
+            for item in results:
+                item_id = item.get("id")
+                if item_id not in seen_ids:
+                    seen_ids.add(item_id)
+                    deduped.append(item)
+
+            removed = len(results) - len(deduped)
+            if removed:
+                logger.warning(
+                    "Paginate %s: removed %d duplicate(s) from live-system "
+                    "pagination drift (raw=%d, deduped=%d, server reported=%d)",
+                    endpoint,
+                    removed,
+                    len(results),
+                    len(deduped),
+                    expected_count,
+                )
+            results = deduped
+
+            drift = abs(len(results) - expected_count)
+            if drift > 0:
+                if drift <= 10:
+                    logger.warning(
+                        "Paginate %s: %d item(s) differ after dedup "
+                        "(collected=%d, server reported=%d) — "
+                        "live-system churn, continuing",
+                        endpoint,
+                        drift,
+                        len(results),
+                        expected_count,
+                    )
+                else:
+                    raise PaginationError(
+                        endpoint,
+                        f"count mismatch after dedup: collected {len(results)}, "
+                        f"server reported {expected_count} (drift={drift})",
+                        items_collected=len(results),
+                        expected_count=expected_count,
+                    )
 
         return results
 
