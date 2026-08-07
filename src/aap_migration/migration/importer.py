@@ -326,10 +326,18 @@ class ResourceImporter:
                 return existing
             else:
                 self.stats["error_count"] += 1
+                error_msg = f"Conflict ({type(e).__name__}): {str(e)}"
                 self.state.mark_failed(
                     resource_type=resource_type,
                     source_id=source_id,
-                    error_message=f"Conflict ({type(e).__name__}): {str(e)}",
+                    error_message=error_msg,
+                )
+                self._record_import_failure(
+                    resource_type,
+                    source_id,
+                    data.get("name", "unknown"),
+                    error_msg,
+                    error_type=type(e).__name__,
                 )
                 return None
 
@@ -360,10 +368,18 @@ class ResourceImporter:
                     return existing
                 else:
                     self.stats["error_count"] += 1
+                    error_msg = f"Already exists ({type(e).__name__}): {str(e)}"
                     self.state.mark_failed(
                         resource_type=resource_type,
                         source_id=source_id,
-                        error_message=f"Already exists ({type(e).__name__}): {str(e)}",
+                        error_message=error_msg,
+                    )
+                    self._record_import_failure(
+                        resource_type,
+                        source_id,
+                        data.get("name", "unknown"),
+                        error_msg,
+                        error_type=type(e).__name__,
                     )
                     return None
             else:
@@ -375,6 +391,13 @@ class ResourceImporter:
                     resource_type=resource_type,
                     source_id=source_id,
                     error_message=enriched_error,
+                )
+                self._record_import_failure(
+                    resource_type,
+                    source_id,
+                    data.get("name", "unknown"),
+                    enriched_error,
+                    error_type=type(e).__name__,
                 )
                 return None
 
@@ -1229,6 +1252,43 @@ class ResourceImporter:
             - error_type: Exception type name
         """
         return self.import_errors.copy()
+
+    def _failure_detail_for_resource(
+        self,
+        resource_type: str,
+        source_id: int,
+        fallback: str = "import returned no result",
+    ) -> str:
+        """Resolve a human-readable failure reason from errors list or state DB."""
+        for err in reversed(self.import_errors):
+            if err.get("resource_type") == resource_type and err.get("source_id") == source_id:
+                return str(err.get("error", fallback))
+        state_error = self.state.get_error_message(resource_type, source_id)
+        if state_error:
+            return state_error
+        return fallback
+
+    def _record_import_failure(
+        self,
+        resource_type: str,
+        source_id: int,
+        name: str,
+        error: str,
+        error_type: str = "ImportError",
+    ) -> None:
+        """Append a structured import failure for reporting (idempotent per source id)."""
+        for err in self.import_errors:
+            if err.get("resource_type") == resource_type and err.get("source_id") == source_id:
+                return
+        self.import_errors.append(
+            {
+                "resource_type": resource_type,
+                "source_id": source_id,
+                "name": name,
+                "error": error,
+                "error_type": error_type,
+            }
+        )
 
 
 class LabelImporter(ResourceImporter):
@@ -4714,6 +4774,13 @@ class JobTemplateImporter(ResourceImporter):
                     success_count += 1
                 else:
                     failed_count += 1
+                    error_detail = self._failure_detail_for_resource("job_templates", source_id)
+                    self._record_import_failure(
+                        "job_templates",
+                        source_id,
+                        template.get("name", "unknown"),
+                        error_detail,
+                    )
 
             except Exception as e:
                 failed_count += 1
@@ -4723,6 +4790,14 @@ class JobTemplateImporter(ResourceImporter):
                     resource_type="job_templates",
                     source_id=source_id,
                     error_message=f"{type(e).__name__}: {str(e)}",
+                )
+
+                self._record_import_failure(
+                    "job_templates",
+                    source_id,
+                    template.get("name", "unknown"),
+                    f"{type(e).__name__}: {str(e)}",
+                    error_type=type(e).__name__,
                 )
 
                 logger.error(
@@ -5176,6 +5251,13 @@ class WorkflowImporter(ResourceImporter):
                         error_message=error_msg,
                     )
 
+                    self._record_import_failure(
+                        "workflow_job_templates",
+                        source_id,
+                        str(workflow.get("name") or "unknown"),
+                        error_msg,
+                    )
+
                     logger.error(
                         "workflow_dependency_check_failed",
                         workflow_source_id=source_id,
@@ -5204,6 +5286,14 @@ class WorkflowImporter(ResourceImporter):
                     resource_type="workflow_job_templates",
                     source_id=source_id,
                     error_message=f"{type(e).__name__}: {str(e)}",
+                )
+
+                self._record_import_failure(
+                    "workflow_job_templates",
+                    source_id,
+                    str(workflow.get("name") or "unknown"),
+                    f"{type(e).__name__}: {str(e)}",
+                    error_type=type(e).__name__,
                 )
 
                 logger.error(
@@ -5264,6 +5354,15 @@ class WorkflowImporter(ResourceImporter):
                 success_count += 1
             else:
                 failed_count += 1
+                error_detail = self._failure_detail_for_resource(
+                    "workflow_job_templates", source_id
+                )
+                self._record_import_failure(
+                    "workflow_job_templates",
+                    source_id,
+                    str(workflow.get("name") or "unknown"),
+                    error_detail,
+                )
 
             # Update progress after each workflow
             if progress_callback:

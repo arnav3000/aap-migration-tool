@@ -382,24 +382,26 @@ async def _enrich_workflow_from_source(
         workflow["notifications"] = notifications
 
 
-def _log_selective_import_none(
+def _classify_import_no_result(
     state: Any,
     resource_type: str,
     source_id: int,
     res_name: str,
     log: Callable[[str], None],
-) -> None:
-    """Explain silent import_resource(None) outcomes in selective migration logs."""
-    if state.is_migrated(resource_type, source_id):
-        log(
-            f"  Skipping {resource_type}/{source_id} ({res_name}): "
-            "already recorded as migrated in state database"
-        )
-    else:
-        log(
-            f"  No result importing {resource_type}/{source_id} ({res_name}) — "
-            "import was skipped or failed without raising (check state DB for details)"
-        )
+    detail_hint: str | None = None,
+) -> tuple[str, str]:
+    """Classify import_resource(None) as failed vs skipped and return log detail."""
+    error_msg = detail_hint or state.get_error_message(resource_type, source_id)
+    status = state.get_status(resource_type, source_id)
+    if status == "failed" or error_msg:
+        detail = error_msg or "import failed"
+        log(f"  Failed {resource_type}/{source_id} ({res_name}): {detail}")
+        return "failed", detail
+    log(
+        f"  Skipping {resource_type}/{source_id} ({res_name}): "
+        "already recorded as migrated in state database"
+    )
+    return "skipped", "Already migrated in state database"
 
 
 async def _resolve_jt_dependencies(
@@ -1092,12 +1094,13 @@ async def selective_migrate(
                             )
 
                         template_batch_failed = len(template_batch) - len(results)
-                        if template_batch_failed:
-                            failed += template_batch_failed
-                            for err in importer_errors:
+                        batch_errors = list(importer_errors)
+                        if batch_errors:
+                            failed += len(batch_errors)
+                            for err in batch_errors:
                                 err_name = err.get("name", "unknown")
                                 err_sid = err.get("source_id", "?")
-                                err_detail = str(err.get("error", "import failed"))[:200]
+                                err_detail = str(err.get("error", "import failed"))
                                 log(f"  Failed {rtype}/{err_sid} ({err_name}): {err_detail}")
                                 emit(
                                     {
@@ -1106,9 +1109,31 @@ async def selective_migrate(
                                         "name": err_name,
                                         "resource_type": rtype,
                                         "result": "failed",
-                                        "detail": err_detail,
+                                        "detail": err_detail[:200],
                                     }
                                 )
+                        elif template_batch_failed:
+                            failed += template_batch_failed
+                            for item in template_batch:
+                                raw_sid = item.get("_source_id")
+                                if raw_sid is None:
+                                    continue
+                                sid = int(raw_sid)
+                                res_name = item.get("name", str(sid))
+                                result_action, detail = _classify_import_no_result(
+                                    state, rtype, sid, res_name, log
+                                )
+                                if result_action == "failed":
+                                    emit(
+                                        {
+                                            "_event": "resource_result",
+                                            "phase_num": phase_num,
+                                            "name": res_name,
+                                            "resource_type": rtype,
+                                            "result": "failed",
+                                            "detail": detail[:200],
+                                        }
+                                    )
                     else:
                         log(f"  No {rtype} to import in this phase")
 
@@ -1249,20 +1274,38 @@ async def selective_migrate(
                                 }
                             )
                         else:
-                            skipped += 1
-                            _log_selective_import_none(state, rtype, int(source_id), res_name, log)
+                            detail_hint = importer._failure_detail_for_resource(
+                                rtype, int(source_id)
+                            )
+                            result_action, detail = _classify_import_no_result(
+                                state,
+                                rtype,
+                                int(source_id),
+                                res_name,
+                                log,
+                                detail_hint=detail_hint,
+                            )
+                            if result_action == "failed":
+                                failed += 1
+                            else:
+                                skipped += 1
                             emit(
                                 {
                                     "_event": "resource_result",
                                     "phase_num": phase_num,
                                     "name": res_name,
                                     "resource_type": rtype,
-                                    "result": "skipped",
-                                    "detail": "Import returned no result",
+                                    "result": result_action,
+                                    "detail": detail[:200],
                                 }
                             )
                     except Exception as exc:
                         failed += 1
+                        fail_name = resource.get(
+                            "name",
+                            resource.get("username", str(source_id)),
+                        )
+                        log(f"  Failed {rtype}/{source_id} ({fail_name}): {exc}")
                         emit(
                             {
                                 "_event": "resource_result",

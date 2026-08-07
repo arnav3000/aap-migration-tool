@@ -586,6 +586,32 @@ class MigrationState:
                 )
                 raise StateError(f"Failed to get migration status: {e}") from e
 
+    def get_error_message(
+        self,
+        resource_type: str,
+        source_id: int,
+    ) -> str | None:
+        """Return the stored error message for a resource, if any."""
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    progress = (
+                        session.query(MigrationProgress)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
+                        .first()
+                    )
+                    if progress is None or not progress.error_message:
+                        return None
+                    return str(progress.error_message)
+            except Exception as e:
+                logger.error(
+                    "Failed to get migration error message",
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    error=str(e),
+                )
+                raise StateError(f"Failed to get migration error message: {e}") from e
+
     def mark_in_progress(
         self,
         resource_type: str,

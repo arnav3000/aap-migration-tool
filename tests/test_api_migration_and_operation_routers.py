@@ -643,3 +643,24 @@ async def test_resolve_workflow_dependencies_includes_node_job_templates() -> No
     assert deps["job_templates"] == {7}
     assert deps["inventories"] == {10}
     assert "workflow_job_templates" not in deps
+
+
+def test_classify_import_no_result_reports_failed_status() -> None:
+    class FakeState:
+        def get_error_message(self, resource_type: str, source_id: int) -> str | None:
+            return "API error: project does not exist"
+
+        def get_status(self, resource_type: str, source_id: int) -> str | None:
+            return "failed"
+
+    logs: list[str] = []
+    action, detail = operations._classify_import_no_result(
+        FakeState(),
+        "job_templates",
+        42,
+        "Broken JT",
+        logs.append,
+    )
+    assert action == "failed"
+    assert "project does not exist" in detail
+    assert any("Failed job_templates/42" in line for line in logs)
