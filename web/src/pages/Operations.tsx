@@ -48,6 +48,15 @@ interface JTResource {
   };
 }
 
+interface WFResource {
+  id: number;
+  name: string;
+  summary_fields?: {
+    organization?: { id: number; name: string };
+    inventory?: { id: number; name: string };
+  };
+}
+
 export function Operations() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -66,6 +75,9 @@ export function Operations() {
   const [smJTs, setSmJTs] = useState<JTResource[]>([]);
   const [smJTsLoading, setSmJTsLoading] = useState(false);
   const [smSelectedJTIds, setSmSelectedJTIds] = useState<Set<number>>(new Set());
+  const [smWFs, setSmWFs] = useState<WFResource[]>([]);
+  const [smWFsLoading, setSmWFsLoading] = useState(false);
+  const [smSelectedWFIds, setSmSelectedWFIds] = useState<Set<number>>(new Set());
   const [smFilter, setSmFilter] = useState('');
   const [smError, setSmError] = useState<string | null>(null);
   const [smRunning, setSmRunning] = useState(false);
@@ -108,15 +120,18 @@ export function Operations() {
     [connections],
   );
 
-  // Load JTs when source selection changes
+  // Load job templates and workflows when source selection changes
   useEffect(() => {
     if (!smSourceId) {
       setSmJTs([]);
       setSmSelectedJTIds(new Set());
+      setSmWFs([]);
+      setSmSelectedWFIds(new Set());
       return;
     }
     let cancelled = false;
     setSmJTsLoading(true);
+    setSmWFsLoading(true);
     setSmError(null);
     api.listResources(smSourceId, 'job_templates')
       .then(data => {
@@ -130,6 +145,18 @@ export function Operations() {
         setSmJTs([]);
       })
       .finally(() => { if (!cancelled) setSmJTsLoading(false); });
+    api.listResources(smSourceId, 'workflow_job_templates')
+      .then(data => {
+        if (cancelled) return;
+        setSmWFs(data as WFResource[]);
+        setSmSelectedWFIds(new Set());
+      })
+      .catch(err => {
+        if (cancelled) return;
+        setSmError(err instanceof Error ? err.message : String(err));
+        setSmWFs([]);
+      })
+      .finally(() => { if (!cancelled) setSmWFsLoading(false); });
     return () => { cancelled = true; };
   }, [smSourceId]);
 
@@ -142,6 +169,41 @@ export function Operations() {
       || jt.summary_fields?.project?.name?.toLowerCase().includes(lower)
     );
   }, [smJTs, smFilter]);
+
+  const filteredWFs = useMemo(() => {
+    if (!smFilter) return smWFs;
+    const lower = smFilter.toLowerCase();
+    return smWFs.filter(wf =>
+      wf.name.toLowerCase().includes(lower)
+      || wf.summary_fields?.organization?.name?.toLowerCase().includes(lower)
+      || wf.summary_fields?.inventory?.name?.toLowerCase().includes(lower)
+    );
+  }, [smWFs, smFilter]);
+
+  const smSelectedCount = smSelectedJTIds.size + smSelectedWFIds.size;
+
+  const toggleWF = (id: number) => {
+    setSmSelectedWFIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAllFilteredWF = () => {
+    const filteredIds = new Set(filteredWFs.map(wf => wf.id));
+    const allSelected = filteredWFs.every(wf => smSelectedWFIds.has(wf.id));
+    setSmSelectedWFIds(prev => {
+      const next = new Set(prev);
+      if (allSelected) {
+        filteredIds.forEach(id => next.delete(id));
+      } else {
+        filteredIds.forEach(id => next.add(id));
+      }
+      return next;
+    });
+  };
 
   const toggleJT = (id: number) => {
     setSmSelectedJTIds(prev => {
@@ -167,11 +229,17 @@ export function Operations() {
   };
 
   const handleSelectiveMigrate = async () => {
-    if (!smSourceId || !smDestId || smSelectedJTIds.size === 0) return;
+    if (!smSourceId || !smDestId || smSelectedCount === 0) return;
     setSmError(null);
     setSmRunning(true);
     try {
-      const result = await api.selectiveMigrate(smSourceId, smDestId, Array.from(smSelectedJTIds), smForceUpdate);
+      const result = await api.selectiveMigrate(
+        smSourceId,
+        smDestId,
+        Array.from(smSelectedJTIds),
+        Array.from(smSelectedWFIds),
+        smForceUpdate,
+      );
       const srcConn = connections.find(c => c.id === smSourceId);
       const destConn = connections.find(c => c.id === smDestId);
       setActiveJobs(prev => [...prev, {
@@ -308,9 +376,9 @@ export function Operations() {
       {sources.length > 0 && destinations.length > 0 && (
         <>
           <Divider style={{ marginTop: 32, marginBottom: 24 }} />
-          <Title headingLevel="h2" size="xl" style={{ marginBottom: 8 }}>Selective Job Template Migration</Title>
+          <Title headingLevel="h2" size="xl" style={{ marginBottom: 8 }}>Selective Template Migration</Title>
           <TextContent style={{ marginBottom: 16 }}>
-            <Text>Pick specific job templates from a source and migrate them with all their dependencies to a destination.</Text>
+            <Text>Pick job templates or workflows from a source and migrate them with all their dependencies to a destination.</Text>
           </TextContent>
 
           <Flex style={{ marginBottom: 16 }}>
@@ -360,10 +428,10 @@ export function Operations() {
             <Alert variant="danger" isInline title={smError} style={{ marginBottom: 16 }} />
           )}
 
-          {smSourceId && smJTsLoading && (
+          {smSourceId && (smJTsLoading || smWFsLoading) && (
             <Flex style={{ padding: 24 }}>
               <FlexItem><Spinner size="md" /></FlexItem>
-              <FlexItem><Text>Loading job templates...</Text></FlexItem>
+              <FlexItem><Text>Loading templates...</Text></FlexItem>
             </Flex>
           )}
 
@@ -436,19 +504,78 @@ export function Operations() {
             </Card>
           )}
 
-          {smSourceId && !smJTsLoading && smJTs.length === 0 && !smError && (
-            <Alert variant="info" isInline title="No job templates found on this source." style={{ marginBottom: 16 }} />
+          {smSourceId && !smJTsLoading && smJTs.length === 0 && !smWFsLoading && smWFs.length === 0 && !smError && (
+            <Alert variant="info" isInline title="No job templates or workflows found on this source." style={{ marginBottom: 16 }} />
+          )}
+
+          {smSourceId && !smWFsLoading && smWFs.length > 0 && (
+            <Card style={{ marginBottom: 16 }}>
+              <CardHeader>
+                <CardTitle>
+                  <Split hasGutter>
+                    <SplitItem isFilled>
+                      Workflows ({smSelectedWFIds.size} of {smWFs.length} selected)
+                    </SplitItem>
+                  </Split>
+                </CardTitle>
+              </CardHeader>
+              <CardBody style={{ maxHeight: 300, overflowY: 'auto', padding: 0 }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid var(--pf-v5-global--BorderColor--100, #d2d2d2)' }}>
+                      <th style={{ padding: '8px 16px', width: 40 }}>
+                        <input
+                          type="checkbox"
+                          aria-label="Select all workflows"
+                          checked={filteredWFs.length > 0 && filteredWFs.every(wf => smSelectedWFIds.has(wf.id))}
+                          onChange={toggleAllFilteredWF}
+                        />
+                      </th>
+                      <th style={{ padding: '8px 16px', textAlign: 'left' }}>Name</th>
+                      <th style={{ padding: '8px 16px', textAlign: 'left' }}>Organization</th>
+                      <th style={{ padding: '8px 16px', textAlign: 'left' }}>Inventory</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredWFs.map(wf => (
+                      <tr
+                        key={wf.id}
+                        style={{
+                          borderBottom: '1px solid var(--pf-v5-global--BorderColor--100, #d2d2d2)',
+                          background: smSelectedWFIds.has(wf.id) ? 'var(--pf-v5-global--BackgroundColor--200, #f0f0f0)' : undefined,
+                          cursor: 'pointer',
+                        }}
+                        onClick={() => toggleWF(wf.id)}
+                      >
+                        <td style={{ padding: '8px 16px' }}>
+                          <input
+                            type="checkbox"
+                            checked={smSelectedWFIds.has(wf.id)}
+                            onChange={() => toggleWF(wf.id)}
+                            aria-label={`Select workflow ${wf.name}`}
+                            onClick={e => e.stopPropagation()}
+                          />
+                        </td>
+                        <td style={{ padding: '8px 16px' }}>{wf.name}</td>
+                        <td style={{ padding: '8px 16px' }}>{wf.summary_fields?.organization?.name || '—'}</td>
+                        <td style={{ padding: '8px 16px' }}>{wf.summary_fields?.inventory?.name || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardBody>
+            </Card>
           )}
 
           <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ gap: 16, marginBottom: 8 }}>
             <FlexItem>
               <Button
                 variant="primary"
-                isDisabled={!smSourceId || !smDestId || smSelectedJTIds.size === 0 || smRunning}
+                isDisabled={!smSourceId || !smDestId || smSelectedCount === 0 || smRunning}
                 isLoading={smRunning}
                 onClick={handleSelectiveMigrate}
               >
-                Migrate {smSelectedJTIds.size || 0} Job Template{smSelectedJTIds.size !== 1 ? 's' : ''}
+                Migrate {smSelectedCount} template{smSelectedCount !== 1 ? 's' : ''}
               </Button>
             </FlexItem>
             <FlexItem>

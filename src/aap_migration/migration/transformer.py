@@ -1529,8 +1529,8 @@ class JobTemplateTransformer(DataTransformer):
         "execution_environment": "execution_environments",
         "webhook_credential": "credentials",  # Webhook credential dependency
     }
-    # Organization and project are required; inventory/credential/EE/webhook are optional
-    REQUIRED_DEPENDENCIES = {"organization", "project"}
+    # Project is required; organization is inherited from project/inventory on the target.
+    REQUIRED_DEPENDENCIES = {"project"}
 
     def _apply_specific_transformations(
         self, data: dict[str, Any], resource_type: str

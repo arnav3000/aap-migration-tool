@@ -36,11 +36,18 @@ export const api = {
 
   runCleanup: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/cleanup`),
   runExport: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/export`),
-  selectiveMigrate: (sourceId: string, destinationId: string, jobTemplateIds: number[], forceUpdate = false) =>
+  selectiveMigrate: (
+    sourceId: string,
+    destinationId: string,
+    jobTemplateIds: number[],
+    workflowJobTemplateIds: number[] = [],
+    forceUpdate = false,
+  ) =>
     request<{ job_id: string }>('POST', '/api/selective-migrate', {
       source_id: sourceId,
       destination_id: destinationId,
       job_template_ids: jobTemplateIds,
+      workflow_job_template_ids: workflowJobTemplateIds,
       force_update: forceUpdate,
     }),
 

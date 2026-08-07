@@ -367,6 +367,9 @@ async def test_resolve_jt_dependencies_includes_inventory_sources() -> None:
         async def get_job_template_credentials(self, job_template_id: int) -> list:
             return []
 
+        async def get(self, endpoint: str) -> dict:
+            return {"results": []}
+
         async def get_inventory_sources(self, params: dict | None = None) -> list:
             if params and params.get("inventory") == 10:
                 return [
@@ -404,6 +407,9 @@ async def test_resolve_jt_dependencies_inventory_sources_nested_fallback() -> No
 
         async def get_job_template_credentials(self, job_template_id: int) -> list:
             return []
+
+        async def get(self, endpoint: str) -> dict:
+            return {"results": []}
 
         async def get_inventory_sources(self, params: dict | None = None) -> list:
             return []
@@ -571,3 +577,69 @@ async def test_selective_migrate_starts_background_job(
     assert response.job_id == "selective-migration-job"
     assert len(svc.started) == 1
     assert "Selective migrate" in svc.started[0][0]
+
+
+def test_selective_migrate_request_requires_at_least_one_template() -> None:
+    from pydantic import ValidationError
+
+    from aap_migration.api.schemas import SelectiveMigrateRequest
+
+    with pytest.raises(ValidationError):
+        SelectiveMigrateRequest(
+            source_id="src-1",
+            destination_id="dst-1",
+            job_template_ids=[],
+            workflow_job_template_ids=[],
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_workflow_dependencies_includes_node_job_templates() -> None:
+    logs: list[str] = []
+
+    class FakeClient:
+        async def get_resource_by_id(self, resource_type: str, resource_id: int) -> dict:
+            if resource_type == "workflow_job_templates":
+                return {
+                    "id": 5,
+                    "name": "WF",
+                    "organization": 1,
+                    "inventory": 10,
+                }
+            if resource_type == "job_templates":
+                return {
+                    "id": resource_id,
+                    "name": f"JT {resource_id}",
+                    "organization": 1,
+                    "project": 20,
+                }
+            if resource_type == "inventories":
+                return {"id": 10, "organization": 1}
+            raise AssertionError(f"unexpected fetch {resource_type}/{resource_id}")
+
+        async def get_workflow_nodes(self, workflow_id: int) -> list:
+            return [
+                {
+                    "id": 50,
+                    "unified_job_template": 7,
+                    "summary_fields": {
+                        "unified_job_template": {
+                            "unified_job_type": "job",
+                            "name": "Child JT",
+                        }
+                    },
+                }
+            ]
+
+        async def get(self, endpoint: str) -> dict:
+            return {"results": []}
+
+        async def get_job_template_credentials(self, job_template_id: int) -> list:
+            return []
+
+    deps, wf_data = await operations._resolve_workflow_dependencies(FakeClient(), [5], logs.append)
+
+    assert len(wf_data) == 1
+    assert deps["job_templates"] == {7}
+    assert deps["inventories"] == {10}
+    assert "workflow_job_templates" not in deps

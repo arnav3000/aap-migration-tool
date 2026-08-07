@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ConnectionCreate(BaseModel):
@@ -126,8 +126,15 @@ class ConcurrencySettingUpdate(BaseModel):
 class SelectiveMigrateRequest(BaseModel):
     source_id: str
     destination_id: str
-    job_template_ids: list[int] = Field(min_length=1)
+    job_template_ids: list[int] = Field(default_factory=list)
+    workflow_job_template_ids: list[int] = Field(default_factory=list)
     force_update: bool = False
+
+    @model_validator(mode="after")
+    def require_at_least_one_template(self) -> "SelectiveMigrateRequest":
+        if not self.job_template_ids and not self.workflow_job_template_ids:
+            raise ValueError("At least one job_template_id or workflow_job_template_id is required")
+        return self
 
 
 # --- Migration Planner Schemas ---

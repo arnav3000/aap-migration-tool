@@ -263,6 +263,145 @@ async def _list_inventory_sources_for_inventory(
         return []
 
 
+def _unified_job_template_node_dep(node: dict[str, Any]) -> tuple[str | None, int | None]:
+    """Return (resource_type, source_id) for a workflow node's unified job template."""
+    ujt_source_id = node.get("unified_job_template")
+    if ujt_source_id is None:
+        return None, None
+
+    ujt_summary = node.get("summary_fields", {}).get("unified_job_template", {})
+    ujt_type = ujt_summary.get("unified_job_type")
+    if ujt_type == "job":
+        return "job_templates", int(ujt_source_id)
+    if ujt_type == "workflow_job":
+        return "workflow_job_templates", int(ujt_source_id)
+    return "job_templates", int(ujt_source_id)
+
+
+async def _enrich_job_template_from_source(
+    client: Any,
+    template: dict[str, Any],
+    log: Callable[[str], None],
+) -> None:
+    """Fetch credentials, schedules, surveys, and notifications for a job template."""
+    jt_id = template.get("id")
+    if jt_id is None:
+        return
+
+    summary_creds = template.get("summary_fields", {}).get("credentials")
+    if summary_creds is not None:
+        template["_credentials"] = [cred["id"] for cred in summary_creds]
+    else:
+        try:
+            credentials = await client.get_job_template_credentials(jt_id)
+            template["_credentials"] = [cred["id"] for cred in credentials]
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not fetch credentials for job_template/{jt_id}: {exc}")
+            template["_credentials"] = []
+
+    try:
+        schedules_response = await client.get(f"job_templates/{jt_id}/schedules/")
+        schedules = schedules_response.get("results", [])
+        if schedules:
+            template["schedules"] = schedules
+    except Exception as exc:  # nosec B110
+        log(f"  Warning: could not fetch schedules for job_template/{jt_id}: {exc}")
+
+    try:
+        survey_spec = await client.get(f"job_templates/{jt_id}/survey_spec/")
+        if survey_spec and survey_spec.get("spec"):
+            template["survey_spec"] = survey_spec
+    except Exception as exc:  # nosec B110
+        if "404" not in str(exc).lower():
+            log(f"  Warning: could not fetch survey for job_template/{jt_id}: {exc}")
+
+    notifications: dict[str, list[int]] = {}
+    for notif_type in ("started", "success", "error"):
+        try:
+            notif_response = await client.get(
+                f"job_templates/{jt_id}/notification_templates_{notif_type}/"
+            )
+            notif_templates = notif_response.get("results", [])
+            if notif_templates:
+                notifications[f"notification_templates_{notif_type}"] = [
+                    nt["id"] for nt in notif_templates
+                ]
+        except Exception:  # nosec B110
+            pass
+    if notifications:
+        template["notifications"] = notifications
+
+
+async def _enrich_workflow_from_source(
+    client: Any,
+    workflow: dict[str, Any],
+    log: Callable[[str], None],
+) -> None:
+    """Fetch nodes, schedules, surveys, and notifications for a workflow job template."""
+    wf_id = workflow.get("id")
+    if wf_id is None:
+        return
+
+    try:
+        nodes = await client.get_workflow_nodes(wf_id)
+        workflow["nodes"] = nodes
+    except Exception as exc:  # nosec B110
+        log(f"  Warning: could not fetch workflow nodes for workflow_job_templates/{wf_id}: {exc}")
+        workflow["nodes"] = []
+
+    try:
+        survey_spec = await client.get(f"workflow_job_templates/{wf_id}/survey_spec/")
+        if survey_spec and survey_spec.get("spec"):
+            workflow["survey_spec"] = survey_spec
+    except Exception as exc:  # nosec B110
+        if "404" not in str(exc).lower():
+            log(f"  Warning: could not fetch survey for workflow_job_templates/{wf_id}: {exc}")
+
+    try:
+        schedules_response = await client.get(f"workflow_job_templates/{wf_id}/schedules/")
+        schedules = schedules_response.get("results", [])
+        if schedules:
+            workflow["schedules"] = schedules
+    except Exception as exc:  # nosec B110
+        log(f"  Warning: could not fetch schedules for workflow_job_templates/{wf_id}: {exc}")
+
+    notifications: dict[str, list[int]] = {}
+    for notif_type in ("started", "success", "error", "approvals"):
+        try:
+            notif_response = await client.get(
+                f"workflow_job_templates/{wf_id}/notification_templates_{notif_type}/"
+            )
+            notif_templates = notif_response.get("results", [])
+            if notif_templates:
+                notifications[f"notification_templates_{notif_type}"] = [
+                    nt["id"] for nt in notif_templates
+                ]
+        except Exception:  # nosec B110
+            pass
+    if notifications:
+        workflow["notifications"] = notifications
+
+
+def _log_selective_import_none(
+    state: Any,
+    resource_type: str,
+    source_id: int,
+    res_name: str,
+    log: Callable[[str], None],
+) -> None:
+    """Explain silent import_resource(None) outcomes in selective migration logs."""
+    if state.is_migrated(resource_type, source_id):
+        log(
+            f"  Skipping {resource_type}/{source_id} ({res_name}): "
+            "already recorded as migrated in state database"
+        )
+    else:
+        log(
+            f"  No result importing {resource_type}/{source_id} ({res_name}) — "
+            "import was skipped or failed without raising (check state DB for details)"
+        )
+
+
 async def _resolve_jt_dependencies(
     client: Any,
     jt_ids: list[int],
@@ -287,6 +426,7 @@ async def _resolve_jt_dependencies(
         except Exception as exc:
             log(f"  Warning: could not fetch job_template/{jt_id}: {exc}")
             continue
+        await _enrich_job_template_from_source(client, jt, log)
         jt_data_list.append(jt)
 
         sf = jt.get("summary_fields", {})
@@ -363,12 +503,136 @@ async def _resolve_jt_dependencies(
     return deps, jt_data_list
 
 
+async def _resolve_workflow_dependencies(
+    client: Any,
+    wf_ids: list[int],
+    log: Callable[[str], None],
+) -> tuple[dict[str, set[int]], list[dict[str, Any]]]:
+    """Walk selected workflows (and nested workflow refs) and collect dependencies."""
+    deps: dict[str, set[int]] = {}
+
+    def _add(rtype: str, rid: int | None) -> None:
+        if rid is not None:
+            deps.setdefault(rtype, set()).add(rid)
+
+    wf_data_list: list[dict[str, Any]] = []
+    seen_wf: set[int] = set()
+    pending = list(wf_ids)
+
+    while pending:
+        wf_id = pending.pop(0)
+        if wf_id in seen_wf:
+            continue
+        seen_wf.add(wf_id)
+
+        try:
+            wf = await client.get_resource_by_id("workflow_job_templates", wf_id)
+        except Exception as exc:
+            log(f"  Warning: could not fetch workflow_job_templates/{wf_id}: {exc}")
+            continue
+
+        await _enrich_workflow_from_source(client, wf, log)
+        wf_data_list.append(wf)
+
+        sf = wf.get("summary_fields", {})
+        _add("organizations", wf.get("organization") or sf.get("organization", {}).get("id"))
+        _add("inventories", wf.get("inventory") or sf.get("inventory", {}).get("id"))
+        _add("credentials", wf.get("webhook_credential"))
+
+        for label in sf.get("labels", {}).get("results", []):
+            _add("labels", label.get("id"))
+
+        for node in wf.get("nodes", []):
+            node_rtype, node_rid = _unified_job_template_node_dep(node)
+            if node_rtype and node_rid is not None:
+                if node_rtype == "workflow_job_templates" and node_rid not in seen_wf:
+                    pending.insert(0, node_rid)
+                _add(node_rtype, node_rid)
+
+    project_ids = list(deps.get("projects", set()))
+    for pid in project_ids:
+        try:
+            proj = await client.get_resource_by_id("projects", pid)
+            _add("organizations", _fk_id(proj, "organization"))
+            _add("credentials", proj.get("credential"))
+            _add("execution_environments", proj.get("default_environment"))
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not fetch project/{pid}: {exc}")
+
+    inventory_ids = list(deps.get("inventories", set()))
+    for inv_id in inventory_ids:
+        try:
+            inv = await client.get_resource_by_id("inventories", inv_id)
+            _add("organizations", _fk_id(inv, "organization"))
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not fetch inventory/{inv_id}: {exc}")
+
+    for inv_id in list(deps.get("inventories", set())):
+        sources = await _list_inventory_sources_for_inventory(client, inv_id, log)
+        for src in sources:
+            src_id = src.get("id")
+            if src_id is not None:
+                _add("inventory_sources", src_id)
+            _add("inventories", _fk_id(src, "inventory"))
+            _add("projects", _fk_id(src, "source_project"))
+            _add("credentials", _fk_id(src, "credential"))
+            _add("execution_environments", _fk_id(src, "execution_environment"))
+            _add("organizations", _fk_id(src, "organization"))
+
+    jt_ids = list(deps.get("job_templates", set()))
+    for jt_id in jt_ids:
+        try:
+            jt = await client.get_resource_by_id("job_templates", jt_id)
+            sf = jt.get("summary_fields", {})
+            _add("organizations", jt.get("organization") or sf.get("organization", {}).get("id"))
+            _add("projects", jt.get("project") or sf.get("project", {}).get("id"))
+            _add("inventories", jt.get("inventory") or sf.get("inventory", {}).get("id"))
+            _add(
+                "execution_environments",
+                jt.get("execution_environment") or sf.get("execution_environment", {}).get("id"),
+            )
+            _add("credentials", jt.get("webhook_credential"))
+            for label in sf.get("labels", {}).get("results", []):
+                _add("labels", label.get("id"))
+            try:
+                creds = await client.get_job_template_credentials(jt_id)
+                for cred in creds:
+                    _add("credentials", cred.get("id"))
+            except Exception:  # nosec B110
+                pass
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not fetch job_template/{jt_id}: {exc}")
+
+    cred_ids = list(deps.get("credentials", set()))
+    for cred_id in cred_ids:
+        try:
+            cred = await client.get_resource_by_id("credentials", cred_id)
+            _add("credential_types", cred.get("credential_type"))
+            _add("organizations", _fk_id(cred, "organization"))
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not fetch credential/{cred_id}: {exc}")
+
+    ee_ids = list(deps.get("execution_environments", set()))
+    for ee_id in ee_ids:
+        try:
+            ee = await client.get_resource_by_id("execution_environments", ee_id)
+            _add("organizations", _fk_id(ee, "organization"))
+        except Exception as exc:  # nosec B110
+            log(f"  Warning: could not fetch execution_environment/{ee_id}: {exc}")
+
+    deps.pop("workflow_job_templates", None)
+
+    total = sum(len(v) for v in deps.values())
+    log(f"  Resolved {total} workflow-related dependency objects across {len(deps)} resource types")
+    return deps, wf_data_list
+
+
 @router.post("/selective-migrate", response_model=JobStartResponse)
 async def selective_migrate(
     body: SelectiveMigrateRequest,
     db: Session = Depends(get_db),
 ) -> JobStartResponse:
-    """Migrate selected job templates and their transitive dependencies."""
+    """Migrate selected job templates and/or workflows and their transitive dependencies."""
     source_conn = ConnectionService.get(db, body.source_id)
     if source_conn is None:
         raise HTTPException(status_code=404, detail="Source connection not found")
@@ -382,6 +646,7 @@ async def selective_migrate(
     dest_cfg = ConnectionService.build_instance_config(dest_conn)
     dest_auth = ConnectionService._auth_scheme(dest_conn)
     jt_ids = body.job_template_ids
+    wf_ids = body.workflow_job_template_ids
     force_update = body.force_update
     db_url = get_db_url()
 
@@ -394,7 +659,12 @@ async def selective_migrate(
         from aap_migration.client.aap_source_client import AAPSourceClient
         from aap_migration.client.aap_target_client import AAPTargetClient
         from aap_migration.config import MigrationConfig, StateConfig
-        from aap_migration.migration.importer import InventorySourceImporter, create_importer
+        from aap_migration.migration.importer import (
+            InventorySourceImporter,
+            JobTemplateImporter,
+            WorkflowImporter,
+            create_importer,
+        )
         from aap_migration.migration.state import MigrationState
         from aap_migration.migration.transformer import SkipResourceError, create_transformer
         from aap_migration.resources import RESOURCE_REGISTRY, get_migration_order
@@ -414,21 +684,42 @@ async def selective_migrate(
         totals = {"created": 0, "skipped": 0, "failed": 0}
 
         async with src_client, target_client:
-            log(f"Resolving dependencies for {len(jt_ids)} job template(s)...")
-            deps, jt_data = await _resolve_jt_dependencies(src_client, jt_ids, log)
+            if jt_ids:
+                log(f"Resolving dependencies for {len(jt_ids)} job template(s)...")
+                jt_deps, jt_data = await _resolve_jt_dependencies(src_client, jt_ids, log)
+            else:
+                jt_deps, jt_data = {}, []
+
+            if wf_ids:
+                log(f"Resolving dependencies for {len(wf_ids)} workflow(s)...")
+                wf_deps, wf_data = await _resolve_workflow_dependencies(src_client, wf_ids, log)
+            else:
+                wf_deps, wf_data = {}, []
+
+            deps: dict[str, set[int]] = {}
+            for dep_map in (jt_deps, wf_deps):
+                for rtype, ids in dep_map.items():
+                    deps.setdefault(rtype, set()).update(ids)
 
             migration_order = [
                 rt
                 for rt in get_migration_order()
                 if rt in deps and RESOURCE_REGISTRY[rt].has_importer
             ]
-            migration_order.append("job_templates")
+            if jt_data or deps.get("job_templates"):
+                migration_order.append("job_templates")
+            if wf_data:
+                migration_order.append("workflow_job_templates")
             num_phases = len(migration_order)
 
             if force_update:
                 from aap_migration.migration.models import IDMapping, MigrationProgress
 
-                all_force_types = list(deps.keys()) + ["job_templates"]
+                all_force_types = list(deps.keys())
+                if jt_data or deps.get("job_templates"):
+                    all_force_types.append("job_templates")
+                if wf_data:
+                    all_force_types.append("workflow_job_templates")
                 cleared_progress = 0
                 reset_mappings = 0
                 try:
@@ -437,11 +728,21 @@ async def selective_migrate(
 
                         with get_session(state.database_url) as session:
                             for rt in all_force_types:
-                                source_id_list = (
-                                    [jt.get("id") for jt in jt_data if jt.get("id") is not None]
-                                    if rt == "job_templates"
-                                    else list(deps.get(rt, set()))
-                                )
+                                if rt == "job_templates":
+                                    jt_source_ids: list[int] = list(
+                                        deps.get("job_templates", set())
+                                    )
+                                    for jt in jt_data:
+                                        jt_id = jt.get("id")
+                                        if jt_id is not None:
+                                            jt_source_ids.append(int(jt_id))
+                                    source_id_list = list(set(jt_source_ids))
+                                elif rt == "workflow_job_templates":
+                                    source_id_list = [
+                                        int(wf["id"]) for wf in wf_data if wf.get("id") is not None
+                                    ]
+                                else:
+                                    source_id_list = list(deps.get(rt, set()))
                                 if not source_id_list:
                                     continue
                                 cleared_progress += (
@@ -493,7 +794,20 @@ async def selective_migrate(
                 exported = 0
 
                 if rtype == "job_templates":
-                    resources_to_import = jt_data
+                    resources_to_import = list(jt_data)
+                    selected_jt_ids = {jt.get("id") for jt in jt_data if jt.get("id") is not None}
+                    for sid in deps.get("job_templates", set()):
+                        if sid in selected_jt_ids:
+                            continue
+                        try:
+                            jt = await src_client.get_resource_by_id("job_templates", sid)
+                            await _enrich_job_template_from_source(src_client, jt, log)
+                            resources_to_import.append(jt)
+                        except Exception as exc:
+                            log(f"  Warning: failed to fetch job_template/{sid}: {exc}")
+                            failed += 1
+                elif rtype == "workflow_job_templates":
+                    resources_to_import = wf_data
                 else:
                     source_ids = deps[rtype]
                     resources_to_import = []
@@ -660,6 +974,164 @@ async def selective_migrate(
                     totals["failed"] += failed
                     continue
 
+                if rtype in ("job_templates", "workflow_job_templates"):
+                    template_batch: list[dict[str, Any]] = []
+                    for resource in resources_to_import:
+                        source_id = resource.get("id")
+                        if source_id is None:
+                            log(f"  Warning: skipping {rtype} record with no source id")
+                            continue
+
+                        res_name = resource.get("name", str(source_id))
+                        if await _should_skip_migrated_resource(
+                            state, target_client, rtype, int(source_id), log
+                        ):
+                            skipped += 1
+                            log(
+                                f"  Skipping {rtype}/{source_id} ({res_name}): "
+                                "already exists on target"
+                            )
+                            emit(
+                                {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
+                                    "name": res_name,
+                                    "resource_type": rtype,
+                                    "result": "skipped",
+                                    "detail": "Already migrated",
+                                }
+                            )
+                            continue
+
+                        log(f"  Importing {rtype}/{source_id} ({res_name})...")
+                        try:
+                            if transformer:
+                                resource = transformer.transform_resource(
+                                    resource_type=rtype,
+                                    data=resource,
+                                    validate=True,
+                                )
+                            resource["_source_id"] = int(source_id)
+                            template_batch.append(resource)
+                            exported += 1
+                        except SkipResourceError as exc:
+                            skipped += 1
+                            log(f"  Skipping {rtype}/{source_id} ({res_name}): {exc}")
+                            emit(
+                                {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
+                                    "name": res_name,
+                                    "resource_type": rtype,
+                                    "result": "skipped",
+                                    "detail": str(exc)[:200],
+                                }
+                            )
+                        except Exception as exc:
+                            failed += 1
+                            log(f"  Transform failed {rtype}/{source_id} ({res_name}): {exc}")
+                            emit(
+                                {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
+                                    "name": res_name,
+                                    "resource_type": rtype,
+                                    "result": "failed",
+                                    "detail": str(exc)[:200],
+                                }
+                            )
+
+                    if template_batch:
+                        if rtype == "job_templates":
+                            jt_importer = cast(
+                                JobTemplateImporter,
+                                create_importer(
+                                    resource_type="job_templates",
+                                    client=target_client,
+                                    state=state,
+                                    performance_config=migration_config.performance,
+                                    resource_mappings=migration_config.resource_mappings,
+                                ),
+                            )
+                            results = await jt_importer.import_job_templates(template_batch)
+                            importer_errors = jt_importer.import_errors
+                        else:
+                            wf_importer = cast(
+                                WorkflowImporter,
+                                create_importer(
+                                    resource_type="workflow_job_templates",
+                                    client=target_client,
+                                    state=state,
+                                    performance_config=migration_config.performance,
+                                    resource_mappings=migration_config.resource_mappings,
+                                ),
+                            )
+                            results = await wf_importer.import_workflows(template_batch)
+                            importer_errors = wf_importer.import_errors
+
+                        for item in results:
+                            item_name = item.get("name", "unknown")
+                            if item.get("_skipped") or item.get("_already_migrated"):
+                                skipped += 1
+                                detail = item.get("_skip_reason", "Already migrated")
+                                result_action = "skipped"
+                            else:
+                                created += 1
+                                detail = ""
+                                result_action = "created"
+                                log(f"  Created {rtype}/{item.get('id')} ({item_name})")
+                            emit(
+                                {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
+                                    "name": item_name,
+                                    "resource_type": rtype,
+                                    "result": result_action,
+                                    "detail": detail,
+                                }
+                            )
+
+                        template_batch_failed = len(template_batch) - len(results)
+                        if template_batch_failed:
+                            failed += template_batch_failed
+                            for err in importer_errors:
+                                err_name = err.get("name", "unknown")
+                                err_sid = err.get("source_id", "?")
+                                err_detail = str(err.get("error", "import failed"))[:200]
+                                log(f"  Failed {rtype}/{err_sid} ({err_name}): {err_detail}")
+                                emit(
+                                    {
+                                        "_event": "resource_result",
+                                        "phase_num": phase_num,
+                                        "name": err_name,
+                                        "resource_type": rtype,
+                                        "result": "failed",
+                                        "detail": err_detail,
+                                    }
+                                )
+                    else:
+                        log(f"  No {rtype} to import in this phase")
+
+                    duration = f"{time.monotonic() - phase_start:.1f}s"
+                    emit(
+                        {
+                            "_event": "phase_complete",
+                            "phase_num": phase_num,
+                            "description": info.description,
+                            "created": created,
+                            "updated": 0,
+                            "skipped": skipped,
+                            "failed": failed,
+                            "exported": exported,
+                            "duration": duration,
+                            "warnings": {},
+                        }
+                    )
+                    totals["created"] += created
+                    totals["skipped"] += skipped
+                    totals["failed"] += failed
+                    continue
+
                 importer = create_importer(
                     resource_type=rtype,
                     client=target_client,
@@ -735,6 +1207,8 @@ async def selective_migrate(
                         )
 
                     exported += 1
+                    res_name = resource.get("name", resource.get("username", str(source_id)))
+                    log(f"  Importing {rtype}/{source_id} ({res_name})...")
 
                     try:
                         result = await importer.import_resource(
@@ -755,14 +1229,15 @@ async def selective_migrate(
                                     source_name=res_name,
                                     target_name=result.get("name", result.get("username")),
                                 )
-                            if result.get("_skipped"):
+                            if result.get("_skipped") or result.get("_already_migrated"):
                                 skipped += 1
                                 result_action = "skipped"
-                                detail = "Duplicate exists in target"
+                                detail = result.get("_skip_reason", "Duplicate exists in target")
                             else:
                                 created += 1
                                 result_action = "created"
                                 detail = ""
+                                log(f"  Created {rtype}/{target_id} ({res_name})")
                             emit(
                                 {
                                     "_event": "resource_result",
@@ -775,6 +1250,17 @@ async def selective_migrate(
                             )
                         else:
                             skipped += 1
+                            _log_selective_import_none(state, rtype, int(source_id), res_name, log)
+                            emit(
+                                {
+                                    "_event": "resource_result",
+                                    "phase_num": phase_num,
+                                    "name": res_name,
+                                    "resource_type": rtype,
+                                    "result": "skipped",
+                                    "detail": "Import returned no result",
+                                }
+                            )
                     except Exception as exc:
                         failed += 1
                         emit(
@@ -821,9 +1307,13 @@ async def selective_migrate(
         )
         return totals
 
-    jt_count = len(jt_ids)
+    selection_parts: list[str] = []
+    if jt_ids:
+        selection_parts.append(f"{len(jt_ids)} JT(s)")
+    if wf_ids:
+        selection_parts.append(f"{len(wf_ids)} workflow(s)")
     job_id = svc.start_job(
-        f"Selective migrate {jt_count} JT(s) → {dest_conn.name}",
+        f"Selective migrate {' + '.join(selection_parts)} → {dest_conn.name}",
         "selective-migration",
         _do_selective,
     )
