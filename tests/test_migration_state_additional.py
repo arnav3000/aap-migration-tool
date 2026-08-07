@@ -357,3 +357,12 @@ def test_source_key_isolates_multi_source_mappings(sqlite_db_url):
     assert source_b.get_mapped_id("organizations", 1) == 202
     assert get_mapping(source_a, "organizations", 1).source_key == "conn-a"
     assert get_mapping(source_b, "organizations", 1).source_key == "conn-b"
+
+
+def test_get_error_message_returns_failure_detail(sqlite_db_url):
+    state = build_state(sqlite_db_url)
+    state.mark_in_progress("job_templates", 42, "Broken JT", phase="import")
+    state.mark_failed("job_templates", 42, "API error: missing project")
+
+    assert state.get_error_message("job_templates", 42) == "API error: missing project"
+    assert state.get_error_message("job_templates", 99) is None

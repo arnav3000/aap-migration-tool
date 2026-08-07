@@ -80,7 +80,37 @@ vi.mock('@patternfly/react-core', () => ({
   MenuToggle: ({ children, onClick }: { children: ReactNode; onClick: () => void }) => (
     <button type="button" onClick={onClick}>{children}</button>
   ),
-  Select: ({ children, isOpen }: { children: ReactNode; isOpen: boolean }) => isOpen ? <div>{children}</div> : null,
+  Select: ({
+    children,
+    isOpen,
+    onSelect,
+    onOpenChange,
+    selected,
+  }: {
+    children: ReactNode;
+    isOpen: boolean;
+    onSelect: (_e: unknown, value: string) => void;
+    onOpenChange: (open: boolean) => void;
+    selected?: string;
+  }) => (
+    <div data-selected={selected}>
+      <button type="button" onClick={() => onOpenChange(!isOpen)}>toggle-select</button>
+      {isOpen ? (
+        <div
+          onClick={(event) => {
+            const target = event.target as HTMLElement;
+            const option = target.closest('[data-value]');
+            if (option) {
+              onSelect(event, option.getAttribute('data-value') as string);
+              onOpenChange(false);
+            }
+          }}
+        >
+          {children}
+        </div>
+      ) : null}
+    </div>
+  ),
   SelectOption: ({ children, value }: { children: ReactNode; value: string }) => <div data-value={value}>{children}</div>,
   SelectList: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   Spinner: () => <span>loading...</span>,
@@ -213,5 +243,114 @@ describe('Operations', () => {
     fireEvent.click(screen.getByText('Export'));
 
     expect(await screen.findByText('export failed')).toBeInTheDocument();
+  });
+
+  it('loads templates and runs selective migration', async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([
+      {
+        id: 'src-1',
+        name: 'Source',
+        url: 'https://src.example.com',
+        type: 'awx',
+        role: 'source',
+        ping_status: 'ok',
+        auth_status: 'ok',
+      },
+      {
+        id: 'dst-1',
+        name: 'Destination',
+        url: 'https://dst.example.com',
+        type: 'aap',
+        role: 'destination',
+        ping_status: 'ok',
+        auth_status: 'ok',
+      },
+    ]);
+    vi.mocked(api.listResources).mockImplementation(async (_connId, type) => {
+      if (type === 'job_templates') {
+        return [
+          {
+            id: 1,
+            name: 'JT One',
+            summary_fields: {
+              organization: { name: 'Org' },
+              project: { name: 'Proj' },
+            },
+          },
+        ];
+      }
+      if (type === 'workflow_job_templates') {
+        return [
+          {
+            id: 2,
+            name: 'WF One',
+            summary_fields: {
+              organization: { name: 'Org' },
+              inventory: { name: 'Inv' },
+            },
+          },
+        ];
+      }
+      return [];
+    });
+    vi.mocked(api.selectiveMigrate).mockResolvedValue({ job_id: 'sel-job' });
+
+    render(<Operations />);
+
+    await screen.findByText('Selective Template Migration');
+
+    const toggles = screen.getAllByText('toggle-select');
+    fireEvent.click(toggles[0]);
+    fireEvent.click(document.querySelector('[data-value="src-1"]') as HTMLElement);
+    fireEvent.click(toggles[1]);
+    fireEvent.click(document.querySelector('[data-value="dst-1"]') as HTMLElement);
+
+    expect(await screen.findByText('JT One')).toBeInTheDocument();
+    expect(screen.getByText('WF One')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Select JT One'));
+    fireEvent.click(screen.getByLabelText('Select workflow WF One'));
+
+    fireEvent.click(screen.getByText('Migrate 2 templates'));
+
+    await waitFor(() =>
+      expect(api.selectiveMigrate).toHaveBeenCalledWith('src-1', 'dst-1', [1], [2], false)
+    );
+    expect(await screen.findByText('LogViewer sel-job')).toBeInTheDocument();
+  });
+
+  it('shows selective migration errors', async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([
+      {
+        id: 'src-1',
+        name: 'Source',
+        url: 'https://src.example.com',
+        type: 'awx',
+        role: 'source',
+        ping_status: 'ok',
+        auth_status: 'ok',
+      },
+      {
+        id: 'dst-1',
+        name: 'Destination',
+        url: 'https://dst.example.com',
+        type: 'aap',
+        role: 'destination',
+        ping_status: 'ok',
+        auth_status: 'ok',
+      },
+    ]);
+    vi.mocked(api.listResources).mockRejectedValue(new Error('template load failed'));
+
+    render(<Operations />);
+
+    await screen.findByText('Selective Template Migration');
+    const toggles = screen.getAllByText('toggle-select');
+    fireEvent.click(toggles[0]);
+    fireEvent.click(document.querySelector('[data-value="src-1"]') as HTMLElement);
+
+    await waitFor(() =>
+      expect(screen.getByText('template load failed')).toBeInTheDocument()
+    );
   });
 });

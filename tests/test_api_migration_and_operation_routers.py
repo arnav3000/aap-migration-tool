@@ -664,3 +664,89 @@ def test_classify_import_no_result_reports_failed_status() -> None:
     assert action == "failed"
     assert "project does not exist" in detail
     assert any("Failed job_templates/42" in line for line in logs)
+
+
+def test_unified_job_template_node_dep_maps_types() -> None:
+    assert operations._unified_job_template_node_dep({}) == (None, None)
+
+    job_node = {
+        "unified_job_template": 7,
+        "summary_fields": {"unified_job_template": {"unified_job_type": "job"}},
+    }
+    assert operations._unified_job_template_node_dep(job_node) == ("job_templates", 7)
+
+    wf_node = {
+        "unified_job_template": 8,
+        "summary_fields": {"unified_job_template": {"unified_job_type": "workflow_job"}},
+    }
+    assert operations._unified_job_template_node_dep(wf_node) == ("workflow_job_templates", 8)
+
+
+@pytest.mark.asyncio
+async def test_enrich_job_template_from_source_populates_related_data() -> None:
+    logs: list[str] = []
+
+    class FakeClient:
+        async def get_job_template_credentials(self, job_template_id: int) -> list:
+            return [{"id": 30}]
+
+        async def get(self, endpoint: str) -> dict:
+            if endpoint.endswith("/schedules/"):
+                return {"results": [{"id": 11, "name": "Nightly"}]}
+            if endpoint.endswith("/survey_spec/"):
+                return {"spec": [{"question_name": "q1"}]}
+            if "notification_templates_started" in endpoint:
+                return {"results": [{"id": 5}]}
+            return {"results": []}
+
+    template: dict = {"id": 1, "name": "JT"}
+    await operations._enrich_job_template_from_source(FakeClient(), template, logs.append)
+
+    assert template["_credentials"] == [30]
+    assert template["schedules"] == [{"id": 11, "name": "Nightly"}]
+    assert template["survey_spec"] == {"spec": [{"question_name": "q1"}]}
+    assert template["notifications"] == {"notification_templates_started": [5]}
+
+
+@pytest.mark.asyncio
+async def test_enrich_workflow_from_source_populates_nodes_and_survey() -> None:
+    logs: list[str] = []
+
+    class FakeClient:
+        async def get_workflow_nodes(self, workflow_id: int) -> list:
+            return [{"id": 50, "unified_job_template": 7}]
+
+        async def get(self, endpoint: str) -> dict:
+            if endpoint.endswith("/schedules/"):
+                return {"results": [{"id": 12}]}
+            if endpoint.endswith("/survey_spec/"):
+                return {"spec": [{"question_name": "approve"}]}
+            return {"results": []}
+
+    workflow: dict = {"id": 5, "name": "WF"}
+    await operations._enrich_workflow_from_source(FakeClient(), workflow, logs.append)
+
+    assert workflow["nodes"] == [{"id": 50, "unified_job_template": 7}]
+    assert workflow["schedules"] == [{"id": 12}]
+    assert workflow["survey_spec"] == {"spec": [{"question_name": "approve"}]}
+
+
+def test_classify_import_no_result_skips_when_not_failed() -> None:
+    class FakeState:
+        def get_error_message(self, resource_type: str, source_id: int) -> str | None:
+            return None
+
+        def get_status(self, resource_type: str, source_id: int) -> str | None:
+            return "completed"
+
+    logs: list[str] = []
+    action, detail = operations._classify_import_no_result(
+        FakeState(),
+        "projects",
+        1,
+        "Existing Project",
+        logs.append,
+    )
+    assert action == "skipped"
+    assert "already migrated" in detail.lower()
+    assert any("Skipping projects/1" in line for line in logs)

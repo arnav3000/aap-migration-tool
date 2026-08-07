@@ -20,6 +20,7 @@ class FakeState:
         self.failed = []
         self.saved = []
         self.in_progress = []
+        self.error_messages: dict[tuple[str, int], str] = {}
 
     def is_migrated(self, resource_type, source_id):
         return False
@@ -31,8 +32,12 @@ class FakeState:
         self.completed.append(kwargs)
         self.mapped_ids[(kwargs["resource_type"], kwargs["source_id"])] = kwargs["target_id"]
 
-    def mark_failed(self, *args, **kwargs):
-        self.failed.append(args or kwargs)
+    def mark_failed(self, resource_type, source_id, error_message, increment_retry=True):
+        self.failed.append((resource_type, source_id, error_message))
+        self.error_messages[(resource_type, source_id)] = error_message
+
+    def get_error_message(self, resource_type, source_id):
+        return self.error_messages.get((resource_type, source_id))
 
     def save_id_mapping(self, **kwargs):
         self.saved.append(kwargs)
@@ -155,6 +160,48 @@ async def test_job_template_importer_followup_resources(monkeypatch):
     }
     assert state.mapped_ids[("schedules", 11)] == 901
     assert progress[-1] == (1, 1, 0)
+    assert len(importer.import_errors) == 1
+    assert importer.import_errors[0]["source_id"] == 2
+    assert "job template failed" in importer.import_errors[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_job_template_importer_records_failure_when_import_returns_none(monkeypatch):
+    state = FakeState()
+    client = FakeClient()
+    importer = JobTemplateImporter(client, state, PerformanceConfig())
+
+    async def fake_import_resource(resource_type, source_id, data, resolve_dependencies=True):
+        return None
+
+    monkeypatch.setattr(importer, "import_resource", fake_import_resource)
+    state.mark_in_progress("job_templates", 3, "Ghost JT", "import")
+    state.mark_failed("job_templates", 3, "validation failed")
+
+    results = await importer.import_job_templates([{"_source_id": 3, "name": "Ghost JT"}])
+
+    assert results == []
+    assert len(importer.import_errors) == 1
+    assert importer.import_errors[0]["error"] == "validation failed"
+
+
+@pytest.mark.asyncio
+async def test_import_failure_helpers_use_state_and_error_list(sqlite_db_url):
+    from aap_migration.config import StateConfig
+    from aap_migration.migration.state import MigrationState
+
+    state = MigrationState(StateConfig(db_path=sqlite_db_url), migration_id="helper-test")
+    importer = JobTemplateImporter(FakeClient(), state, PerformanceConfig())
+
+    importer._record_import_failure("job_templates", 1, "JT", "boom")
+    assert importer._failure_detail_for_resource("job_templates", 1) == "boom"
+
+    importer._record_import_failure("job_templates", 1, "JT", "ignored duplicate")
+    assert len(importer.import_errors) == 1
+
+    state.mark_in_progress("job_templates", 2, "Other JT", "import")
+    state.mark_failed("job_templates", 2, "state db message")
+    assert importer._failure_detail_for_resource("job_templates", 2) == "state db message"
 
 
 @pytest.mark.asyncio
