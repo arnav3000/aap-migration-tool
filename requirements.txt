@@ -1,8 +1,5 @@
 # AAP Migration Tool - Production Dependencies
 
-# AAP API Client
-awxkit==24.6.1
-
 # HTTP Clients
 httpx==0.28.1
 h11>=0.16.0
