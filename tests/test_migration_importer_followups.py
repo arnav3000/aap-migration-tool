@@ -33,7 +33,13 @@ class FakeState:
         self.mapped_ids[(kwargs["resource_type"], kwargs["source_id"])] = kwargs["target_id"]
 
     def mark_failed(self, resource_type, source_id, error_message, increment_retry=True):
-        self.failed.append((resource_type, source_id, error_message))
+        self.failed.append(
+            {
+                "resource_type": resource_type,
+                "source_id": source_id,
+                "error_message": error_message,
+            }
+        )
         self.error_messages[(resource_type, source_id)] = error_message
 
     def get_error_message(self, resource_type, source_id):
