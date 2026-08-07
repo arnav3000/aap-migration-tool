@@ -26,7 +26,6 @@ classifiers = [
 ]
 
 dependencies = [
-    "awxkit==24.6.1",
     "httpx==0.28.1",
     "h11>=0.16.0",
     "requests>=2.33.0",
@@ -189,7 +188,6 @@ strict_optional = true
 
 [[tool.mypy.overrides]]
 module = [
-    "awxkit.*",
     "hvac.*",
 ]
 ignore_missing_imports = true
