@@ -73,6 +73,15 @@ vi.mock('@patternfly/react-core', () => ({
   SplitItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   Flex: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   FlexItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  FormGroup: ({ children, label }: { children: ReactNode; label?: string }) => (
+    <div>
+      {label ? <label>{label}</label> : null}
+      {children}
+    </div>
+  ),
+  FormHelperText: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  HelperText: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  HelperTextItem: ({ children }: { children: ReactNode }) => <span>{children}</span>,
   Card: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   CardBody: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   CardHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -311,10 +320,14 @@ describe('Operations', () => {
     fireEvent.click(screen.getByLabelText('Select JT One'));
     fireEvent.click(screen.getByLabelText('Select workflow WF One'));
 
+    fireEvent.change(screen.getByPlaceholderText('e.g. dev_'), {
+      target: { value: 'dev_' },
+    });
+
     fireEvent.click(screen.getByText('Migrate 2 templates'));
 
     await waitFor(() =>
-      expect(api.selectiveMigrate).toHaveBeenCalledWith('src-1', 'dst-1', [1], [2], false)
+      expect(api.selectiveMigrate).toHaveBeenCalledWith('src-1', 'dst-1', [1], [2], false, 'dev_')
     );
     expect(await screen.findByText('LogViewer sel-job')).toBeInTheDocument();
   });

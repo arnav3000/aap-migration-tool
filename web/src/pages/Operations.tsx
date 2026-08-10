@@ -19,6 +19,10 @@ import {
   CardBody,
   CardHeader,
   CardTitle,
+  FormGroup,
+  FormHelperText,
+  HelperText,
+  HelperTextItem,
   MenuToggle,
   Select,
   SelectOption,
@@ -82,6 +86,7 @@ export function Operations() {
   const [smError, setSmError] = useState<string | null>(null);
   const [smRunning, setSmRunning] = useState(false);
   const [smForceUpdate, setSmForceUpdate] = useState(false);
+  const [smNamePrefix, setSmNamePrefix] = useState('');
 
   const loadConnections = useCallback(async () => {
     const conns = await api.listConnections() as Connection[];
@@ -239,6 +244,7 @@ export function Operations() {
         Array.from(smSelectedJTIds),
         Array.from(smSelectedWFIds),
         smForceUpdate,
+        smNamePrefix.trim() || undefined,
       );
       const srcConn = connections.find(c => c.id === smSourceId);
       const destConn = connections.find(c => c.id === smDestId);
@@ -421,6 +427,23 @@ export function Operations() {
                   ))}
                 </SelectList>
               </Select>
+            </FlexItem>
+            <FlexItem>
+              <FormGroup label="Name prefix (optional)" fieldId="sm-name-prefix">
+                <TextInput
+                  id="sm-name-prefix"
+                  value={smNamePrefix}
+                  onChange={(_e, val) => setSmNamePrefix(val)}
+                  placeholder="e.g. dev_"
+                />
+                <FormHelperText>
+                  <HelperText>
+                    <HelperTextItem>
+                      Prepend to names of selected templates and their dependencies on the target.
+                    </HelperTextItem>
+                  </HelperText>
+                </FormHelperText>
+              </FormGroup>
             </FlexItem>
           </Flex>
 

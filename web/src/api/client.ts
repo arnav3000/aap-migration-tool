@@ -42,6 +42,7 @@ export const api = {
     jobTemplateIds: number[],
     workflowJobTemplateIds: number[] = [],
     forceUpdate = false,
+    namePrefix?: string,
   ) =>
     request<{ job_id: string }>('POST', '/api/selective-migrate', {
       source_id: sourceId,
@@ -49,6 +50,7 @@ export const api = {
       job_template_ids: jobTemplateIds,
       workflow_job_template_ids: workflowJobTemplateIds,
       force_update: forceUpdate,
+      ...(namePrefix ? { name_prefix: namePrefix } : {}),
     }),
 
   migrationPreview: (sourceId: string, destinationId: string, organizations?: number[], namePrefix?: string) =>

@@ -129,6 +129,7 @@ class SelectiveMigrateRequest(BaseModel):
     job_template_ids: list[int] = Field(default_factory=list)
     workflow_job_template_ids: list[int] = Field(default_factory=list)
     force_update: bool = False
+    name_prefix: str | None = None
 
     @model_validator(mode="after")
     def require_at_least_one_template(self) -> "SelectiveMigrateRequest":

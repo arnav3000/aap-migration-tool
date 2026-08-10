@@ -593,6 +593,32 @@ def test_selective_migrate_request_requires_at_least_one_template() -> None:
         )
 
 
+def test_selective_migrate_request_accepts_optional_name_prefix() -> None:
+    from aap_migration.api.schemas import SelectiveMigrateRequest
+
+    body = SelectiveMigrateRequest(
+        source_id="src-1",
+        destination_id="dst-1",
+        job_template_ids=[1],
+        name_prefix="dev_",
+    )
+    assert body.name_prefix == "dev_"
+
+
+def test_maybe_apply_name_prefix_prepends_resource_name() -> None:
+    resource = {"name": "Deploy"}
+    operations._maybe_apply_name_prefix("projects", resource, "dev_")
+    assert resource["name"] == "dev_Deploy"
+    assert resource["_name_prefix"] == "dev_"
+
+
+def test_maybe_apply_name_prefix_skips_when_empty() -> None:
+    resource = {"name": "Deploy"}
+    operations._maybe_apply_name_prefix("projects", resource, "")
+    assert resource["name"] == "Deploy"
+    assert "_name_prefix" not in resource
+
+
 @pytest.mark.asyncio
 async def test_resolve_workflow_dependencies_includes_node_job_templates() -> None:
     logs: list[str] = []

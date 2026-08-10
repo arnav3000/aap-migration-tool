@@ -209,6 +209,19 @@ def _clear_selective_resource_state(
             session.commit()
 
 
+def _maybe_apply_name_prefix(
+    resource_type: str,
+    resource: dict[str, Any],
+    name_prefix: str,
+) -> None:
+    """Prepend optional name prefix after transform, before import."""
+    if not name_prefix:
+        return
+    from aap_migration.utils.naming import apply_name_prefix
+
+    apply_name_prefix(resource_type, resource, name_prefix)
+
+
 async def _should_skip_migrated_resource(
     state: Any,
     target_client: Any,
@@ -650,6 +663,7 @@ async def selective_migrate(
     jt_ids = body.job_template_ids
     wf_ids = body.workflow_job_template_ids
     force_update = body.force_update
+    name_prefix = (body.name_prefix or "").strip()
     db_url = get_db_url()
 
     svc = get_job_service()
@@ -684,6 +698,9 @@ async def selective_migrate(
         state = MigrationState(migration_config.state)
 
         totals = {"created": 0, "skipped": 0, "failed": 0}
+
+        if name_prefix:
+            log(f"Applying name prefix: '{name_prefix}'")
 
         async with src_client, target_client:
             if jt_ids:
@@ -883,6 +900,7 @@ async def selective_migrate(
                                 )
                             if schedules:
                                 resource["schedules"] = schedules
+                            _maybe_apply_name_prefix(rtype, resource, name_prefix)
                             # transform strips read-only "id"; importer needs _source_id
                             resource["_source_id"] = int(source_id)
                             batch.append(resource)
@@ -915,6 +933,7 @@ async def selective_migrate(
                                 state=state,
                                 performance_config=migration_config.performance,
                                 resource_mappings=migration_config.resource_mappings,
+                                name_prefix=name_prefix,
                             ),
                         )
                         try:
@@ -1013,6 +1032,7 @@ async def selective_migrate(
                                     data=resource,
                                     validate=True,
                                 )
+                            _maybe_apply_name_prefix(rtype, resource, name_prefix)
                             resource["_source_id"] = int(source_id)
                             template_batch.append(resource)
                             exported += 1
@@ -1053,6 +1073,7 @@ async def selective_migrate(
                                     state=state,
                                     performance_config=migration_config.performance,
                                     resource_mappings=migration_config.resource_mappings,
+                                    name_prefix=name_prefix,
                                 ),
                             )
                             results = await jt_importer.import_job_templates(template_batch)
@@ -1066,6 +1087,7 @@ async def selective_migrate(
                                     state=state,
                                     performance_config=migration_config.performance,
                                     resource_mappings=migration_config.resource_mappings,
+                                    name_prefix=name_prefix,
                                 ),
                             )
                             results = await wf_importer.import_workflows(template_batch)
@@ -1163,6 +1185,7 @@ async def selective_migrate(
                     state=state,
                     performance_config=migration_config.performance,
                     resource_mappings=migration_config.resource_mappings,
+                    name_prefix=name_prefix,
                 )
 
                 for resource in resources_to_import:
@@ -1230,6 +1253,8 @@ async def selective_migrate(
                             source_id=int(source_id),
                             source_name=resource.get("name", resource.get("username")),
                         )
+
+                    _maybe_apply_name_prefix(rtype, resource, name_prefix)
 
                     exported += 1
                     res_name = resource.get("name", resource.get("username", str(source_id)))
