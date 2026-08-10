@@ -385,6 +385,9 @@ export function Operations() {
           <Title headingLevel="h2" size="xl" style={{ marginBottom: 8 }}>Selective Template Migration</Title>
           <TextContent style={{ marginBottom: 16 }}>
             <Text>Pick job templates or workflows from a source and migrate them with all their dependencies to a destination.</Text>
+            {import.meta.env.VITE_GIT_COMMIT ? (
+              <Text component="small">UI build {import.meta.env.VITE_GIT_COMMIT}</Text>
+            ) : null}
           </TextContent>
 
           <Card style={{ marginBottom: 16 }}>

@@ -2,6 +2,8 @@ FROM registry.access.redhat.com/ubi9/nodejs-24-minimal:latest AS builder
 
 USER 0
 WORKDIR /build
+ARG GIT_COMMIT=unknown
+ENV VITE_GIT_COMMIT=${GIT_COMMIT}
 COPY web/package.json web/package-lock.json* ./
 RUN [ -f package-lock.json ] && npm ci || npm install
 COPY web/ ./

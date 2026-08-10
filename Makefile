@@ -152,16 +152,18 @@ define run-test
 	podman run --rm $(TEST_IMAGE)
 endef
 
+GIT_COMMIT       := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
 build: ## Build all container images (cli, api, ui)
 	podman build -t $(BRIDGE_IMAGE) -f container/Containerfile .
 	podman build -t $(BRIDGE_API_IMAGE) -f container/Containerfile.api .
-	podman build -t $(UI_IMAGE) -f container/Containerfile.ui .
+	podman build --build-arg GIT_COMMIT=$(GIT_COMMIT) -t $(UI_IMAGE) -f container/Containerfile.ui .
 
 build-api: ## Build API container image only
 	podman build -t $(BRIDGE_API_IMAGE) -f container/Containerfile.api .
 
 build-ui: ## Build UI container image only
-	podman build -t $(UI_IMAGE) -f container/Containerfile.ui .
+	podman build --build-arg GIT_COMMIT=$(GIT_COMMIT) -t $(UI_IMAGE) -f container/Containerfile.ui .
 
 build-test: ## Build dedicated test container image
 	podman build -t $(TEST_IMAGE) -f container/Containerfile.test .
@@ -177,7 +179,7 @@ check-container-env: ## Validate container/.env exists and has required values
 	@$(PYTHON) scripts/check_container_env.py
 
 up: prepare-pgdata check-container-env ## Start db + engine + ui (web interface)
-	$(COMPOSE) up -d db engine ui
+	$(COMPOSE) up -d --force-recreate db engine ui
 
 up-build: build up ## Rebuild all images then start db + engine + ui
 

@@ -34,7 +34,7 @@ services:
     build:
       context: ..
       dockerfile: container/Containerfile.api
-    image: aap-bridge-api:latest
+    image: localhost/aap-bridge-api:latest
     container_name: aap-engine
     networks:
     - app
@@ -66,7 +66,7 @@ services:
     build:
       context: ..
       dockerfile: container/Containerfile.ui
-    image: aap-bridge-ui:latest
+    image: localhost/aap-bridge-ui:latest
     container_name: aap-ui
     networks:
     - app
@@ -96,7 +96,7 @@ services:
       args:
         BRANCH: main
         APP_VERSION: 0.5.4
-    image: aap-bridge:latest
+    image: localhost/aap-bridge:latest
     container_name: aap-bridge
     networks:
     - app
