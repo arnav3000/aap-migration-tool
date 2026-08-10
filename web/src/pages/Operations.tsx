@@ -433,22 +433,6 @@ export function Operations() {
                   </FormGroup>
                 </FlexItem>
               </Flex>
-              <FormGroup label="Name Prefix (optional)" fieldId="sm-name-prefix">
-                <TextInput
-                  id="sm-name-prefix"
-                  value={smNamePrefix}
-                  onChange={(_e, val) => setSmNamePrefix(val)}
-                  placeholder="e.g. dev_"
-                  style={{ maxWidth: 320 }}
-                />
-                <FormHelperText>
-                  <HelperText>
-                    <HelperTextItem>
-                      Prepend to names of selected templates and their dependencies on the target.
-                    </HelperTextItem>
-                  </HelperText>
-                </FormHelperText>
-              </FormGroup>
             </CardBody>
           </Card>
 
@@ -595,26 +579,49 @@ export function Operations() {
             </Card>
           )}
 
-          <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ gap: 16, marginBottom: 8 }}>
-            <FlexItem>
-              <Button
-                variant="primary"
-                isDisabled={!smSourceId || !smDestId || smSelectedCount === 0 || smRunning}
-                isLoading={smRunning}
-                onClick={handleSelectiveMigrate}
-              >
-                Migrate {smSelectedCount} template{smSelectedCount !== 1 ? 's' : ''}
-              </Button>
-            </FlexItem>
-            <FlexItem>
-              <Checkbox
-                id="sm-force-update"
-                label="Force update (re-migrate previously imported resources)"
-                isChecked={smForceUpdate}
-                onChange={(_event, checked) => setSmForceUpdate(checked)}
-              />
-            </FlexItem>
-          </Flex>
+          <Card style={{ marginBottom: 16 }}>
+            <CardBody>
+              <Flex alignItems={{ default: 'alignItemsFlexEnd' }} style={{ gap: 24, flexWrap: 'wrap' }}>
+                <FlexItem style={{ minWidth: 280, flexGrow: 1 }}>
+                  <FormGroup label="Name Prefix (optional)" fieldId="sm-name-prefix">
+                    <TextInput
+                      id="sm-name-prefix"
+                      aria-label="Name Prefix (optional)"
+                      value={smNamePrefix}
+                      onChange={(_e, val) => setSmNamePrefix(val)}
+                      placeholder="e.g. dev_"
+                    />
+                    <FormHelperText>
+                      <HelperText>
+                        <HelperTextItem>
+                          Prepended to selected templates and every dependency created on the target
+                          (projects, credentials, inventories, etc.).
+                        </HelperTextItem>
+                      </HelperText>
+                    </FormHelperText>
+                  </FormGroup>
+                </FlexItem>
+                <FlexItem>
+                  <Button
+                    variant="primary"
+                    isDisabled={!smSourceId || !smDestId || smSelectedCount === 0 || smRunning}
+                    isLoading={smRunning}
+                    onClick={handleSelectiveMigrate}
+                  >
+                    Migrate {smSelectedCount} template{smSelectedCount !== 1 ? 's' : ''}
+                  </Button>
+                </FlexItem>
+                <FlexItem style={{ paddingBottom: 8 }}>
+                  <Checkbox
+                    id="sm-force-update"
+                    label="Force update (re-migrate previously imported resources)"
+                    isChecked={smForceUpdate}
+                    onChange={(_event, checked) => setSmForceUpdate(checked)}
+                  />
+                </FlexItem>
+              </Flex>
+            </CardBody>
+          </Card>
         </>
       )}
 

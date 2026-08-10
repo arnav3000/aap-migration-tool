@@ -1,7 +1,7 @@
 .PHONY: help install install-dev clean format lint typecheck test test-unit test-integration \
        test-performance test-cov test-watch check pre-commit docs docs-serve run-example \
        init-env setup version venv install-editable all \
-       build build-api build-ui build-test prepare-pgdata prepare-volumes check-container-env up up-dev down down-images destroy shell shell-engine logs \
+       build build-api build-ui build-test prepare-pgdata prepare-volumes check-container-env up up-build up-dev down down-images destroy shell shell-engine logs \
        c-test c-test-backend c-test-frontend c-test-smoke c-test-all c-ci-full c-lint c-format c-typecheck c-check \
        web-install web-dev web-build serve
 
@@ -178,6 +178,8 @@ check-container-env: ## Validate container/.env exists and has required values
 
 up: prepare-pgdata check-container-env ## Start db + engine + ui (web interface)
 	$(COMPOSE) up -d db engine ui
+
+up-build: build up ## Rebuild all images then start db + engine + ui
 
 up-dev: prepare-pgdata check-container-env ## Start db + bridge (CLI dev container)
 	$(COMPOSE) up -d db bridge
