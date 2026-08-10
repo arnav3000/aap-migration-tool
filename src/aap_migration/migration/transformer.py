@@ -2822,7 +2822,6 @@ TRANSFORMER_CLASSES: dict[str, type[DataTransformer]] = {
     "system_job_templates": SystemJobTemplateTransformer,
     "notification_templates": NotificationTemplateTransformer,
     "credential_input_sources": CredentialInputSourceTransformer,
-    "jobs": JobsTransformer,
     "applications": ApplicationTransformer,
     "settings": SettingsTransformer,
 }

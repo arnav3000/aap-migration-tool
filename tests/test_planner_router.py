@@ -17,6 +17,7 @@ from aap_migration.api.schemas import (
     PlanSourceUpdate,
     PlanUpdate,
 )
+from aap_migration.migration import runner
 
 
 def _make_connection(db_session, conn_id: str, name: str) -> api_models.Connection:
@@ -163,7 +164,7 @@ async def test_planner_credential_review_and_execute_phase(
         return {"results": []}
 
     review_client.get = review_get
-    review = await planner._build_credential_review(
+    review = await runner._build_credential_review(
         review_client,
         [
             {
@@ -543,7 +544,7 @@ async def test_credential_pause_reviews_each_source_separately(
         def persist_job(self, j):
             return None
 
-    await planner._handle_credential_pause(
+    await runner._handle_credential_pause(
         job,
         FakeSvc(),
         created_creds,
@@ -570,7 +571,7 @@ async def test_credential_pause_still_pauses_on_source_label_mismatch(
 ) -> None:
     """Source-label mismatches must not skip the secret-update pause."""
     monkeypatch.setattr(
-        planner,
+        runner,
         "_build_credential_review",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
     )
@@ -611,7 +612,7 @@ async def test_credential_pause_still_pauses_on_source_label_mismatch(
         def persist_job(self, j):
             return None
 
-    await planner._handle_credential_pause(
+    await runner._handle_credential_pause(
         job,
         FakeSvc(),
         created_creds,
@@ -683,7 +684,7 @@ async def test_migrate_tracks_skipped_credentials_for_pause(
         }
     ]
 
-    created, skipped, failed, exported = await planner._migrate_resource_type(
+    created, skipped, failed, exported = await runner._migrate_resource_type(
         "credentials",
         sources,
         object(),
@@ -769,7 +770,7 @@ async def test_migrate_logs_skip_reason_for_missing_dependency(
         }
     ]
 
-    created, skipped, failed, exported = await planner._migrate_resource_type(
+    created, skipped, failed, exported = await runner._migrate_resource_type(
         "credentials",
         sources,
         object(),
@@ -840,7 +841,7 @@ async def test_migrate_resource_type_applies_name_prefix_and_tags_source(
         }
     ]
 
-    created, skipped, failed, exported = await planner._migrate_resource_type(
+    created, skipped, failed, exported = await runner._migrate_resource_type(
         "credentials",
         sources,
         object(),
@@ -910,7 +911,7 @@ async def test_migrate_skips_name_prefix_for_managed_credential_types(
         }
     ]
 
-    await planner._migrate_resource_type(
+    await runner._migrate_resource_type(
         "credential_types",
         sources,
         object(),
@@ -970,7 +971,7 @@ async def test_migrate_skips_name_prefix_for_managed_credentials(
         }
     ]
 
-    await planner._migrate_resource_type(
+    await runner._migrate_resource_type(
         "credentials",
         sources,
         object(),
@@ -1032,7 +1033,7 @@ async def test_migrate_resource_type_honors_excluded_ids(
         }
     ]
 
-    created, skipped, failed, exported = await planner._migrate_resource_type(
+    created, skipped, failed, exported = await runner._migrate_resource_type(
         "inventories",
         sources,
         object(),
@@ -1104,7 +1105,7 @@ async def test_migrate_resource_type_short_circuits_fully_excluded_type(
         }
     ]
 
-    created, skipped, failed, exported = await planner._migrate_resource_type(
+    created, skipped, failed, exported = await runner._migrate_resource_type(
         "hosts",
         sources,
         object(),
@@ -1169,7 +1170,7 @@ async def test_migrate_resource_type_skips_memberships_for_excluded_hosts(
         }
     ]
 
-    created, skipped, failed, exported = await planner._migrate_resource_type(
+    created, skipped, failed, exported = await runner._migrate_resource_type(
         "host_inventory_memberships",
         sources,
         object(),
@@ -1192,7 +1193,7 @@ async def test_migrate_resource_type_skips_memberships_for_excluded_hosts(
 def test_resource_in_orgs_tightened_filter() -> None:
     # Org-scoped inventory outside selected orgs is excluded
     assert (
-        planner._resource_in_orgs(
+        runner._resource_in_orgs(
             "inventories",
             {"id": 9, "organization": 99, "name": "Other"},
             9,
@@ -1202,7 +1203,7 @@ def test_resource_in_orgs_tightened_filter() -> None:
     )
     # Inventory in selected org is included
     assert (
-        planner._resource_in_orgs(
+        runner._resource_in_orgs(
             "inventories",
             {"id": 9, "organization": 1, "name": "Mine"},
             9,
@@ -1212,7 +1213,7 @@ def test_resource_in_orgs_tightened_filter() -> None:
     )
     # Org-less inventory is NOT auto-included (unlike previous permissive behavior)
     assert (
-        planner._resource_in_orgs(
+        runner._resource_in_orgs(
             "inventories",
             {"id": 9, "organization": None, "name": "NoOrg"},
             9,
@@ -1222,7 +1223,7 @@ def test_resource_in_orgs_tightened_filter() -> None:
     )
     # Global credential types still included
     assert (
-        planner._resource_in_orgs(
+        runner._resource_in_orgs(
             "credential_types",
             {"id": 1, "name": "Machine", "managed": True},
             1,
@@ -1232,7 +1233,7 @@ def test_resource_in_orgs_tightened_filter() -> None:
     )
     # Org-less credentials still included (user/team owned)
     assert (
-        planner._resource_in_orgs(
+        runner._resource_in_orgs(
             "credentials",
             {"id": 3, "organization": None, "name": "UserCred"},
             3,

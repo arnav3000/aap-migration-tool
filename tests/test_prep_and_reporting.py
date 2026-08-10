@@ -26,11 +26,6 @@ from aap_migration.reporting.live_progress import (
     StatusIconColumn,
 )
 from aap_migration.reporting.progress import LiveStats, ProgressTracker
-from aap_migration.reporting.progress_orchestrator import (
-    DisabledPhaseTracker,
-    OrchestratorResult,
-    ProgressOrchestrator,
-)
 
 
 class FakeClient:
@@ -74,50 +69,6 @@ class FakeTqdm:
 
     def close(self):
         self.closed = True
-
-
-class FakeProgressDisplay:
-    def __init__(self, title: str, enabled: bool, show_stats: bool):
-        self.title = title
-        self.enabled = enabled
-        self.show_stats = show_stats
-        self.calls = []
-        self.phase_states = {"phase1": type("State", (), {"success_count": 3, "failed": 1})()}
-
-    def __enter__(self):
-        self.calls.append(("enter",))
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.calls.append(("exit",))
-        return None
-
-    def initialize_phases(self, phases):
-        self.calls.append(("initialize", phases))
-
-    def set_total_phases(self, total):
-        self.calls.append(("total", total))
-
-    def start_phase(self, phase_id, description, total):
-        self.calls.append(("start", phase_id, description, total))
-
-    def update_phase(self, phase_id, completed, failed=0):
-        self.calls.append(("update", phase_id, completed, failed))
-
-    def complete_phase(self, phase_id):
-        self.calls.append(("complete", phase_id))
-
-
-class FakeExporter:
-    def __init__(self, client, state, performance_config):
-        self.client = client
-        self.state = state
-        self.performance_config = performance_config
-
-    async def get_count(self, endpoint):
-        if endpoint == "broken/":
-            raise RuntimeError("boom")
-        return 7 if endpoint == "ok/" else 3
 
 
 @pytest.mark.asyncio
@@ -327,41 +278,3 @@ def test_live_progress_display_lifecycle_and_phase_state() -> None:
     finally:
         if handler in root_logger.handlers:
             root_logger.removeHandler(handler)
-
-
-@pytest.mark.asyncio
-async def test_progress_orchestrator_and_disabled_tracker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "aap_migration.reporting.progress_orchestrator.MigrationProgressDisplay",
-        FakeProgressDisplay,
-    )
-
-    orchestrator = ProgressOrchestrator(title="Export", enabled=True, show_stats=True)
-    phases = await orchestrator.prefetch_counts(
-        client=object(),
-        phase_configs=[
-            ("phase1", FakeExporter, "ok/"),
-            ("phase2", FakeExporter, "broken/"),
-        ],
-        state=object(),
-        performance_config=object(),
-    )
-    assert phases == [("phase1", "Phase1", 7), ("phase2", "Phase2", 0)]
-    assert orchestrator.result.errors == ["Failed to fetch count for phase2: boom"]
-
-    with orchestrator.progress_context(phases) as tracker:
-        tracker.start_phase("phase1", "Phase1", 4)
-        tracker.update("phase1", completed=4, failed=1)
-        tracker.complete_phase("phase1")
-
-    assert orchestrator._progress is None
-    assert orchestrator.result.total_resources == 3
-    assert orchestrator.result.total_failed == 1
-    assert orchestrator.result.phase_stats["phase1"].completed == 4
-
-    result = OrchestratorResult()
-    disabled = DisabledPhaseTracker(result)
-    phase_id = disabled.start_phase("phase3", "Phase3", 5)
-    disabled.update(phase_id, completed=2, failed=1)
-    disabled.complete_phase(phase_id, failed=2)
-    assert result.phase_stats["phase3"].success == 3

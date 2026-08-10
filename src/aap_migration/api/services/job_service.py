@@ -37,6 +37,7 @@ MIGRATION_JOB_TYPES = frozenset(
         "export",
         "transform",
         "preview",
+        "resource-scan",
     }
 )
 

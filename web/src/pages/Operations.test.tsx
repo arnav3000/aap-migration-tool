@@ -144,7 +144,7 @@ vi.mock('../api/client', () => ({
   api: {
     listConnections: vi.fn(),
     runCleanup: vi.fn(),
-    runExport: vi.fn(),
+    runResourceScan: vi.fn(),
     listResources: vi.fn(),
     selectiveMigrate: vi.fn(),
   },
@@ -158,7 +158,7 @@ describe('Operations', () => {
     vi.clearAllMocks();
   });
 
-  it('runs export and cleanup jobs, navigates, and dismisses active jobs', async () => {
+  it('runs resource scan and cleanup jobs, navigates, and dismisses active jobs', async () => {
     vi.mocked(api.listConnections).mockResolvedValue([
       {
         id: 'src-1',
@@ -181,7 +181,7 @@ describe('Operations', () => {
         auth_error: 'bad token',
       },
     ]);
-    vi.mocked(api.runExport).mockResolvedValue({ job_id: 'job-export' });
+    vi.mocked(api.runResourceScan).mockResolvedValue({ job_id: 'job-scan' });
     vi.mocked(api.runCleanup).mockResolvedValue({ job_id: 'job-cleanup' });
 
     render(<Operations />);
@@ -200,12 +200,12 @@ describe('Operations', () => {
     fireEvent.click(screen.getByText('Browse'));
     expect(navigate).toHaveBeenCalledWith('/browse?conn=src-1');
 
-    fireEvent.click(screen.getByText('Export'));
-    await waitFor(() => expect(api.runExport).toHaveBeenCalledWith('src-1'));
-    expect(await screen.findByText('LogViewer job-export')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Scan Resources'));
+    await waitFor(() => expect(api.runResourceScan).toHaveBeenCalledWith('src-1'));
+    expect(await screen.findByText('LogViewer job-scan')).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('Open in Jobs'));
-    expect(navigate).toHaveBeenCalledWith('/jobs/job-export');
+    expect(navigate).toHaveBeenCalledWith('/jobs/job-scan');
 
     fireEvent.click(screen.getByLabelText('Dismiss'));
     await waitFor(() =>
@@ -243,15 +243,15 @@ describe('Operations', () => {
         auth_status: 'ok',
       },
     ]);
-    vi.mocked(api.runExport).mockRejectedValue(new Error('export failed'));
+    vi.mocked(api.runResourceScan).mockRejectedValue(new Error('scan failed'));
 
     render(<Operations />);
 
     const srcButtons = await screen.findAllByText('Source');
     fireEvent.click(srcButtons[0]);
-    fireEvent.click(screen.getByText('Export'));
+    fireEvent.click(screen.getByText('Scan Resources'));
 
-    expect(await screen.findByText('export failed')).toBeInTheDocument();
+    expect(await screen.findByText('scan failed')).toBeInTheDocument();
   });
 
   it('loads templates and runs selective migration', async () => {

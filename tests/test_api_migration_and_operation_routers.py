@@ -267,7 +267,7 @@ async def test_operations_cleanup_returns_404_for_missing_connection(
 
 
 @pytest.mark.asyncio
-async def test_operations_export_returns_404_for_missing_connection(
+async def test_operations_scan_returns_404_for_missing_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from fastapi import HTTPException
@@ -279,13 +279,13 @@ async def test_operations_export_returns_404_for_missing_connection(
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await operations.run_export("missing", db=None)
+        await operations.run_resource_scan("missing", db=None)
 
     assert exc_info.value.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_operations_router_cleanup_and_export(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_operations_router_cleanup_and_scan(monkeypatch: pytest.MonkeyPatch) -> None:
     svc = FakeJobService()
     conn = SimpleNamespace(id="conn-1", name="Target", url="https://target.example.com")
     monkeypatch.setattr(
@@ -350,14 +350,14 @@ async def test_operations_router_cleanup_and_export(monkeypatch: pytest.MonkeyPa
     assert state_session.statements == ["organizations", "organizations"]
     assert any("Clearing migration state" in line for line in cleanup_logs)
 
-    export_response = await operations.run_export("conn-1", db=None)
-    assert export_response.job_id == "export-job"
-    _, _, export_callback = svc.started[1]
-    export_logs = []
-    export_result = await export_callback(FakeJob(), export_logs.append)
-    assert export_result["status"] == "completed"
-    assert export_result["exported"]["organizations"] == 2
-    assert any("Export complete" in line for line in export_logs)
+    scan_response = await operations.run_resource_scan("conn-1", db=None)
+    assert scan_response.job_id == "resource-scan-job"
+    _, _, scan_callback = svc.started[1]
+    scan_logs = []
+    scan_result = await scan_callback(FakeJob(), scan_logs.append)
+    assert scan_result["status"] == "completed"
+    assert scan_result["scanned"]["organizations"] == 2
+    assert any("Resource scan complete" in line for line in scan_logs)
 
 
 @pytest.mark.asyncio

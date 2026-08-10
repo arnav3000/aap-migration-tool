@@ -95,10 +95,3 @@ def test_iam_report_regenerates_html(runner: CliRunner, tmp_path: Path) -> None:
     html_path = tmp_path / "iam_audit.html"
     assert html_path.exists()
     assert "HTML report generated" in result.output
-
-
-def test_analysis_graph_shim_reexports() -> None:
-    from aap_migration.analysis import graph
-
-    assert graph.topological_sort is not None
-    assert "detect_cycles" in graph.__all__

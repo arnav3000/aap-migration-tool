@@ -140,35 +140,37 @@ async def run_cleanup(conn_id: str, db: Session = Depends(get_db)) -> JobStartRe
     return JobStartResponse(job_id=job_id)
 
 
-@router.post("/connections/{conn_id}/export", response_model=JobStartResponse)
-async def run_export(conn_id: str, db: Session = Depends(get_db)) -> JobStartResponse:
+@router.post("/connections/{conn_id}/scan", response_model=JobStartResponse)
+async def run_resource_scan(conn_id: str, db: Session = Depends(get_db)) -> JobStartResponse:
+    """Count exportable resources on a connection (in-memory scan; no disk export)."""
     conn = ConnectionService.get(db, conn_id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 
     svc = get_job_service()
 
-    async def _do_export(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
-        log(f"Starting export from {conn.name} ({conn.url})")
+    async def _do_scan(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
+        log(f"Starting resource scan on {conn.name} ({conn.url})")
+        log("This operation counts resources only; it does not write to exports/.")
         client = ConnectionService.build_source_client(conn)
         async with client:
             from aap_migration.resources import get_exportable_types
 
             resource_types = get_exportable_types()
-            exported: dict[str, int] = {}
+            scanned: dict[str, int] = {}
             for rtype in resource_types:
-                log(f"Exporting {rtype}...")
+                log(f"Scanning {rtype}...")
                 try:
                     resources = await client.get_paginated(f"{rtype}/", page_size=200)
-                    exported[rtype] = len(resources) if resources else 0
-                    log(f"  Exported {exported[rtype]} {rtype}")
+                    scanned[rtype] = len(resources) if resources else 0
+                    log(f"  Found {scanned[rtype]} {rtype}")
                 except Exception as exc:
-                    log(f"  Error exporting {rtype}: {exc}")
-                    exported[rtype] = 0
-        log("Export complete")
-        return {"status": "completed", "exported": exported}
+                    log(f"  Error scanning {rtype}: {exc}")
+                    scanned[rtype] = 0
+        log("Resource scan complete")
+        return {"status": "completed", "scanned": scanned}
 
-    job_id = svc.start_job(f"Export {conn.name}", "export", _do_export)
+    job_id = svc.start_job(f"Scan {conn.name}", "resource-scan", _do_scan)
     return JobStartResponse(job_id=job_id)
 
 

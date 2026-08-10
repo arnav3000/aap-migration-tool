@@ -35,7 +35,7 @@ export const api = {
   listResources: (connId: string, type: string) => request<unknown[]>('GET', `/api/connections/${connId}/resources/${type}`),
 
   runCleanup: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/cleanup`),
-  runExport: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/export`),
+  runResourceScan: (connId: string) => request<{ job_id: string }>('POST', `/api/connections/${connId}/scan`),
   selectiveMigrate: (
     sourceId: string,
     destinationId: string,

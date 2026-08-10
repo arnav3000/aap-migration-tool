@@ -305,7 +305,7 @@ class WorkflowImporter(ResourceImporter):
             )
 
             # Create node importer and import nodes
-            # WorkflowNodeImporter is defined in this same file
+            # WorkflowNodeImporter lives in workflow_nodes.py
             node_importer = WorkflowNodeImporter(
                 client=self.client,
                 state=self.state,

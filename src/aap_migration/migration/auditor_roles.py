@@ -11,8 +11,9 @@ bool (True/False). The gate uses ``is True`` deliberately — non-bool truthy
 values (strings, ints) are skipped by design to avoid false positives.
 
 Used by:
-  - export_import.py (automatic post-phase pass after user import)
   - tools/remediate_auditor_roles.py (standalone for already-migrated envs)
+
+Not yet wired into the main export/import pipeline.
 """
 
 from __future__ import annotations

@@ -95,13 +95,13 @@ export function Operations() {
 
   useEffect(() => { loadConnections(); }, [loadConnections]);
 
-  const handleOperation = async (id: string, op: 'cleanup' | 'export') => {
+  const handleOperation = async (id: string, op: 'cleanup' | 'scan') => {
     setError(null);
     try {
       let result: { job_id: string };
       switch (op) {
         case 'cleanup': result = await api.runCleanup(id); break;
-        case 'export': result = await api.runExport(id); break;
+        case 'scan': result = await api.runResourceScan(id); break;
       }
       const conn = connections.find(c => c.id === id);
       setActiveJobs(prev => [...prev, {
@@ -364,7 +364,13 @@ export function Operations() {
                 <Button variant="secondary" onClick={() => navigate(`/browse?conn=${selected.id}`)}>Browse</Button>
               </FlexItem>
               <FlexItem>
-                <Button variant="secondary" onClick={() => handleOperation(selected.id, 'export')}>Export</Button>
+                <Button
+                  variant="secondary"
+                  title="Count exportable resources on this connection (does not write to disk)"
+                  onClick={() => handleOperation(selected.id, 'scan')}
+                >
+                  Scan Resources
+                </Button>
               </FlexItem>
               <FlexItem>
                 <Button variant="danger" onClick={() => {
