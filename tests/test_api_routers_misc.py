@@ -8,8 +8,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from aap_migration.api.routers import analysis, jobs, resources, sizing
-from aap_migration.api.schemas import AnalysisRunRequest
+from aap_migration.api.routers import analysis, jobs, resources, settings, sizing
+from aap_migration.api.schemas import AnalysisRunRequest, ConcurrencySettingUpdate
 from aap_migration.resources import RESOURCE_REGISTRY
 
 
@@ -404,3 +404,53 @@ async def test_analysis_router_run_and_exports(monkeypatch: pytest.MonkeyPatch) 
     svc.jobs["pending"] = pending_job
     with pytest.raises(HTTPException, match="Analysis not yet complete"):
         analysis.export_analysis_json("pending")
+
+
+class FakeSettingQuery:
+    def __init__(self, row=None) -> None:
+        self.row = row
+        self.added = []
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        return self.row
+
+
+class FakeSettingsSession:
+    def __init__(self, row=None) -> None:
+        self.row = row
+        self.query_obj = FakeSettingQuery(row)
+        self.committed = False
+
+    def query(self, model):
+        return self.query_obj
+
+    def add(self, obj):
+        self.query_obj.added.append(obj)
+
+    def commit(self) -> None:
+        self.committed = True
+
+
+def test_settings_concurrency_get_default_and_update() -> None:
+    default = settings.get_concurrency(db=FakeSettingsSession())
+    assert default.max_concurrent == 15
+
+    existing = SimpleNamespace(key="max_concurrent", value="8")
+    updated = settings.update_concurrency(
+        ConcurrencySettingUpdate(max_concurrent=12),
+        db=FakeSettingsSession(existing),
+    )
+    assert updated.max_concurrent == 12
+    assert existing.value == "12"
+
+    session = FakeSettingsSession()
+    created = settings.update_concurrency(
+        ConcurrencySettingUpdate(max_concurrent=20),
+        db=session,
+    )
+    assert created.max_concurrent == 20
+    assert session.query_obj.added[0].value == "20"
+    assert session.committed is True

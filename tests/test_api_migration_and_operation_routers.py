@@ -361,6 +361,49 @@ async def test_operations_router_cleanup_and_scan(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_operations_scan_records_per_type_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    svc = FakeJobService()
+    conn = SimpleNamespace(id="conn-1", name="Source", url="https://source.example.com")
+    monkeypatch.setattr(
+        operations.ConnectionService,
+        "get",
+        lambda db, conn_id: conn if conn_id == "conn-1" else None,
+    )
+    monkeypatch.setattr(operations, "get_job_service", lambda: svc)
+
+    class FakeSourceClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get_paginated(self, endpoint, page_size=200):
+            if endpoint == "organizations/":
+                return [{"id": 1}]
+            if endpoint == "teams/":
+                raise RuntimeError("teams unavailable")
+            return []
+
+    monkeypatch.setattr(
+        operations.ConnectionService, "build_source_client", lambda conn: FakeSourceClient()
+    )
+    monkeypatch.setattr(
+        "aap_migration.resources.get_exportable_types", lambda: ["organizations", "teams"]
+    )
+
+    await operations.run_resource_scan("conn-1", db=None)
+    _, job_type, scan_callback = svc.started[0]
+    assert job_type == "resource-scan"
+    scan_logs: list[str] = []
+    scan_result = await scan_callback(FakeJob(), scan_logs.append)
+    assert scan_result["scanned"]["organizations"] == 1
+    assert scan_result["scanned"]["teams"] == 0
+    assert any("does not write to exports/" in line for line in scan_logs)
+    assert any("Error scanning teams" in line for line in scan_logs)
+
+
+@pytest.mark.asyncio
 async def test_resolve_jt_dependencies_includes_inventory_sources() -> None:
     logs: list[str] = []
 

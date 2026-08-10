@@ -77,6 +77,29 @@ async def test_preflight_gateway_access_raises_on_auth_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_preflight_gateway_access_raises_on_unauthorized() -> None:
+    class FakeResponse:
+        status_code = 401
+
+    class FakeHTTPClient:
+        async def get(self, endpoint, params=None, headers=None):
+            return FakeResponse()
+
+    client = type(
+        "Client",
+        (),
+        {
+            "base_url": "https://aap.example.com/api/controller/v2",
+            "token": "secret",
+            "client": FakeHTTPClient(),
+        },
+    )()
+
+    with pytest.raises(RuntimeError, match="Gateway API returned 401"):
+        await preflight_gateway_access(client)
+
+
+@pytest.mark.asyncio
 async def test_assign_auditor_roles_verifies_controller_sync() -> None:
     class FakeGWResponse:
         status_code = 201
