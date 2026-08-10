@@ -1,6 +1,6 @@
 import pytest
 
-from aap_migration.client.exceptions import APIError
+from aap_migration.client.exceptions import APIError, DependencyError
 from aap_migration.config import PerformanceConfig
 from aap_migration.migration.importer import (
     ApplicationImporter,
@@ -187,17 +187,16 @@ async def test_inventory_group_inventory_source_and_schedule_importers(monkeypat
     assert resolved["enabled"] is False
     assert "_ujt_resource_type" not in resolved
 
-    unresolved = await schedule_importer._resolve_dependencies(
-        "schedules",
-        {
-            "id": 92,
-            "enabled": False,
-            "unified_job_template": 99,
-            "_ujt_resource_type": "job_templates",
-        },
-    )
-    assert unresolved["unified_job_template"] == 99
-    assert unresolved["enabled"] is False
+    with pytest.raises(DependencyError, match="Could not resolve job_templates ID 99"):
+        await schedule_importer._resolve_dependencies(
+            "schedules",
+            {
+                "id": 92,
+                "enabled": False,
+                "unified_job_template": 99,
+                "_ujt_resource_type": "job_templates",
+            },
+        )
 
     source_client = FakeTargetClient()
     source_client.post_result = {"id": 801, "name": "schedule-created"}

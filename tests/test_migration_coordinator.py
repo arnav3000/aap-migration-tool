@@ -148,7 +148,9 @@ async def test_coordinator_precheck_summary_schema_and_resume(tmp_path, monkeypa
             assert result is fake_result
             return "# Credential Report\n"
 
-    monkeypatch.setattr("aap_migration.migration.coordinator.CredentialComparator", FakeComparator)
+    monkeypatch.setattr(
+        "aap_migration.migration.pre_migration_checks.CredentialComparator", FakeComparator
+    )
 
     report_path = tmp_path / "reports" / "credential.md"
     summary = await coordinator.compare_and_verify_credentials(str(report_path))
@@ -198,6 +200,10 @@ async def test_coordinator_precheck_summary_schema_and_resume(tmp_path, monkeypa
         fetch_schema=fake_fetch_schema,
         compare_schemas=fake_compare,
     )
+    monkeypatch.setattr(
+        "aap_migration.migration.pre_migration_checks.SchemaComparator",
+        lambda: coordinator.schema_comparator,
+    )
     comparisons = await coordinator.compare_schemas_before_migration(["users", "teams"])
     assert list(comparisons.keys()) == ["users"]
     assert coordinator.has_critical_schema_issues() is True
@@ -211,7 +217,7 @@ async def test_coordinator_precheck_summary_schema_and_resume(tmp_path, monkeypa
 
     monkeypatch.setattr(coordinator, "migrate_all", fake_migrate_all)
     assert await coordinator.resume_from_checkpoint(4) == {"status": "ok"}
-    assert resumed["only_phases"][0] == "credential_input_sources"
+    assert resumed["only_phases"][0] == "credentials"
 
 
 @pytest.mark.asyncio
@@ -224,6 +230,8 @@ async def test_coordinator_execute_phase_and_regular_etl_pipeline(monkeypatch):
     )
 
     class FakeExporter:
+        stats: dict[str, object] = {}
+
         async def export(self):
             for item in [
                 {"id": 1, "name": "good"},
@@ -261,16 +269,23 @@ async def test_coordinator_execute_phase_and_regular_etl_pipeline(monkeypatch):
                 return False
             return False
 
+    async def fake_bootstrap(*args, **kwargs):
+        return type("Bootstrap", (), {"mapped": 0, "unmatched": 0})()
+
     monkeypatch.setattr(
-        "aap_migration.migration.coordinator.create_exporter",
+        "aap_migration.migration.pipeline.bootstrap_resource_type",
+        fake_bootstrap,
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.pipeline.create_exporter",
         lambda **kwargs: FakeExporter(),
     )
     monkeypatch.setattr(
-        "aap_migration.migration.coordinator.create_transformer",
+        "aap_migration.migration.pipeline.create_transformer",
         lambda **kwargs: FakeTransformer(),
     )
     monkeypatch.setattr(
-        "aap_migration.migration.coordinator.create_importer",
+        "aap_migration.migration.pipeline.create_importer",
         lambda **kwargs: FakeImporter(),
     )
 

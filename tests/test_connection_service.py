@@ -30,7 +30,7 @@ def test_create_and_update_encrypt_tokens(db_session) -> None:
     assert updated.timeout == 90
 
 
-def test_build_instance_config_decrypts_legacy_plaintext_token(db_session) -> None:
+def test_build_instance_config_rejects_legacy_plaintext_token(db_session) -> None:
     conn = Connection(
         name="Legacy",
         url="https://target.example.com",
@@ -43,12 +43,8 @@ def test_build_instance_config_decrypts_legacy_plaintext_token(db_session) -> No
     db_session.add(conn)
     db_session.commit()
 
-    config = ConnectionService.build_instance_config(conn)
-
-    assert config.url == "https://target.example.com"
-    assert config.token == "legacy-token"
-    assert config.verify_ssl is False
-    assert config.timeout == 60
+    with pytest.raises(ValueError, match="not encrypted"):
+        ConnectionService.build_instance_config(conn)
 
 
 def test_auth_scheme_distinguishes_awx_from_aap(db_session) -> None:
@@ -154,4 +150,4 @@ async def test_test_connection_uses_target_client_and_returns_error(
     ok, error = await ConnectionService.test_connection(conn)
 
     assert ok is False
-    assert error == "Bearer:me/:boom"
+    assert error == ("Connection test failed. Check URL, token, and network connectivity.")

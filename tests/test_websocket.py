@@ -4,8 +4,9 @@ import asyncio
 
 import pytest
 from fastapi import WebSocketDisconnect
+from starlette.testclient import TestClient
 
-from aap_migration.api import websocket
+from aap_migration.api import dependencies, websocket
 from aap_migration.api.services.job_service import Job, JobService
 
 
@@ -102,3 +103,16 @@ async def test_job_log_stream_unsubscribes_on_disconnect(monkeypatch: pytest.Mon
     await task
 
     assert job._subscribers == []
+
+
+def test_websocket_connects_and_streams_logs_for_valid_job_id(client: TestClient) -> None:
+    """WebSocket streams backlog logs for a valid job_id. Auth is out of scope."""
+    state = dependencies.get_app_state()
+    job = Job("ws-http-job", "HTTP Stream", "demo")
+    job.log_lines = ["alpha", "beta"]
+    job.status = "completed"
+    state.job_service._jobs[job.id] = job
+
+    with client.websocket_connect(f"/ws/jobs/{job.id}/logs") as websocket:
+        assert websocket.receive_text() == "alpha"
+        assert websocket.receive_text() == "beta"

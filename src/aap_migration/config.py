@@ -571,6 +571,10 @@ class TransformConfig(BaseModel):
     )
 
 
+def _default_ignored_endpoints() -> dict[str, list[str]]:
+    return {"common": [], "source": [], "target": []}
+
+
 class MigrationConfig(BaseSettings):
     """Main migration configuration."""
 
@@ -628,7 +632,18 @@ class MigrationConfig(BaseSettings):
     # Migration options
     dry_run: bool = Field(default=False, description="Dry run mode (no actual changes)")
     resume: bool = Field(default=False, description="Resume from last checkpoint")
-    skip_validation: bool = Field(default=False, description="Skip validation steps")
+    skip_validation: bool = Field(
+        default=False,
+        description=(
+            "Continue migration when a phase fails instead of stopping. "
+            "Deprecated name; use continue_on_phase_error."
+        ),
+    )
+
+    @property
+    def continue_on_phase_error(self) -> bool:
+        """When True, keep running after a phase failure instead of aborting."""
+        return self.skip_validation
 
     # Resource Mappings (loaded from external file)
     resource_mappings: dict[str, dict[str, str]] = Field(
@@ -637,7 +652,7 @@ class MigrationConfig(BaseSettings):
 
     # Ignored Endpoints (loaded from external file)
     ignored_endpoints: dict[str, list[str]] = Field(
-        default_factory=lambda: {"common": [], "source": [], "target": []},
+        default_factory=_default_ignored_endpoints,
         description="Endpoints to ignore grouped by scope (common, source, target)",
     )
 

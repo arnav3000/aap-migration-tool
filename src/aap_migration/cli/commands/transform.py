@@ -857,9 +857,9 @@ def transform(
                 "total_failed": total_failed,
                 "records_per_file": metadata.get("records_per_file", 1000),
                 "resource_types": transform_stats,
-                "schema_comparison_file": str(schema_file)
-                if schema_file and Path(schema_file).exists()
-                else None,
+                "schema_comparison_file": (
+                    str(schema_file) if schema_file and Path(schema_file).exists() else None
+                ),
             }
 
             with open(output_dir / "metadata.json", "w") as f:

@@ -393,7 +393,7 @@ async def test_analysis_router_run_and_exports(monkeypatch: pytest.MonkeyPatch) 
     completed_job._html_report = "<html>report</html>"
     svc.jobs["analysis-job"] = completed_job
     data = analysis.get_analysis_result("analysis-job")
-    assert data["data"]["migration_phases"] == [{"orgs": ["A"]}]
+    assert data["result"]["migration_phases"] == [{"orgs": ["A"]}]
 
     json_response = analysis.export_analysis_json("analysis-job")
     assert json.loads(json_response.body.decode())["answer"] == 42

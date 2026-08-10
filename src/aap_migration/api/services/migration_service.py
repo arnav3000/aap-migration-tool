@@ -1,3 +1,9 @@
+"""Legacy migration job service — used by direct adapter tests.
+
+Live API routers delegate to ``migration.runner`` / ``migration.pipeline``
+via job_service; prefer those paths for new endpoints.
+"""
+
 import asyncio
 import logging
 import time
@@ -270,7 +276,7 @@ class MigrationService:
             "token": decrypt_token(conn.token) if conn.token else None,
             "verify_ssl": conn.verify_ssl,
             "type": conn.type,
-            "api_prefix": conn.api_prefix,
+            "api_prefix": getattr(conn, "api_prefix", None),
         }
 
     def start_preview(self, source: Connection, dest: Connection) -> str:

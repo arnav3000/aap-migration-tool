@@ -439,14 +439,23 @@ class CheckpointManager:
         percentage = (completed / total * 100) if total > 0 else 0
 
         # Get full checkpoint details including checkpoint_data
-        restored = self.restore_checkpoint(latest["id"], validate_integrity=False)
+        try:
+            restored = self.restore_checkpoint(latest["id"], validate_integrity=True)
+            checkpoint_data = restored["checkpoint_data"]
+        except CheckpointError as exc:
+            logger.warning(
+                "Checkpoint integrity validation failed during resume info",
+                checkpoint_id=latest["id"],
+                error=str(exc),
+            )
+            checkpoint_data = latest.get("checkpoint_data")
 
         return {
             "checkpoint_id": latest["id"],
             "checkpoint_name": latest["checkpoint_name"],
             "phase": latest["phase"],
             "progress_stats": progress_stats,
-            "checkpoint_data": restored["checkpoint_data"],
+            "checkpoint_data": checkpoint_data,
             "completed": completed,
             "total": total,
             "percentage": percentage,

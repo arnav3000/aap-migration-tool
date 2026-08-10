@@ -435,9 +435,16 @@ async def test_analysis_service_platform_adapter_and_engine_adapter(monkeypatch)
             return FakeResponse({"count": 1, "results": [{"id": 10}]})
         raise RuntimeError("boom")
 
+    from aap_migration.api.crypto import encrypt_token
+
     monkeypatch.setattr(platform_module.httpx, "get", fake_httpx_get)
     platform_conn = SimpleNamespace(
-        url="https://ctrl.example.com", token="tok", verify_ssl=True, type="awx", api_prefix=""
+        url="https://ctrl.example.com",
+        token=encrypt_token("tok"),
+        verify_ssl=True,
+        type="awx",
+        api_prefix="",
+        timeout=30,
     )
     adapter = platform_module.PlatformAdapter(platform_conn)
     assert adapter.discover_resource_types() == [
@@ -451,17 +458,23 @@ async def test_analysis_service_platform_adapter_and_engine_adapter(monkeypatch)
         "page_size": 25,
     }
     assert adapter.list_resources("inventories", 1, 25, "bar")["error"] == "boom"
-    assert adapter_responses[0][1]["Authorization"] == "Bearer tok"
+    assert adapter_responses[0][1]["Authorization"] == "Token tok"
 
     awx_conn = SimpleNamespace(
-        url="https://awx.example.com/", token="secret", verify_ssl=False, type="awx", api_prefix=""
+        url="https://awx.example.com/",
+        token=encrypt_token("secret"),
+        verify_ssl=False,
+        type="awx",
+        api_prefix="",
+        timeout=30,
     )
     controller_conn = SimpleNamespace(
         url="https://ctrl.example.com/",
-        token="secret",
+        token=encrypt_token("secret"),
         verify_ssl=True,
         type="controller",
         api_prefix="",
+        timeout=30,
     )
     awx_cfg = connection_to_aap_config(awx_conn)
     controller_cfg = connection_to_aap_config(controller_conn)

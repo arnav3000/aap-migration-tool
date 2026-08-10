@@ -75,16 +75,70 @@ async def test_cancel_job_marks_job_cancelled(session_factory) -> None:
     assert job.error == "Job was cancelled"
 
 
-def test_add_log_ignores_missing_jobs_and_queue_full() -> None:
+@pytest.mark.asyncio
+async def test_start_job_marks_completed_with_errors(session_factory) -> None:
+    service = JobService(db_session_factory=session_factory)
+
+    async def partial_failure(job, log):
+        log("done with errors")
+        return {"total_failed": 2, "total_created": 5}
+
+    job_id = service.start_job("Partial Job", "demo", partial_failure)
+    job = service.get_job(job_id)
+    assert job is not None and job._task is not None
+
+    await job._task
+
+    assert job.status == "completed_with_errors"
+    assert job.result == {"total_failed": 2, "total_created": 5}
+
+
+@pytest.mark.asyncio
+async def test_start_job_marks_failed_when_phase_fails(session_factory) -> None:
+    service = JobService(db_session_factory=session_factory)
+
+    async def phase_failure(job, log):
+        return {"phases_failed": 1, "total_failed": 0}
+
+    job_id = service.start_job("Phase Fail Job", "demo", phase_failure)
+    job = service.get_job(job_id)
+    assert job is not None and job._task is not None
+
+    await job._task
+
+    assert job.status == "failed"
+
+
+def test_add_log_drops_oldest_on_full_queue() -> None:
     service = JobService()
     job = Job("job-1", "Queue Job", "demo")
     service._jobs[job.id] = job
 
-    class FullQueue:
-        def put_nowait(self, line: str) -> None:
-            raise asyncio.QueueFull
+    class BoundedQueue(asyncio.Queue):
+        def __init__(self) -> None:
+            super().__init__(maxsize=1)
+            self.dropped: list[str] = []
 
-    job._subscribers.append(FullQueue())
+        def get_nowait(self) -> str:
+            dropped = super().get_nowait()
+            self.dropped.append(dropped)
+            return dropped
+
+    queue = BoundedQueue()
+    queue.put_nowait("old-line")
+    job._subscribers.append(queue)
+
+    service.add_log(job.id, "new-line")
+
+    assert job.log_lines == ["new-line"]
+    assert queue.dropped == ["old-line"]
+    assert list(queue._queue) == ["new-line"]  # type: ignore[attr-defined]
+
+
+def test_add_log_ignores_missing_jobs() -> None:
+    service = JobService()
+    job = Job("job-1", "Queue Job", "demo")
+    service._jobs[job.id] = job
 
     service.add_log("missing", "ignored")
     service.add_log(job.id, "line-1")

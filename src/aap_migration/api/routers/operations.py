@@ -190,23 +190,7 @@ def _clear_selective_resource_state(
     source_id: int,
 ) -> None:
     """Drop stale progress/mapping so a missing target resource can be re-imported."""
-    from aap_migration.migration.database import get_session
-    from aap_migration.migration.models import IDMapping, MigrationProgress
-
-    with state._lock:
-        with get_session(state.database_url) as session:
-            session.query(MigrationProgress).filter(
-                MigrationProgress.resource_type == resource_type,
-                MigrationProgress.source_id == source_id,
-            ).delete(synchronize_session=False)
-            session.query(IDMapping).filter(
-                IDMapping.resource_type == resource_type,
-                IDMapping.source_id == source_id,
-            ).update(
-                {"target_id": None, "target_name": None},
-                synchronize_session=False,
-            )
-            session.commit()
+    state.reset_resources(resource_type, [source_id])
 
 
 def _maybe_apply_name_prefix(
@@ -732,8 +716,6 @@ async def selective_migrate(
             num_phases = len(migration_order)
 
             if force_update:
-                from aap_migration.migration.models import IDMapping, MigrationProgress
-
                 all_force_types = list(deps.keys())
                 if jt_data or deps.get("job_templates"):
                     all_force_types.append("job_templates")
@@ -742,48 +724,25 @@ async def selective_migrate(
                 cleared_progress = 0
                 reset_mappings = 0
                 try:
-                    with state._lock:
-                        from aap_migration.migration.database import get_session
-
-                        with get_session(state.database_url) as session:
-                            for rt in all_force_types:
-                                if rt == "job_templates":
-                                    jt_source_ids: list[int] = list(
-                                        deps.get("job_templates", set())
-                                    )
-                                    for jt in jt_data:
-                                        jt_id = jt.get("id")
-                                        if jt_id is not None:
-                                            jt_source_ids.append(int(jt_id))
-                                    source_id_list = list(set(jt_source_ids))
-                                elif rt == "workflow_job_templates":
-                                    source_id_list = [
-                                        int(wf["id"]) for wf in wf_data if wf.get("id") is not None
-                                    ]
-                                else:
-                                    source_id_list = list(deps.get(rt, set()))
-                                if not source_id_list:
-                                    continue
-                                cleared_progress += (
-                                    session.query(MigrationProgress)
-                                    .filter(
-                                        MigrationProgress.resource_type == rt,
-                                        MigrationProgress.source_id.in_(source_id_list),
-                                    )
-                                    .delete(synchronize_session=False)
-                                )
-                                reset_mappings += (
-                                    session.query(IDMapping)
-                                    .filter(
-                                        IDMapping.resource_type == rt,
-                                        IDMapping.source_id.in_(source_id_list),
-                                    )
-                                    .update(
-                                        {"target_id": None, "target_name": None},
-                                        synchronize_session=False,
-                                    )
-                                )
-                            session.commit()
+                    for rt in all_force_types:
+                        if rt == "job_templates":
+                            jt_source_ids: list[int] = list(deps.get("job_templates", set()))
+                            for jt in jt_data:
+                                jt_id = jt.get("id")
+                                if jt_id is not None:
+                                    jt_source_ids.append(int(jt_id))
+                            source_id_list = list(set(jt_source_ids))
+                        elif rt == "workflow_job_templates":
+                            source_id_list = [
+                                int(wf["id"]) for wf in wf_data if wf.get("id") is not None
+                            ]
+                        else:
+                            source_id_list = list(deps.get(rt, set()))
+                        if not source_id_list:
+                            continue
+                        cleared, reset = state.reset_resources(rt, source_id_list)
+                        cleared_progress += cleared
+                        reset_mappings += reset
                     log(
                         "Force mode: cleared "
                         f"{cleared_progress} progress record(s), "

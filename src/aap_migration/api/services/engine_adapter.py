@@ -1,16 +1,19 @@
+from aap_migration.api.crypto import decrypt_token
 from aap_migration.api.models import Connection
 from aap_migration.config import AAPInstanceConfig, MigrationConfig, StateConfig
 
 
 def connection_to_aap_config(conn: Connection) -> AAPInstanceConfig:
-    api_prefix = conn.api_prefix or ("/api/v2" if conn.type == "awx" else "/api/controller/v2")
+    api_prefix = getattr(conn, "api_prefix", None) or (
+        "/api/v2" if conn.type == "awx" else "/api/controller/v2"
+    )
     url = conn.url.rstrip("/") + api_prefix
 
     return AAPInstanceConfig(
         url=url,
-        token=conn.token,
+        token=decrypt_token(conn.token),
         verify_ssl=conn.verify_ssl,
-        timeout=30,
+        timeout=conn.timeout,
     )
 
 

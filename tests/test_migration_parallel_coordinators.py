@@ -2,9 +2,11 @@ import json
 
 import pytest
 
-from aap_migration.config import ExportConfig, PerformanceConfig
+from aap_migration.client.exceptions import ExportStoppedEarlyError
+from aap_migration.config import ExportConfig, PerformanceConfig, StateConfig
 from aap_migration.migration.parallel_exporter import ParallelExportCoordinator
 from aap_migration.migration.parallel_transformer import ParallelTransformCoordinator
+from aap_migration.migration.state import MigrationState
 from aap_migration.migration.transformer import SkipResourceError
 
 
@@ -22,6 +24,9 @@ class FakeMigrationState:
 
     def has_source_mapping(self, resource_type, source_id):
         return (resource_type, source_id) in self.source_mappings
+
+    def get_source_mapping_ids(self, resource_type):
+        return {source_id for rtype, source_id in self.source_mappings if rtype == resource_type}
 
     def mark_transform_skipped(
         self,
@@ -160,7 +165,12 @@ async def test_parallel_export_coordinator_collects_parallel_results(tmp_path, m
 
     async def fake_export_resource_type(resource_type, resume=False, progress_callback=None):
         if resource_type == "broken":
-            raise RuntimeError("boom")
+            return {
+                "resource_type": resource_type,
+                "exported": 0,
+                "failed": 1,
+                "error": "boom",
+            }
         return {
             "resource_type": resource_type,
             "exported": 2,
@@ -171,10 +181,12 @@ async def test_parallel_export_coordinator_collects_parallel_results(tmp_path, m
 
     monkeypatch.setattr(coordinator, "export_resource_type", fake_export_resource_type)
 
-    results = await coordinator.export_all_parallel(["ok", "skipped", "broken"], resume=True)
+    with pytest.raises(ExportStoppedEarlyError, match="broken"):
+        await coordinator.export_all_parallel(["ok", "skipped", "broken"], resume=True)
+    results = coordinator.get_results()
     assert results["ok"]["exported"] == 2
     assert results["skipped"]["skip_reason"] == "No exporter implemented"
-    assert coordinator.get_results() == results
+    assert results == coordinator.get_results()
 
 
 @pytest.mark.asyncio
@@ -292,3 +304,67 @@ async def test_parallel_transform_coordinator_collects_results_and_missing_input
     monkeypatch.setattr(coordinator, "transform_resource_type", fake_transform_resource_type)
     results = await coordinator.transform_all_parallel(["ok", "broken"])
     assert results == {"ok": {"resource_type": "ok", "count": 1}}
+
+
+@pytest.mark.asyncio
+async def test_parallel_export_concurrent_mapping_writes_preserve_all_ids(
+    sqlite_db_url, tmp_path, monkeypatch
+):
+    """Concurrent export types must not lose source ID mappings under the state lock."""
+    state = MigrationState(
+        StateConfig(db_path=sqlite_db_url),
+        migration_id="parallel-export-lock-test",
+    )
+    perf = PerformanceConfig(max_concurrent_types=2, mapping_batch_size=10)
+
+    exporters = {
+        "labels": FakeExporter(
+            [
+                {"id": 1, "name": "label-a"},
+                {"id": 2, "name": "label-b"},
+                {"id": 3, "name": "label-c"},
+            ]
+        ),
+        "users": FakeExporter(
+            [
+                {"id": 10, "username": "alice"},
+                {"id": 11, "username": "bob"},
+            ]
+        ),
+    }
+
+    def fake_create_exporter(resource_type, *args, **kwargs):
+        return exporters[resource_type]
+
+    monkeypatch.setattr(
+        "aap_migration.migration.parallel_exporter.create_exporter",
+        fake_create_exporter,
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.parallel_exporter.get_endpoint",
+        lambda resource_type: f"{resource_type}/",
+    )
+
+    coordinator = ParallelExportCoordinator(
+        source_client=object(),
+        migration_state=state,
+        performance_config=perf,
+        output_dir=tmp_path,
+        records_per_file=10,
+        export_config=ExportConfig(),
+    )
+
+    results = await coordinator.export_all_parallel(["labels", "users"], resume=False)
+
+    assert results["labels"]["exported"] == 3
+    assert results["users"]["exported"] == 2
+
+    expected = {
+        ("labels", 1),
+        ("labels", 2),
+        ("labels", 3),
+        ("users", 10),
+        ("users", 11),
+    }
+    for resource_type, source_id in expected:
+        assert state.has_source_mapping(resource_type, source_id)

@@ -7,7 +7,7 @@ and other common CLI patterns.
 
 import functools
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import click
 
@@ -44,7 +44,8 @@ def pass_context(f: Callable) -> Callable:
         migration_ctx: MigrationContext = click_ctx.obj
         return f(migration_ctx, *args, **kwargs)
 
-    return cast(Callable[..., Any], wrapper)
+    decorated: Callable[..., Any] = wrapper
+    return decorated
 
 
 def handle_errors(f: Callable) -> Callable:

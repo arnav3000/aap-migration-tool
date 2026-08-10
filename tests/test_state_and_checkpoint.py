@@ -30,7 +30,7 @@ def test_migration_state_tracks_progress_and_mappings(tmp_path) -> None:
     assert state.is_migrated("organizations", 10) is False
 
     state.mark_in_progress("organizations", 10, "Default")
-    assert state.is_migrated("organizations", 10) is True
+    assert state.is_migrated("organizations", 10) is False
 
     state.mark_completed(
         "organizations",

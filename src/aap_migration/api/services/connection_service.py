@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy.orm import Session
 
 from aap_migration.api.crypto import decrypt_token, encrypt_token
@@ -9,6 +11,10 @@ from aap_migration.api.models import Connection
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.aap_target_client import AAPTargetClient
 from aap_migration.config import AAPInstanceConfig
+
+logger = logging.getLogger(__name__)
+
+_CONNECTION_TEST_ERROR = "Connection test failed. Check URL, token, and network connectivity."
 
 
 class ConnectionService:
@@ -111,5 +117,9 @@ class ConnectionService:
             async with client:
                 await client.get("me/")
             return True, None
-        except Exception as exc:
-            return False, str(exc)
+        except Exception:
+            logger.exception(
+                "Connection test failed",
+                extra={"connection_url": conn.url, "connection_role": conn.role},
+            )
+            return False, _CONNECTION_TEST_ERROR

@@ -9,6 +9,7 @@ from aap_migration.api import dependencies
 from aap_migration.api.models import JobRecord
 from aap_migration.api.routers import jobs
 from aap_migration.api.services.job_service import Job, JobService
+from aap_migration.migration.models import IDMapping, MigrationProgress
 
 
 def test_connection_crud_routes(client) -> None:
@@ -346,3 +347,66 @@ def test_get_job_credentials_csv_streams_rows(monkeypatch: pytest.MonkeyPatch) -
     )
     assert "Dev AAP,dev_,dev_Vault,HashiCorp Vault,Default,job_template,Deploy" in body
     assert "Dev AAP,dev_,dev_Vault,HashiCorp Vault,Default,project,Website" in body
+
+
+def test_clear_migration_state_clears_seeded_rows_and_returns_counts(
+    client, session_factory
+) -> None:
+    session = session_factory()
+    session.add_all(
+        [
+            MigrationProgress(
+                resource_type="organizations",
+                source_id=1,
+                source_name="Default",
+                status="completed",
+                phase="import",
+            ),
+            MigrationProgress(
+                resource_type="users",
+                source_id=2,
+                source_name="alice",
+                status="pending",
+                phase="import",
+            ),
+            IDMapping(resource_type="organizations", source_id=1, target_id=10),
+            IDMapping(resource_type="users", source_id=2, target_id=20),
+            IDMapping(resource_type="teams", source_id=3, target_id=30),
+        ]
+    )
+    session.commit()
+    session.close()
+
+    response = client.post("/api/migrate/clear-state")
+
+    assert response.status_code == 200
+    assert response.json() == {"cleared_progress": 2, "deleted_mappings": 3}
+
+    check = session_factory()
+    try:
+        assert check.query(MigrationProgress).count() == 0
+        assert check.query(IDMapping).count() == 0
+    finally:
+        check.close()
+
+
+def test_persist_job_logs_and_marks_degraded_on_failure(session_factory) -> None:
+    service = JobService(db_session_factory=session_factory)
+    job = Job("persist-fail", "Fail", "demo")
+    job.status = "completed"
+
+    original_factory = session_factory
+
+    def broken_factory():
+        session = original_factory()
+
+        def fail_commit() -> None:
+            raise RuntimeError("disk full")
+
+        session.commit = fail_commit  # type: ignore[method-assign]
+        return session
+
+    service._db_session_factory = broken_factory
+    service.persist_job(job)
+
+    assert job.persist_degraded is True

@@ -490,7 +490,7 @@ async def test_credential_pause_reviews_each_source_separately(
             for c in created_creds
         ]
 
-    monkeypatch.setattr(planner, "_build_credential_review", fake_review)
+    monkeypatch.setattr("aap_migration.migration.runner._build_credential_review", fake_review)
 
     created_creds = [
         {

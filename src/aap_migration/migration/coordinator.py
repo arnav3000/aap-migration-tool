@@ -10,17 +10,25 @@ from typing import Any, cast
 
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.aap_target_client import AAPTargetClient
+from aap_migration.client.exceptions import MigrationError
 from aap_migration.config import MigrationConfig
 from aap_migration.migration.checkpoint import CheckpointManager
-from aap_migration.migration.credential_comparator import CredentialComparator
-from aap_migration.migration.exporter import create_exporter
-from aap_migration.migration.importer import create_importer
+from aap_migration.migration.phases import MIGRATION_PHASES as COORDINATOR_PHASES
+from aap_migration.migration.pipeline import run_coordinator_resource_etl
+from aap_migration.migration.pre_migration_checks import (
+    compare_and_verify_credentials as run_credential_comparison,
+)
+from aap_migration.migration.pre_migration_checks import (
+    compare_schemas_before_migration as run_schema_comparison,
+)
+from aap_migration.migration.pre_migration_checks import (
+    has_critical_schema_issues,
+)
 from aap_migration.migration.state import MigrationState
-from aap_migration.migration.transformer import SkipResourceError, create_transformer
+from aap_migration.migration.transformer import SkipResourceError
 from aap_migration.reporting.live_progress import MigrationProgressDisplay
 from aap_migration.reporting.progress import ProgressTracker
 from aap_migration.reporting.report import generate_migration_report
-from aap_migration.schema.comparator import SchemaComparator
 from aap_migration.schema.models import ComparisonResult
 from aap_migration.utils.logging import get_logger
 
@@ -34,108 +42,8 @@ class MigrationCoordinator:
     managing dependencies, checkpoints, and error recovery.
     """
 
-    # Migration phases in dependency order
-    # IMPORTANT: Credentials MUST be migrated before other resources (per requirement)
-    MIGRATION_PHASES = [
-        {
-            "name": "organizations",
-            "description": "Organizations (foundation for most resources)",
-            "resource_types": ["organizations"],
-            "batch_size": 50,
-        },
-        {
-            "name": "credentials",
-            "description": "Credential Types and Credentials (REQUIRED BEFORE OTHER RESOURCES)",
-            "resource_types": ["credential_types", "credentials"],
-            "batch_size": 50,
-            "critical": True,  # Mark as critical - must complete before other phases
-        },
-        {
-            "name": "credential_input_sources",
-            "description": "Credential Input Sources",
-            "resource_types": ["credential_input_sources"],
-            "batch_size": 100,
-        },
-        {
-            "name": "identity",
-            "description": "Labels, Users, and Teams",
-            "resource_types": ["labels", "users", "teams"],
-            "batch_size": 100,
-        },
-        {
-            "name": "execution_environments",
-            "description": "Execution Environments",
-            "resource_types": ["execution_environments"],
-            "batch_size": 100,
-        },
-        {
-            "name": "inventories",
-            "description": "Inventories (80,000+ expected)",
-            "resource_types": ["inventories"],
-            "batch_size": 100,
-        },
-        {
-            "name": "hosts",
-            "description": "Hosts (using bulk operations)",
-            "resource_types": ["hosts"],
-            "batch_size": 200,
-            "use_bulk": True,
-        },
-        {
-            "name": "instances",
-            "description": "Instances (AAP Controller Nodes)",
-            "resource_types": ["instances"],
-            "batch_size": 50,
-        },
-        {
-            "name": "instance_groups",
-            "description": "Instance Groups",
-            "resource_types": ["instance_groups"],
-            "batch_size": 50,
-        },
-        {
-            "name": "projects",
-            "description": "Projects",
-            "resource_types": ["projects"],
-            "batch_size": 100,
-        },
-        {
-            "name": "inventory_config",
-            "description": "Inventory Sources and Groups",
-            "resource_types": ["inventory_sources", "inventory_groups"],
-            "batch_size": 100,
-        },
-        {
-            "name": "notification_templates",
-            "description": "Notification Templates",
-            "resource_types": ["notification_templates"],
-            "batch_size": 100,
-        },
-        {
-            "name": "job_templates",
-            "description": "Job Templates",
-            "resource_types": ["job_templates"],
-            "batch_size": 100,
-        },
-        {
-            "name": "workflows",
-            "description": "Workflow Job Templates",
-            "resource_types": ["workflow_job_templates"],
-            "batch_size": 50,
-        },
-        {
-            "name": "system_job_templates",
-            "description": "System Job Templates",
-            "resource_types": ["system_job_templates"],
-            "batch_size": 50,
-        },
-        {
-            "name": "schedules",
-            "description": "Schedules",
-            "resource_types": ["schedules"],
-            "batch_size": 100,
-        },
-    ]
+    # Migration phases in dependency order (aligned with IMPORTER_REGISTRY)
+    MIGRATION_PHASES = COORDINATOR_PHASES
 
     def __init__(
         self,
@@ -167,9 +75,8 @@ class MigrationCoordinator:
         self.enable_progress = enable_progress
         self.show_stats = show_stats
 
-        # Schema comparison results (populated by compare_schemas_before_migration)
+        # Schema comparison results (optional pre-migration check)
         self.schema_comparisons: dict[str, ComparisonResult] = {}
-        self.schema_comparator = SchemaComparator()
 
         self.metrics: dict[str, Any] = {
             "start_time": None,
@@ -212,59 +119,12 @@ class MigrationCoordinator:
             - missing_credentials: List of missing credential details
             - report: Markdown report string
         """
-        logger.info("credential_comparison_starting")
-
-        comparator = CredentialComparator(
-            source_client=self.source_client,
-            target_client=self.target_client,
-            state=self.state,
+        return await run_credential_comparison(
+            self.source_client,
+            self.target_client,
+            self.state,
+            report_path=report_path,
         )
-
-        # Perform comparison
-        result = await comparator.compare_credentials()
-
-        # Generate report
-        report = comparator.generate_report(result)
-
-        # Save report if path provided
-        if report_path:
-            try:
-                import os
-
-                os.makedirs(os.path.dirname(report_path), exist_ok=True)
-                with open(report_path, "w") as f:
-                    f.write(report)
-                logger.info("credential_comparison_report_saved", path=report_path)
-            except Exception as e:
-                logger.error("credential_report_save_failed", path=report_path, error=str(e))
-
-        # Return summary
-        summary = {
-            "total_source": result.total_source,
-            "total_target": result.total_target,
-            "matching_count": result.matching_credentials,
-            "missing_count": len(result.missing_in_target),
-            "managed_skipped": result.managed_credentials_skipped,
-            "missing_credentials": [
-                {
-                    "source_id": diff.source_id,
-                    "name": diff.name,
-                    "type": diff.credential_type_name,
-                    "organization": diff.organization_name,
-                }
-                for diff in result.missing_in_target
-            ],
-            "report": report,
-        }
-
-        logger.info(
-            "credential_comparison_completed",
-            total_source=result.total_source,
-            total_target=result.total_target,
-            missing=len(result.missing_in_target),
-        )
-
-        return summary
 
     async def migrate_all(
         self,
@@ -353,8 +213,12 @@ class MigrationCoordinator:
                 logger.error(
                     "credential_comparison_failed",
                     error=str(e),
-                    message="Failed to compare credentials. Continuing with migration.",
+                    message="Credential comparison failed; aborting migration.",
                 )
+                raise MigrationError(
+                    "Credential comparison failed. Fix connectivity/permissions "
+                    "or skip the credentials phase before importing."
+                ) from e
 
         try:
             # Use progress display as context manager
@@ -416,8 +280,8 @@ class MigrationCoordinator:
                             }
                         )
 
-                        # Stop on first failure unless configured otherwise
-                        if not self.config.skip_validation:  # Using this as "continue on error"
+                        # Stop on first failure unless configured to continue
+                        if not self.config.continue_on_phase_error:
                             raise
 
         finally:
@@ -535,8 +399,8 @@ class MigrationCoordinator:
         self.metrics["total_resources_failed"] += phase_stats["failed"]
         self.metrics["total_resources_skipped"] += phase_stats["skipped"]
 
-        # Create checkpoint after phase completion
-        if not self.config.dry_run:
+        # Create checkpoint after phase completion (skip when resources failed)
+        if not self.config.dry_run and phase_stats["failed"] == 0:
             checkpoint_id = self.checkpoint_manager.create_checkpoint(
                 phase=phase_name,
                 description=f"Completed {phase['description']}",
@@ -549,253 +413,21 @@ class MigrationCoordinator:
                 checkpoint_id=checkpoint_id,
                 stats=phase_stats,
             )
+        elif phase_stats["failed"] > 0:
+            logger.warning(
+                "checkpoint_skipped_due_to_failures",
+                phase=phase_name,
+                failed=phase_stats["failed"],
+            )
 
     async def _execute_etl_pipeline(
         self,
         resource_type: str,
         phase_config: dict[str, Any],
     ) -> dict[str, int]:
-        """Execute Export → Transform → Import pipeline for a resource type.
-
-        Args:
-            resource_type: Type of resource to migrate
-            phase_config: Phase configuration
-
-        Returns:
-            Statistics for this resource type
-        """
-        stats = {
-            "exported": 0,
-            "transformed": 0,
-            "imported": 0,
-            "skipped": 0,
-            "failed": 0,
-        }
-
+        """Execute Export → Transform → Import pipeline for a resource type."""
         try:
-            from aap_migration.migration.target_bootstrap import bootstrap_mappings_for_type
-
-            bootstrap = await bootstrap_mappings_for_type(
-                resource_type,
-                self.source_client,
-                self.target_client,
-                self.state,
-            )
-            if bootstrap.mapped:
-                logger.info(
-                    "target_bootstrap_seeded",
-                    resource_type=resource_type,
-                    mapped=bootstrap.mapped,
-                    unmatched=bootstrap.unmatched,
-                )
-
-            # Create exporter, transformer, importer
-            exporter = create_exporter(
-                resource_type=resource_type,
-                client=self.source_client,
-                state=self.state,
-                performance_config=self.config.performance,
-            )
-
-            transformer = create_transformer(
-                resource_type=resource_type,
-                dry_run=self.config.dry_run,
-                state=self.state,  # Pass state for dependency validation
-            )
-
-            importer = create_importer(
-                resource_type=resource_type,
-                client=self.target_client,
-                state=self.state,
-                performance_config=self.config.performance,
-                resource_mappings=self.config.resource_mappings,
-            )
-
-            # Special handling for hosts (bulk operations)
-            if resource_type == "hosts" and phase_config.get("use_bulk"):
-                return await self._execute_bulk_host_migration(exporter, transformer, importer)
-
-            # Standard ETL pipeline
-            resources_to_import = []
-
-            # Export phase
-            async for resource in exporter.export():
-                stats["exported"] += 1
-
-                # Update progress
-                if self.progress_tracker:
-                    self.progress_tracker.update_resource(exported=1)
-
-                # Store source ID before transformation
-                source_id = resource["id"]
-                resource["_source_id"] = source_id
-
-                # Transform phase
-                try:
-                    transformed = transformer.transform_resource(
-                        resource_type=resource_type,
-                        data=resource,
-                        validate=True,
-                    )
-                    stats["transformed"] += 1
-                    resources_to_import.append(transformed)
-
-                    # Update progress
-                    if self.progress_tracker:
-                        self.progress_tracker.update_resource(transformed=1)
-
-                except SkipResourceError as e:
-                    # Resource skipped due to missing required dependency
-                    logger.warning(
-                        "resource_skipped_missing_dependency",
-                        resource_type=resource_type,
-                        source_id=e.source_id,
-                        source_name=resource.get("name", "unknown"),
-                        missing_dependency=e.missing_dependency,
-                        reason=str(e),
-                    )
-                    stats["skipped"] += 1
-
-                    # Track skip for reporting
-                    self.metrics["skipped_items"].append(
-                        {
-                            "phase": phase_config["name"],
-                            "resource_type": resource_type,
-                            "source_id": e.source_id,
-                            "name": resource.get("name", "unknown"),
-                            "reason": str(e),
-                            "missing_dependency": e.missing_dependency,
-                            "timestamp": datetime.now(UTC).isoformat(),
-                        }
-                    )
-
-                    # Update progress
-                    if self.progress_tracker:
-                        self.progress_tracker.update_resource(skipped=1)
-
-                except Exception as e:
-                    logger.error(
-                        "transformation_failed",
-                        resource_type=resource_type,
-                        source_id=source_id,
-                        error=str(e),
-                    )
-                    stats["failed"] += 1
-
-                    # Update progress
-                    if self.progress_tracker:
-                        self.progress_tracker.update_resource(failed=1)
-
-            # Update Rich progress display live during transform
-            # completed = transformed + failed (NOT skipped - it's passed separately)
-            # Progress bar calculates: completed + skipped = total processed
-            if self.progress_display and self._current_phase_id:
-                self.progress_display.update_phase(
-                    self._current_phase_id,
-                    completed=stats["transformed"] + stats["failed"],
-                    failed=stats["failed"],
-                    skipped=stats["skipped"],
-                )
-
-            # Update Rich progress display with actual total after export/transform
-            if self.progress_display and self._current_phase_id and stats["exported"] > 0:
-                # Set actual total items based on what was exported
-                if self._current_phase_id in self.progress_display.phase_states:
-                    self.progress_display.phase_states[self._current_phase_id].total_items = stats[
-                        "exported"
-                    ]
-                # Also update the Rich Progress task's total
-                if self._current_phase_id in self.progress_display.phase_tasks:
-                    task_id = self.progress_display.phase_tasks[self._current_phase_id]
-                    self.progress_display.phase_progress.update(task_id, total=stats["exported"])
-
-            # Import phase
-            if not self.config.dry_run:
-                # Track import-phase progress separately for Rich display
-                # completed = successful imports (not failures)
-                # failed = import failures only
-                # skipped = transform skips + import skips (already migrated)
-                import_succeeded = 0  # Successful imports
-                import_failed = 0  # Failed imports
-                import_skipped = 0  # Already migrated (import-time skips)
-
-                for resource in resources_to_import:
-                    source_id = resource.pop("_source_id", None)
-                    if not source_id:
-                        continue
-
-                    result = await importer.import_resource(
-                        resource_type=resource_type,
-                        source_id=source_id,
-                        data=resource,
-                    )
-
-                    if result:
-                        stats["imported"] += 1
-                        import_succeeded += 1
-                        # Update progress
-                        if self.progress_tracker:
-                            self.progress_tracker.update_resource(imported=1)
-                    else:
-                        # Check if it was a failure or just skipped (already imported)
-                        if self.state.is_migrated(resource_type, source_id):
-                            stats["skipped"] += 1
-                            import_skipped += 1
-                            if self.progress_tracker:
-                                self.progress_tracker.update_resource(skipped=1)
-                        else:
-                            stats["failed"] += 1
-                            import_failed += 1
-                            if self.progress_tracker:
-                                self.progress_tracker.update_resource(failed=1)
-
-                    # Update Rich progress display with current import progress
-                    # completed = imported + failed (NOT skipped - it's passed separately)
-                    # Progress bar calculates: completed + skipped = total processed
-                    if self.progress_display and self._current_phase_id:
-                        self.progress_display.update_phase(
-                            self._current_phase_id,
-                            completed=stats["imported"] + stats["failed"],
-                            failed=stats["failed"],
-                            skipped=stats["skipped"],
-                        )
-
-                # Report any import errors
-                if importer.import_errors:
-                    logger.warning(
-                        "import_errors_summary",
-                        resource_type=resource_type,
-                        error_count=len(importer.import_errors),
-                        errors=importer.import_errors[:10],  # First 10 for log
-                        message="See full error list in migration report",
-                    )
-                    # Add errors to global metrics for reporting
-                    self.metrics["errors"].extend(
-                        [
-                            {"phase": phase_config["name"], "resource_type": resource_type, **error}
-                            for error in importer.import_errors
-                        ]
-                    )
-
-            else:
-                # Dry run - just count what would be imported
-                stats["imported"] = len(resources_to_import)
-
-            # Report skipped resources summary
-            if stats["skipped"] > 0:
-                logger.warning(
-                    "resources_skipped_summary",
-                    resource_type=resource_type,
-                    skipped_count=stats["skipped"],
-                    message=f"{stats['skipped']} resources were skipped due to missing dependencies",
-                )
-
-            logger.info(
-                "etl_pipeline_completed",
-                resource_type=resource_type,
-                stats=stats,
-            )
-
+            return await run_coordinator_resource_etl(self, resource_type, phase_config)
         except Exception as e:
             logger.error(
                 "etl_pipeline_failed",
@@ -803,8 +435,6 @@ class MigrationCoordinator:
                 error=str(e),
             )
             raise
-
-        return stats
 
     async def _execute_bulk_host_migration(
         self, exporter: Any, transformer: Any, importer: Any
@@ -1016,66 +646,16 @@ class MigrationCoordinator:
             Dict of {resource_type: ComparisonResult}
         """
         if resource_types is None:
-            # Get all resource types from migration phases
             resource_types = []
             for phase in self.MIGRATION_PHASES:
                 resource_types.extend(cast(list[str], phase["resource_types"]))
 
-        logger.info(
-            "schema_comparison_started",
-            resource_types=resource_types,
-            count=len(resource_types),
+        comparisons = await run_schema_comparison(
+            self.source_client,
+            self.target_client,
+            resource_types,
         )
-
-        comparisons = {}
-
-        for resource_type in resource_types:
-            try:
-                logger.debug("fetching_schemas", resource_type=resource_type)
-
-                # Fetch schemas from both instances
-                source_schema = await self.schema_comparator.fetch_schema(
-                    self.source_client, resource_type
-                )
-                target_schema = await self.schema_comparator.fetch_schema(
-                    self.target_client, resource_type
-                )
-
-                # Compare schemas
-                comparison = self.schema_comparator.compare_schemas(
-                    resource_type, source_schema, target_schema
-                )
-
-                comparisons[resource_type] = comparison
-
-                if comparison.has_breaking_changes:
-                    logger.warning(
-                        "schema_breaking_changes_detected",
-                        resource_type=resource_type,
-                        breaking_changes_count=sum(
-                            1 for diff in comparison.field_diffs if diff.is_breaking
-                        ),
-                    )
-
-            except Exception as e:
-                logger.error(
-                    "schema_comparison_failed",
-                    resource_type=resource_type,
-                    error=str(e),
-                )
-                # Continue with other resource types
-                continue
-
-        # Store comparisons for use by transformers
         self.schema_comparisons = comparisons
-
-        logger.info(
-            "schema_comparison_completed",
-            total_resource_types=len(resource_types),
-            comparisons_count=len(comparisons),
-            breaking_changes_count=sum(1 for c in comparisons.values() if c.has_breaking_changes),
-        )
-
         return comparisons
 
     def has_critical_schema_issues(self) -> bool:
@@ -1084,16 +664,7 @@ class MigrationCoordinator:
         Returns:
             True if critical issues detected
         """
-        from aap_migration.schema.models import Severity
-
-        for comparison in self.schema_comparisons.values():
-            for diff in comparison.field_diffs:
-                if diff.severity == Severity.CRITICAL:
-                    return True
-            for change in comparison.schema_changes:
-                if change.severity == Severity.CRITICAL:
-                    return True
-        return False
+        return has_critical_schema_issues(self.schema_comparisons)
 
     def _determine_phases(
         self,
@@ -1133,12 +704,15 @@ class MigrationCoordinator:
 
         summary = {
             "migration_id": self.state.migration_id,
-            "status": "completed"
-            if self.metrics["phases_failed"] == 0
-            else "completed_with_errors",
-            "start_time": self.metrics["start_time"].isoformat()
-            if self.metrics["start_time"]
-            else None,
+            "status": (
+                "completed"
+                if self.metrics["phases_failed"] == 0
+                and self.metrics["total_resources_failed"] == 0
+                else "completed_with_errors"
+            ),
+            "start_time": (
+                self.metrics["start_time"].isoformat() if self.metrics["start_time"] else None
+            ),
             "end_time": self.metrics["end_time"].isoformat() if self.metrics["end_time"] else None,
             "duration_seconds": duration,
             "phases_completed": self.metrics["phases_completed"],
@@ -1185,8 +759,8 @@ class MigrationCoordinator:
         if phase_idx == -1:
             raise ValueError(f"Unknown phase in checkpoint: {last_completed_phase}")
 
-        # Resume from next phase
-        remaining_phases = self.MIGRATION_PHASES[phase_idx + 1 :]
+        # Re-run the interrupted phase (per-resource progress is tracked in state DB)
+        remaining_phases = self.MIGRATION_PHASES[phase_idx:]
 
         logger.info(
             "resuming_migration",

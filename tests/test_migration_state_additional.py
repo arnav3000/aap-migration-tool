@@ -51,7 +51,7 @@ def test_state_tracks_lifecycle_and_partial_imports(sqlite_db_url):
     assert state.has_mapping("projects", 1) is False
 
     state.mark_in_progress("projects", 1, "Project One", phase="transform")
-    assert state.is_migrated("projects", 1) is True
+    assert state.is_migrated("projects", 1) is False
     assert state.get_status("projects", 1) == "in_progress"
 
     state.mark_failed("projects", 1, "boom")

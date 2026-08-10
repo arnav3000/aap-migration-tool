@@ -1,6 +1,7 @@
 """Pydantic request/response schemas for the API."""
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -53,6 +54,7 @@ class ConnectionResponseMasked(BaseModel):
     timeout: int
     ping_status: str
     auth_status: str
+    has_token: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -70,14 +72,29 @@ class JobStartResponse(BaseModel):
 
 class JobResponse(BaseModel):
     id: str
+    seq_id: int | None = None
     name: str
     type: str
     status: str
-    created_at: datetime
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
+    created_at: str
+    started_at: str
+    finished_at: str | None = None
+    completed_at: str | None = None
     error: str | None = None
-    result: dict | None = None
+    result: dict[str, Any] | None = None
+    output: list[str] | None = None
+
+
+class JobSummaryResponse(BaseModel):
+    id: str
+    seq_id: int | None = None
+    name: str
+    type: str
+    status: str
+    created_at: str
+    started_at: str
+    finished_at: str | None = None
+    error: str | None = None
 
 
 class MigrationPreviewRequest(BaseModel):
@@ -245,3 +262,80 @@ class PlanListItem(BaseModel):
     phase_count: int = 0
 
     model_config = {"from_attributes": True}
+
+
+# --- IAM API Schemas ---
+
+
+class IAMAnalyseRequest(BaseModel):
+    connection_id: str
+    output_dir: str = "./iam_reports/"
+    verify_ssl: bool | None = None
+    timeout: int = Field(default=60, ge=1, le=600)
+    workers: int = Field(default=1, ge=1, le=100)
+    scan_strategy: str = Field(default="resource", pattern="^(resource|principal)$")
+    resume: bool = False
+    checkpoint_dir: str | None = None
+
+
+class IAMBenchmarkRequest(BaseModel):
+    connection_id: str
+    verify_ssl: bool | None = None
+    sample_size: int = Field(default=50, ge=1, le=500)
+    workers: list[int] | None = None
+
+
+class IAMReportRequest(BaseModel):
+    json_path: str | None = None
+    output_dir: str | None = None
+    job_id: str | None = None
+
+    @model_validator(mode="after")
+    def require_json_source(self) -> "IAMReportRequest":
+        if not self.json_path and not self.job_id:
+            raise ValueError("Either json_path or job_id is required")
+        return self
+
+
+# --- Discrete ETL API Schemas ---
+
+
+class MigrationExportRequest(BaseModel):
+    source_id: str
+    resource_types: list[str] | None = None
+    output_dir: str | None = None
+    organizations: list[int] | None = None
+    records_per_file: int = Field(default=1000, ge=1, le=10000)
+    resume: bool = False
+
+
+class MigrationTransformRequest(BaseModel):
+    input_dir: str | None = None
+    export_job_id: str | None = None
+    output_dir: str | None = None
+    resource_types: list[str] | None = None
+    destination_id: str | None = None
+    defer_project_sync: bool = True
+
+    @model_validator(mode="after")
+    def require_input_source(self) -> "MigrationTransformRequest":
+        if not self.input_dir and not self.export_job_id:
+            raise ValueError("Either input_dir or export_job_id is required")
+        return self
+
+
+class MigrationImportRequest(BaseModel):
+    source_id: str
+    destination_id: str
+    input_dir: str | None = None
+    transform_job_id: str | None = None
+    resource_types: list[str] | None = None
+    name_prefix: str | None = None
+    organizations: list[int] | None = None
+    dry_run: bool = False
+
+    @model_validator(mode="after")
+    def require_input_source(self) -> "MigrationImportRequest":
+        if not self.input_dir and not self.transform_job_id:
+            raise ValueError("Either input_dir or transform_job_id is required")
+        return self

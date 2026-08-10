@@ -80,7 +80,7 @@ class AnalysisService:
             "url": conn.url,
             "token": decrypt_token(conn.token) if conn.token else None,
             "verify_ssl": conn.verify_ssl,
-            "api_prefix": conn.api_prefix,
+            "api_prefix": getattr(conn, "api_prefix", None),
         }
 
         async def _run() -> None:
@@ -104,9 +104,9 @@ class AnalysisService:
                     base_url = f"{base_url}{snap['api_prefix']}"
 
                 config = AAPInstanceConfig(
-                    url=base_url,
-                    token=snap["token"],
-                    verify_ssl=snap["verify_ssl"],
+                    url=str(base_url),
+                    token=str(snap["token"] or ""),
+                    verify_ssl=bool(snap["verify_ssl"]),
                 )
                 client = AAPSourceClient(config=config)
 
@@ -147,33 +147,39 @@ def _serialize_report(report: GlobalDependencyReport) -> dict[str, Any]:
             quality = {
                 "quality_score": qr.quality_score,
                 "duplicate_count": qr.duplicate_count,
-                "duplicates": [
+                "duplicates": (
+                    [
+                        {
+                            "name": d.name,
+                            "resource_type": d.resource_type,
+                            "count": d.count,
+                            "ids": d.ids,
+                            "severity": d.severity,
+                            "impact": d.impact,
+                            "recommendation": d.recommendation,
+                        }
+                        for d in qr.duplicates
+                    ]
+                    if qr.duplicates
+                    else []
+                ),
+                "naming_pattern": (
                     {
-                        "name": d.name,
-                        "resource_type": d.resource_type,
-                        "count": d.count,
-                        "ids": d.ids,
-                        "severity": d.severity,
-                        "impact": d.impact,
-                        "recommendation": d.recommendation,
+                        "dominant_pattern": qr.naming_pattern.dominant_pattern,
+                        "consistency_score": qr.naming_pattern.consistency_score,
+                        "total_resources": qr.naming_pattern.total_resources,
+                        "case_style": qr.naming_pattern.case_style,
+                        "prefixes": qr.naming_pattern.prefixes,
+                        "separators": qr.naming_pattern.separators,
+                        "violations": (
+                            qr.naming_pattern.violations[:20]
+                            if qr.naming_pattern.violations
+                            else []
+                        ),
                     }
-                    for d in qr.duplicates
-                ]
-                if qr.duplicates
-                else [],
-                "naming_pattern": {
-                    "dominant_pattern": qr.naming_pattern.dominant_pattern,
-                    "consistency_score": qr.naming_pattern.consistency_score,
-                    "total_resources": qr.naming_pattern.total_resources,
-                    "case_style": qr.naming_pattern.case_style,
-                    "prefixes": qr.naming_pattern.prefixes,
-                    "separators": qr.naming_pattern.separators,
-                    "violations": qr.naming_pattern.violations[:20]
-                    if qr.naming_pattern.violations
-                    else [],
-                }
-                if qr.naming_pattern
-                else None,
+                    if qr.naming_pattern
+                    else None
+                ),
             }
 
         # Compute blocking info: how many other orgs does this org block?
@@ -191,9 +197,11 @@ def _serialize_report(report: GlobalDependencyReport) -> dict[str, Any]:
             "blocks": blocked_by_this,
             "dependencies": deps,
             "quality": quality,
-            "resources": {rtype: len(rlist) for rtype, rlist in org_report.resources.items()}
-            if hasattr(org_report, "resources") and org_report.resources
-            else {},
+            "resources": (
+                {rtype: len(rlist) for rtype, rlist in org_report.resources.items()}
+                if hasattr(org_report, "resources") and org_report.resources
+                else {}
+            ),
         }
 
     # Aggregate quality summary
@@ -221,12 +229,14 @@ def _serialize_report(report: GlobalDependencyReport) -> dict[str, Any]:
         "migration_phases": report.migration_phases,
         "circular_dependencies": [sorted(c) for c in cycles] if cycles else [],
         "organizations": org_data,
-        "global_resources": {rtype: len(rlist) for rtype, rlist in report.global_resources.items()}
-        if hasattr(report, "global_resources") and report.global_resources
-        else {},
+        "global_resources": (
+            {rtype: len(rlist) for rtype, rlist in report.global_resources.items()}
+            if hasattr(report, "global_resources") and report.global_resources
+            else {}
+        ),
         "total_duplicates": report.total_duplicates if hasattr(report, "total_duplicates") else 0,
-        "average_quality_score": report.average_quality_score
-        if hasattr(report, "average_quality_score")
-        else 100.0,
+        "average_quality_score": (
+            report.average_quality_score if hasattr(report, "average_quality_score") else 100.0
+        ),
         "quality_summary": quality_summary,
     }

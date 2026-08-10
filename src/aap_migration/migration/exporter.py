@@ -114,6 +114,7 @@ class ResourceExporter:
             "exported_count": 0,
             "error_count": 0,
             "skipped_count": 0,
+            "export_stopped_early": 0,
         }
 
         # Cache for existing mappings (for efficient export resume)
@@ -228,21 +229,21 @@ class ResourceExporter:
                             attempts=max_retries,
                             error=str(e),
                         )
-                        return 0
+                        raise
                 else:
                     logger.error(
                         "get_count_error",
                         endpoint=endpoint,
                         error=str(e),
                     )
-                    return 0
+                    raise
             except Exception as e:
                 logger.error(
                     "get_count_error",
                     endpoint=endpoint,
                     error=str(e),
                 )
-                return 0
+                raise
 
         return 0
 
@@ -419,6 +420,7 @@ class ResourceExporter:
             page += 1
 
         if export_stopped_early:
+            self.stats["export_stopped_early"] = 1
             logger.warning(
                 "export_partial_completion",
                 resource_type=resource_type,
@@ -623,6 +625,7 @@ class ResourceExporter:
             "exported_count": 0,
             "error_count": 0,
             "skipped_count": 0,
+            "export_stopped_early": 0,
         }
 
 

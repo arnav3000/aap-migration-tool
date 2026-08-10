@@ -801,6 +801,27 @@ def get_description(resource_type: str) -> str:
     return RESOURCE_REGISTRY[resource_type].description
 
 
+def get_default_exclusions() -> dict[str, Any]:
+    """Return built-in migration/cleanup exclusions shown in the web UI.
+
+    Migration defaults mirror resources that export/cleanup always skip by name.
+    Cleanup defaults group protected built-ins by resource type and reason.
+    """
+    return {
+        "migration": {
+            "organizations": ["Default"],
+        },
+        "cleanup": {
+            "organizations": {"built-in organization": ["Default"]},
+            "users": {"admin/system user": ["admin"]},
+            "credential_types": {"managed credential type": []},
+            "credentials": {"managed credential": []},
+            "execution_environments": {"managed execution environment": []},
+            "instance_groups": {"managed instance group": ["default", "controlplane"]},
+        },
+    }
+
+
 # ============================================
 # Convenience Constants (derived from registry)
 # ============================================

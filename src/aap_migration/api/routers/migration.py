@@ -13,14 +13,182 @@ from aap_migration.api.dependencies import get_db, get_db_url, get_job_service
 from aap_migration.api.schemas import (
     ClearStateResponse,
     JobStartResponse,
+    MigrationExportRequest,
+    MigrationImportRequest,
     MigrationPreviewRequest,
     MigrationRunRequest,
+    MigrationTransformRequest,
 )
 from aap_migration.api.services.connection_service import ConnectionService
 from aap_migration.api.services.job_service import Job, JobStatus
-from aap_migration.resources import RESOURCE_REGISTRY
+from aap_migration.resources import RESOURCE_REGISTRY, get_default_exclusions
+
+# High-cardinality types: preview uses count + first page only (avoid loading full catalogs).
+_HIGH_CARDINALITY_PREVIEW_TYPES = frozenset({"hosts", "host_inventory_memberships"})
+_PREVIEW_SAMPLE_SIZE = 50
 
 router = APIRouter()
+
+
+def _output_dir_from_job(job_id: str, key: str = "output_dir") -> str:
+    svc = get_job_service()
+    job = svc.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Prior job not found")
+    if not job.result or not job.result.get(key):
+        raise HTTPException(status_code=400, detail=f"Prior job missing {key}")
+    return str(job.result[key])
+
+
+@router.post("/migrate/export", response_model=JobStartResponse)
+async def migration_export(
+    body: MigrationExportRequest, db: Session = Depends(get_db)
+) -> JobStartResponse:
+    source = ConnectionService.get(db, body.source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source connection not found")
+
+    svc = get_job_service()
+    src_config = ConnectionService.build_instance_config(source)
+    source_auth = ConnectionService._auth_scheme(source)
+    output_dir = body.output_dir or "exports"
+    db_url = get_db_url()
+
+    async def _do_export(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
+        from aap_migration.client.aap_source_client import AAPSourceClient
+        from aap_migration.config import StateConfig
+        from aap_migration.migration.runner import run_disk_export
+        from aap_migration.migration.state import MigrationState
+
+        client = AAPSourceClient(src_config, auth_scheme=source_auth)
+        state = MigrationState(
+            StateConfig(db_path=db_url),
+            migration_id=f"export-{body.source_id}",
+            source_key=body.source_id,
+        )
+        async with client:
+            return await run_disk_export(
+                client,
+                state,
+                output_dir,
+                resource_types=body.resource_types,
+                records_per_file=body.records_per_file,
+                resume=body.resume,
+                log=log,
+            )
+
+    job_id = svc.start_job(f"Export {source.name}", "export", _do_export)
+    return JobStartResponse(job_id=job_id)
+
+
+@router.post("/migrate/transform", response_model=JobStartResponse)
+async def migration_transform(
+    body: MigrationTransformRequest, db: Session = Depends(get_db)
+) -> JobStartResponse:
+    input_dir = body.input_dir
+    if body.export_job_id:
+        input_dir = _output_dir_from_job(body.export_job_id, "output_dir")
+    assert input_dir is not None
+
+    svc = get_job_service()
+    output_dir = body.output_dir or "xformed"
+    db_url = get_db_url()
+    target_config = None
+    target_auth = None
+
+    if body.destination_id:
+        target = ConnectionService.get(db, body.destination_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Destination connection not found")
+        target_config = ConnectionService.build_instance_config(target)
+        target_auth = ConnectionService._auth_scheme(target)
+
+    async def _do_transform(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
+        from aap_migration.client.aap_target_client import AAPTargetClient
+        from aap_migration.config import StateConfig
+        from aap_migration.migration.runner import run_disk_transform
+        from aap_migration.migration.state import MigrationState
+
+        state = MigrationState(StateConfig(db_path=db_url))
+        if target_config is not None:
+            client = AAPTargetClient(target_config, auth_scheme=target_auth or "Bearer")
+            async with client:
+                return await run_disk_transform(
+                    state,
+                    input_dir,
+                    output_dir,
+                    resource_types=body.resource_types,
+                    target_client=client,
+                    defer_project_sync=body.defer_project_sync,
+                    log=log,
+                )
+        return await run_disk_transform(
+            state,
+            input_dir,
+            output_dir,
+            resource_types=body.resource_types,
+            defer_project_sync=body.defer_project_sync,
+            log=log,
+        )
+
+    job_id = svc.start_job("Transform exports", "transform", _do_transform)
+    return JobStartResponse(job_id=job_id)
+
+
+@router.post("/migrate/import", response_model=JobStartResponse)
+async def migration_import(
+    body: MigrationImportRequest, db: Session = Depends(get_db)
+) -> JobStartResponse:
+    source = ConnectionService.get(db, body.source_id)
+    target = ConnectionService.get(db, body.destination_id)
+    if source is None or target is None:
+        raise HTTPException(status_code=404, detail="Source or destination connection not found")
+
+    input_dir = body.input_dir
+    if body.transform_job_id:
+        input_dir = _output_dir_from_job(body.transform_job_id, "output_dir")
+    assert input_dir is not None
+
+    svc = get_job_service()
+    src_config = ConnectionService.build_instance_config(source)
+    tgt_config = ConnectionService.build_instance_config(target)
+    source_auth = ConnectionService._auth_scheme(source)
+    target_auth = ConnectionService._auth_scheme(target)
+    name_prefix = (body.name_prefix or "").strip()
+    org_filter = body.organizations
+    db_url = get_db_url()
+
+    async def _do_import(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
+        from aap_migration.client.aap_source_client import AAPSourceClient
+        from aap_migration.client.aap_target_client import AAPTargetClient
+        from aap_migration.config import StateConfig
+        from aap_migration.migration.runner import run_disk_import
+        from aap_migration.migration.state import MigrationState
+        from aap_migration.resources import get_fully_supported_types
+
+        resource_types = body.resource_types or get_fully_supported_types()
+        state = MigrationState(
+            StateConfig(db_path=db_url),
+            migration_id=f"import-{body.source_id}-{body.destination_id}",
+            source_key=body.source_id,
+        )
+        src_client = AAPSourceClient(src_config, auth_scheme=source_auth)
+        tgt_client = AAPTargetClient(tgt_config, auth_scheme=target_auth)
+        async with src_client, tgt_client:
+            return await run_disk_import(
+                src_client,
+                tgt_client,
+                state,
+                input_dir,
+                resource_types,
+                name_prefix=name_prefix,
+                org_ids=list(org_filter) if org_filter else None,
+                dry_run=body.dry_run,
+                log=log,
+            )
+
+    job_id = svc.start_job(f"Import to {target.name}", "import", _do_import)
+    return JobStartResponse(job_id=job_id)
 
 
 @router.post("/migrate/preview", response_model=JobStartResponse)
@@ -68,6 +236,8 @@ async def migration_preview(
         )
 
         resources: dict[str, list[dict[str, Any]]] = {}
+        host_counts: dict[str, int] = {}
+        group_counts: dict[str, int] = {}
         warnings: list[str] = []
         bootstrap_totals = {"mapped": 0, "unmatched": 0}
 
@@ -101,7 +271,16 @@ async def migration_preview(
                     bootstrap_totals["unmatched"] += stats.unmatched
 
                     # Build preview rows from the same source list bootstrap used.
-                    src_items = await src_client.get_paginated(info.endpoint, page_size=200)
+                    if rtype in _HIGH_CARDINALITY_PREVIEW_TYPES:
+                        total_on_source = await src_client.get_count(info.endpoint)
+                        src_items = await src_client.get_paginated(
+                            info.endpoint, page_size=_PREVIEW_SAMPLE_SIZE
+                        )
+                        preview_note = f"{total_on_source} total, showing first {len(src_items)}"
+                    else:
+                        total_on_source = None
+                        preview_note = None
+                        src_items = await src_client.get_paginated(info.endpoint, page_size=200)
                     if org_filter and rtype == "organizations":
                         src_items = [i for i in src_items if i.get("id") in org_filter]
                     elif org_filter and rtype not in (
@@ -156,25 +335,40 @@ async def migration_preview(
                             source_id_int >= 0
                             and state.get_mapped_id(rtype, source_id_int) is not None
                         )
+                        mapped_target_id = (
+                            state.get_mapped_id(rtype, source_id_int) if already else None
+                        )
                         type_resources.append(
                             {
                                 "source_id": source_id,
                                 "name": display_name,
                                 "type": rtype,
                                 "action": "skip" if already else "create",
-                                "target_id": (
-                                    state.get_mapped_id(rtype, source_id_int) if already else None
-                                ),
+                                "target_id": mapped_target_id,
+                                "dest_id": mapped_target_id,
                             }
                         )
+
+                    if rtype == "inventories":
+                        for item in src_items:
+                            inv_name = item.get("name", "")
+                            if inv_name:
+                                host_counts[inv_name] = item.get("total_hosts", 0)
+                                group_counts[inv_name] = item.get("total_groups", 0)
 
                     resources[rtype] = type_resources
                     creates = sum(1 for r in type_resources if r["action"] == "create")
                     skips = len(type_resources) - creates
-                    log(
-                        f"  {rtype}: {len(type_resources)} items "
-                        f"({creates} create, {skips} already on target)"
-                    )
+                    if preview_note:
+                        log(
+                            f"  {rtype}: {preview_note} "
+                            f"({creates} create, {skips} already on target in sample)"
+                        )
+                    else:
+                        log(
+                            f"  {rtype}: {len(type_resources)} items "
+                            f"({creates} create, {skips} already on target)"
+                        )
                 except Exception as exc:
                     log(f"  {rtype}: error - {exc}")
                     warnings.append(f"Failed to preview {rtype}: {exc}")
@@ -191,6 +385,8 @@ async def migration_preview(
             "destination_id": body.destination_id,
             "resources": resources,
             "warnings": warnings,
+            "host_counts": host_counts,
+            "group_counts": group_counts,
             "bootstrap": bootstrap_totals,
             "name_prefix": name_prefix or None,
         }
@@ -235,8 +431,9 @@ async def migration_run(
     async def _do_migration(job: Job, log: Callable[[str], None]) -> dict[str, Any]:
         # Reuse planner ETL helpers so quick-migrate actually creates resources
         # on the target (export → transform → import), including name_prefix.
-        from aap_migration.api.routers.planner import (
+        from aap_migration.migration.runner import (
             _build_source_contexts,
+            _handle_credential_pause,
             _migrate_resource_type,
             _run_cac_org_update,
         )
@@ -341,7 +538,7 @@ async def migration_run(
                     resource_order[: resource_order.index(rtype) + 1]
                 )
                 if not remaining and created_creds:
-                    from aap_migration.api.routers.planner import _handle_credential_pause
+                    from aap_migration.migration.runner import _handle_credential_pause
 
                     await _handle_credential_pause(
                         job,
@@ -399,7 +596,4 @@ def clear_migration_state(db: Session = Depends(get_db)) -> ClearStateResponse:
 
 @router.get("/exclusions")
 def get_exclusions() -> dict[str, Any]:
-    return {
-        "migration": {},
-        "cleanup": {},
-    }
+    return get_default_exclusions()

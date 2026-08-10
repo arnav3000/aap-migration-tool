@@ -1551,7 +1551,7 @@ def import_cmd(
                 resource_type=resource_type,
                 already_existing=found_count,
                 to_import=len(to_import),
-                total=len(resources),
+                total=found_count + len(to_import),
             )
 
         return to_import
@@ -1685,464 +1685,479 @@ def import_cmd(
                         progress.complete_phase(phase_id)
                         continue
 
-                    # Load resources from all files
-                    all_resources = []
+                    imported_count = 0
+                    failed_count = 0
+                    skipped_count = 0
+                    skipped_in_import = 0
+                    resources_total_count = 0
+
                     for json_file in json_files:
                         try:
                             with open(json_file) as f:
-                                file_resources = json.load(f)
-                                all_resources.extend(file_resources)
+                                resources = json.load(f)
                         except Exception as e:
                             echo_error(f"Failed to load {json_file}: {e}")
                             continue
 
-                    resources = all_resources
-                    if not resources:
-                        echo_warning(f"No {rtype} to import, skipping")
-                        progress.complete_phase(phase_id)
-                        continue
-
-                    imported_count = 0
-                    failed_count = 0
-                    skipped_count = 0
-
-                    # Import expects pre-transformed data from xformed/ directory
-                    # Ensure _source_id is set (fallback to database lookup if missing)
-                    transformed_resources = []
-                    for resource in resources:
-                        source_id = resource.get("_source_id")
-
-                        # Fallback: Look up source_id from database by name if missing
-                        if source_id is None:
-                            resource_name = resource.get("name", "")
-                            mapping = ctx.migration_state.get_mapping_by_name(rtype, resource_name)
-                            if mapping:
-                                source_id = mapping.source_id
-                                resource["_source_id"] = source_id
-                                logger.info(
-                                    "recovered_source_id_from_database",
-                                    resource_type=rtype,
-                                    name=resource_name,
-                                    source_id=source_id,
-                                )
-                            else:
-                                logger.warning(
-                                    "missing_source_id",
-                                    resource_type=rtype,
-                                    name=resource_name,
-                                    message="No _source_id in JSON and no database mapping found",
-                                )
-
-                        transformed_resources.append(resource)
-
-                    if not dry_run:
-                        # Create appropriate importer using factory
-                        try:
-                            importer = create_importer(
-                                rtype,
-                                ctx.target_client,
-                                ctx.migration_state,
-                                ctx.config.performance,
-                                ctx.config.resource_mappings,
-                            )
-                        except NotImplementedError:
-                            logger.info(
-                                "skipping_no_importer",
-                                resource_type=rtype,
-                                message=f"No importer available for {rtype}",
-                            )
-                            skipped_no_importer.append(rtype)
-                            # Mark phase as complete (all skipped - pass 0 completed, 0 failed, total_count skipped)
-                            progress.update_phase(phase_id, 0, 0, total_count)
-                            progress.complete_phase(phase_id)
+                        if not resources:
                             continue
 
-                        # Import based on resource type
-                        # Map resource type names to their importer method names
-                        # Note: 'hosts' is handled separately below (line-by-line import)
-                        method_map = {
-                            # Foundation resources
-                            "organizations": "import_organizations",
-                            "instances": "import_instances",
-                            "instance_groups": "import_instance_groups",
-                            "labels": "import_labels",
-                            # Identity and access
-                            "users": "import_users",
-                            "teams": "import_teams",
-                            # Credentials
-                            "credential_types": "import_credential_types",
-                            "credentials": "import_credentials",
-                            # Projects and execution
-                            "projects": "import_projects",
-                            "execution_environments": "import_execution_environments",
-                            # Inventory resources
-                            "inventories": "import_inventories",
-                            "inventory_sources": "import_inventory_sources",
-                            "inventory_groups": "import_inventory_groups",
-                            # Job templates and workflows
-                            "job_templates": "import_job_templates",
-                            "workflow_job_templates": "import_workflow_job_templates",
-                            "schedules": "import_schedules",
-                            # Notifications
-                            "notification_templates": "import_notification_templates",
-                            # OAuth and Configuration
-                            "applications": "import_applications",
-                            "settings": "import_settings",
-                            # RBAC
-                            "rbac": "import_rbac_assignments",
-                        }
+                        resources_total_count += len(resources)
 
-                        method_name = method_map.get(rtype)
-                        echo_info(
-                            f"📋 Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}"
-                        )
-                        if method_name and hasattr(importer, method_name):
-                            # TEMPORARY FIX: Skip batch precheck for automation resources to avoid hang
-                            # TODO: Investigate why batch_precheck_resources blocks for these types
-                            if rtype in ("job_templates", "workflow_job_templates", "schedules"):
-                                echo_warning(
-                                    f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using database check)"
+                        transformed_resources = []
+                        for resource in resources:
+                            source_id = resource.get("_source_id")
+
+                            if source_id is None:
+                                resource_name = resource.get("name", "")
+                                mapping = ctx.migration_state.get_mapping_by_name(
+                                    rtype, resource_name
                                 )
-                                logger.warning(
-                                    "batch_precheck_skipped_temporary_fix",
+                                if mapping:
+                                    source_id = mapping.source_id
+                                    resource["_source_id"] = source_id
+                                    logger.info(
+                                        "recovered_source_id_from_database",
+                                        resource_type=rtype,
+                                        name=resource_name,
+                                        source_id=source_id,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "missing_source_id",
+                                        resource_type=rtype,
+                                        name=resource_name,
+                                        message="No _source_id in JSON and no database mapping found",
+                                    )
+
+                            transformed_resources.append(resource)
+
+                        if not transformed_resources:
+                            continue
+
+                        if not dry_run:
+                            # Create appropriate importer using factory
+                            try:
+                                importer = create_importer(
+                                    rtype,
+                                    ctx.target_client,
+                                    ctx.migration_state,
+                                    ctx.config.performance,
+                                    ctx.config.resource_mappings,
+                                )
+                            except NotImplementedError:
+                                logger.info(
+                                    "skipping_no_importer",
                                     resource_type=rtype,
-                                    message="Skipping batch precheck due to known hang issue, using database check instead",
+                                    message=f"No importer available for {rtype}",
                                 )
+                                skipped_no_importer.append(rtype)
+                                # Mark phase as complete (all skipped - pass 0 completed, 0 failed, total_count skipped)
+                                progress.update_phase(phase_id, 0, 0, total_count)
+                                progress.complete_phase(phase_id)
+                                continue
 
-                                # Database check to avoid re-importing already completed resources
-                                # This prevents "already exists" errors on re-runs while avoiding the API hang
-                                # CRITICAL FIX: Also verify target_id still exists in target AAP
+                            # Import based on resource type
+                            # Map resource type names to their importer method names
+                            # Note: 'hosts' is handled separately below (line-by-line import)
+                            method_map = {
+                                # Foundation resources
+                                "organizations": "import_organizations",
+                                "instances": "import_instances",
+                                "instance_groups": "import_instance_groups",
+                                "labels": "import_labels",
+                                # Identity and access
+                                "users": "import_users",
+                                "teams": "import_teams",
+                                # Credentials
+                                "credential_types": "import_credential_types",
+                                "credentials": "import_credentials",
+                                # Projects and execution
+                                "projects": "import_projects",
+                                "execution_environments": "import_execution_environments",
+                                # Inventory resources
+                                "inventories": "import_inventories",
+                                "inventory_sources": "import_inventory_sources",
+                                "inventory_groups": "import_inventory_groups",
+                                # Job templates and workflows
+                                "job_templates": "import_job_templates",
+                                "workflow_job_templates": "import_workflow_job_templates",
+                                "schedules": "import_schedules",
+                                # Notifications
+                                "notification_templates": "import_notification_templates",
+                                # OAuth and Configuration
+                                "applications": "import_applications",
+                                "settings": "import_settings",
+                                # RBAC
+                                "rbac": "import_rbac_assignments",
+                            }
 
-                                # Step 1: Query database for completed/skipped resources (sync)
-                                resources_needing_validation = []
-                                resources_to_import = []
-                                already_completed_count = 0
+                            method_name = method_map.get(rtype)
+                            echo_info(
+                                f"📋 Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}"
+                            )
+                            if method_name and hasattr(importer, method_name):
+                                # TEMPORARY FIX: Skip batch precheck for automation resources to avoid hang
+                                # TODO: Investigate why batch_precheck_resources blocks for these types
+                                if rtype in (
+                                    "job_templates",
+                                    "workflow_job_templates",
+                                    "schedules",
+                                ):
+                                    echo_warning(
+                                        f"⚠️  SKIPPING batch precheck for {rtype} (known hang issue - using database check)"
+                                    )
+                                    logger.warning(
+                                        "batch_precheck_skipped_temporary_fix",
+                                        resource_type=rtype,
+                                        message="Skipping batch precheck due to known hang issue, using database check instead",
+                                    )
 
-                                with get_session(ctx.migration_state.database_url) as session:
-                                    for resource in transformed_resources:
-                                        source_id = resource.get("_source_id")
+                                    # Database check to avoid re-importing already completed resources
+                                    # This prevents "already exists" errors on re-runs while avoiding the API hang
+                                    # CRITICAL FIX: Also verify target_id still exists in target AAP
 
-                                        # Check if already successfully completed or intentionally skipped
-                                        existing = (
-                                            session.query(MigrationProgress)
-                                            .filter_by(resource_type=rtype, source_id=source_id)
-                                            .first()
-                                        )
+                                    # Step 1: Query database for completed/skipped resources (sync)
+                                    resources_needing_validation = []
+                                    resources_to_import = []
+                                    already_completed_count = 0
 
-                                        # If completed/skipped, need to validate target still exists
-                                        if (
-                                            existing
-                                            and existing.status in ("completed", "skipped")
-                                            and existing.target_id
-                                        ):
-                                            resources_needing_validation.append(
-                                                {
-                                                    "resource": resource,
-                                                    "source_id": source_id,
-                                                    "target_id": existing.target_id,
-                                                    "status": existing.status,
-                                                }
-                                            )
-                                        elif existing and existing.status in (
-                                            "completed",
-                                            "skipped",
-                                        ):
-                                            # No target_id but marked completed/skipped (shouldn't happen)
-                                            # Skip anyway to be safe
-                                            already_completed_count += 1
-                                            logger.info(
-                                                "resource_already_processed_skip",
-                                                resource_type=rtype,
-                                                source_id=source_id,
-                                                status=existing.status,
-                                                target_id=None,
-                                                verified="no_target_id",
-                                            )
-                                        else:
-                                            # Not completed/skipped (pending, failed, or no record)
-                                            resources_to_import.append(resource)
+                                    with get_session(ctx.migration_state.database_url) as session:
+                                        for resource in transformed_resources:
+                                            source_id = resource.get("_source_id")
 
-                                # Step 2: Validate target resources exist (async, outside session)
-                                endpoint = get_endpoint(rtype)
-                                for item in resources_needing_validation:
-                                    target_id = item["target_id"]
-                                    source_id = item["source_id"]
-                                    resource = item["resource"]
-
-                                    try:
-                                        # Quick existence check (will raise if not found)
-                                        await ctx.target_client.get(f"{endpoint}{target_id}/")
-                                        # Target exists - safe to skip
-                                        # Mark as skipped in database for accurate reporting
-                                        ctx.migration_state.mark_skipped(
-                                            resource_type=rtype,
-                                            source_id=source_id,
-                                            reason="Pre-existing in target (validated via database check)",
-                                            target_id=target_id,
-                                            target_name=resource.get("name"),
-                                            source_name=resource.get("name"),
-                                        )
-                                        already_completed_count += 1
-                                        logger.info(
-                                            "resource_already_processed_skip",
-                                            resource_type=rtype,
-                                            source_id=source_id,
-                                            target_id=target_id,
-                                            status=item["status"],
-                                            verified="target_exists",
-                                        )
-                                    except Exception as e:
-                                        # Target deleted from AAP - need to re-import
-                                        logger.warning(
-                                            "target_deleted_re_importing",
-                                            resource_type=rtype,
-                                            source_id=source_id,
-                                            target_id=target_id,
-                                            error=str(e),
-                                            action="clearing_status_and_reimporting",
-                                        )
-                                        # Add to import list
-                                        resources_to_import.append(resource)
-
-                                        # Clear database status (new session)
-                                        with get_session(
-                                            ctx.migration_state.database_url
-                                        ) as session:
+                                            # Check if already successfully completed or intentionally skipped
                                             existing = (
                                                 session.query(MigrationProgress)
                                                 .filter_by(resource_type=rtype, source_id=source_id)
                                                 .first()
                                             )
-                                            if existing:
-                                                existing.status = "pending"
-                                                existing.target_id = None
-                                                session.commit()
 
-                                logger.info(
-                                    "database_check_result",
-                                    resource_type=rtype,
-                                    total=len(transformed_resources),
-                                    already_completed=already_completed_count,
-                                    to_import=len(resources_to_import),
-                                )
-                            else:
-                                # Proactive batch pre-check: query target to find existing resources
-                                # This avoids "already exists" errors and shows accurate progress
-                                resources_to_import = await batch_precheck_resources(
-                                    resource_type=rtype,
-                                    resources=transformed_resources,
-                                    importer=importer,
-                                    client=ctx.target_client,
-                                    state=ctx.migration_state,
-                                    progress=progress,
-                                    phase_id=phase_id,
-                                )
+                                            # If completed/skipped, need to validate target still exists
+                                            if (
+                                                existing
+                                                and existing.status in ("completed", "skipped")
+                                                and existing.target_id
+                                            ):
+                                                resources_needing_validation.append(
+                                                    {
+                                                        "resource": resource,
+                                                        "source_id": source_id,
+                                                        "target_id": existing.target_id,
+                                                        "status": existing.status,
+                                                    }
+                                                )
+                                            elif existing and existing.status in (
+                                                "completed",
+                                                "skipped",
+                                            ):
+                                                # No target_id but marked completed/skipped (shouldn't happen)
+                                                # Skip anyway to be safe
+                                                already_completed_count += 1
+                                                logger.info(
+                                                    "resource_already_processed_skip",
+                                                    resource_type=rtype,
+                                                    source_id=source_id,
+                                                    status=existing.status,
+                                                    target_id=None,
+                                                    verified="no_target_id",
+                                                )
+                                            else:
+                                                # Not completed/skipped (pending, failed, or no record)
+                                                resources_to_import.append(resource)
 
-                            # Calculate skipped count (resources that already exist)
-                            skipped_count = len(transformed_resources) - len(resources_to_import)
+                                    # Step 2: Validate target resources exist (async, outside session)
+                                    endpoint = get_endpoint(rtype)
+                                    for item in resources_needing_validation:
+                                        target_id = item["target_id"]
+                                        source_id = item["source_id"]
+                                        resource = item["resource"]
 
-                            if resources_to_import:
-                                echo_info(
-                                    f"🔄 Starting import for {rtype}: {len(resources_to_import)} resources"
-                                )
+                                        try:
+                                            # Quick existence check (will raise if not found)
+                                            await ctx.target_client.get(f"{endpoint}{target_id}/")
+                                            # Target exists - safe to skip
+                                            # Mark as skipped in database for accurate reporting
+                                            ctx.migration_state.mark_skipped(
+                                                resource_type=rtype,
+                                                source_id=source_id,
+                                                reason="Pre-existing in target (validated via database check)",
+                                                target_id=target_id,
+                                                target_name=resource.get("name"),
+                                                source_name=resource.get("name"),
+                                            )
+                                            already_completed_count += 1
+                                            logger.info(
+                                                "resource_already_processed_skip",
+                                                resource_type=rtype,
+                                                source_id=source_id,
+                                                target_id=target_id,
+                                                status=item["status"],
+                                                verified="target_exists",
+                                            )
+                                        except Exception as e:
+                                            # Target deleted from AAP - need to re-import
+                                            logger.warning(
+                                                "target_deleted_re_importing",
+                                                resource_type=rtype,
+                                                source_id=source_id,
+                                                target_id=target_id,
+                                                error=str(e),
+                                                action="clearing_status_and_reimporting",
+                                            )
+                                            # Add to import list
+                                            resources_to_import.append(resource)
 
-                                # Create progress callback for live updates
-                                def update_progress(
-                                    success: int,
-                                    failed: int,
-                                    skipped: int,
-                                    phase_id: str = phase_id,
-                                ) -> None:
-                                    """Update progress display in real-time."""
-                                    progress.update_phase(phase_id, success, failed, skipped)
+                                            # Clear database status (new session)
+                                            with get_session(
+                                                ctx.migration_state.database_url
+                                            ) as session:
+                                                existing = (
+                                                    session.query(MigrationProgress)
+                                                    .filter_by(
+                                                        resource_type=rtype, source_id=source_id
+                                                    )
+                                                    .first()
+                                                )
+                                                if existing:
+                                                    existing.status = "pending"
+                                                    existing.target_id = None
+                                                    session.commit()
 
-                                method = getattr(importer, method_name)
-                                echo_info(f"⏳ Calling {method_name}...")
-                                results = await method(
-                                    resources_to_import, progress_callback=update_progress
-                                )
-                                echo_info(
-                                    f"✅ {method_name} completed: {len(results) if results else 0} results"
-                                )
-
-                                # Calculate actual imported, failed, and skipped from results
-                                imported_count = len(
-                                    [r for r in results if r and not r.get("_skipped")]
-                                )
-                                skipped_in_import = len(
-                                    [r for r in results if r and r.get("_skipped")]
-                                )
-                                failed_count = (
-                                    len(resources_to_import) - imported_count - skipped_in_import
-                                )
-
-                                # Final progress update
-                                # Include both skipped_in_import (found by importer) and skipped_count (found by batch_precheck)
-                                progress.update_phase(
-                                    phase_id,
-                                    completed=imported_count + failed_count + skipped_in_import,
-                                    failed=failed_count,
-                                    skipped=skipped_in_import + skipped_count,
-                                )
-
-                                # Aggregate this phase's skips into total_skipped
-                                total_skipped += skipped_in_import
-                            else:
-                                imported_count = 0
-                                skipped_in_import = 0  # All resources were skipped by pre-check and counted in skipped_count
-                                total_skipped += skipped_in_import
-                                logger.info(
-                                    "all_resources_exist",
-                                    resource_type=rtype,
-                                    total=len(transformed_resources),
-                                )
-
-                            # NOTE: SCM sync waiting has been removed from automatic flow.
-                            # With two-phase import, users run phase1 (up to projects),
-                            # then manually wait for project sync, then run phase2.
-                            # The wait_for_project_sync() function is still available
-                            # for manual use if needed.
-
-                        elif rtype == "hosts":
-                            # Hosts are imported using bulk API for performance
-                            # Group hosts by inventory for bulk import
-                            hosts_by_inventory: dict[int, list[dict]] = {}
-                            hosts_without_inventory = 0
-
-                            for host in transformed_resources:
-                                source_id = host.get("_source_id")
-
-                                # Skip if already imported (resume mode)
-                                if resume and source_id in imported_source_ids_cache:
-                                    skipped_count += 1
-                                    continue
-
-                                inv_id = host.get("inventory")
-                                if inv_id:
-                                    hosts_by_inventory.setdefault(inv_id, []).append(host)
-                                else:
-                                    hosts_without_inventory += 1
-
-                            if hosts_without_inventory > 0:
-                                logger.warning(
-                                    "hosts_without_inventory",
-                                    count=hosts_without_inventory,
-                                    message="Hosts skipped - no inventory field",
-                                )
-
-                            # Track totals across all inventories
-                            total_created = 0
-                            total_failed = hosts_without_inventory
-                            total_skipped_hosts_bulk = 0
-
-                            # Import each inventory's hosts in bulk
-                            for inv_source_id, inv_hosts in hosts_by_inventory.items():
-                                # Resolve source inventory ID to target inventory ID
-                                target_inv_id = ctx.migration_state.get_mapped_id(
-                                    "inventories", inv_source_id
-                                )
-                                if not target_inv_id:
-                                    logger.warning(
-                                        "inventory_not_mapped",
-                                        source_inventory_id=inv_source_id,
-                                        host_count=len(inv_hosts),
-                                        message="Skipping hosts - inventory not in id_mappings",
+                                    logger.info(
+                                        "database_check_result",
+                                        resource_type=rtype,
+                                        total=len(transformed_resources),
+                                        already_completed=already_completed_count,
+                                        to_import=len(resources_to_import),
                                     )
-                                    # These are skipped (not failed) since inventory wasn't migrated
-                                    total_skipped_hosts_bulk += len(inv_hosts)
+                                else:
+                                    # Proactive batch pre-check: query target to find existing resources
+                                    # This avoids "already exists" errors and shows accurate progress
+                                    resources_to_import = await batch_precheck_resources(
+                                        resource_type=rtype,
+                                        resources=transformed_resources,
+                                        importer=importer,
+                                        client=ctx.target_client,
+                                        state=ctx.migration_state,
+                                        progress=progress,
+                                        phase_id=phase_id,
+                                    )
+
+                                # Calculate skipped count (resources that already exist)
+                                skipped_count = len(transformed_resources) - len(
+                                    resources_to_import
+                                )
+
+                                if resources_to_import:
+                                    echo_info(
+                                        f"🔄 Starting import for {rtype}: {len(resources_to_import)} resources"
+                                    )
+
+                                    # Create progress callback for live updates
+                                    def update_progress(
+                                        success: int,
+                                        failed: int,
+                                        skipped: int,
+                                        phase_id: str = phase_id,
+                                    ) -> None:
+                                        """Update progress display in real-time."""
+                                        progress.update_phase(phase_id, success, failed, skipped)
+
+                                    method = getattr(importer, method_name)
+                                    echo_info(f"⏳ Calling {method_name}...")
+                                    results = await method(
+                                        resources_to_import, progress_callback=update_progress
+                                    )
+                                    echo_info(
+                                        f"✅ {method_name} completed: {len(results) if results else 0} results"
+                                    )
+
+                                    # Calculate actual imported, failed, and skipped from results
+                                    imported_count = len(
+                                        [r for r in results if r and not r.get("_skipped")]
+                                    )
+                                    skipped_in_import = len(
+                                        [r for r in results if r and r.get("_skipped")]
+                                    )
+                                    failed_count = (
+                                        len(resources_to_import)
+                                        - imported_count
+                                        - skipped_in_import
+                                    )
+
+                                    # Final progress update
+                                    # Include both skipped_in_import (found by importer) and skipped_count (found by batch_precheck)
                                     progress.update_phase(
                                         phase_id,
-                                        total_created + total_failed,
-                                        total_failed,
-                                        total_skipped_hosts_bulk,
-                                    )
-                                    continue
-
-                                # Create progress callback that captures current totals
-                                # Using default args to capture current values
-                                def bulk_progress(
-                                    created: int,
-                                    failed: int,
-                                    skipped: int,  # Accept skipped from bulk importer
-                                    _phase_id: str = phase_id,
-                                    base_created: int = total_created,
-                                    base_failed: int = total_failed,
-                                    base_skipped: int = total_skipped_hosts_bulk,  # Pass base skipped
-                                ) -> None:
-                                    # completed = created + failed (NOT skipped - it's passed separately)
-                                    # Progress bar will calculate: completed + skipped = total processed
-                                    progress.update_phase(
-                                        _phase_id,
-                                        completed=base_created + created + base_failed + failed,
-                                        failed=base_failed + failed,
-                                        skipped=base_skipped + skipped,
+                                        completed=imported_count + failed_count + skipped_in_import,
+                                        failed=failed_count,
+                                        skipped=skipped_in_import + skipped_count,
                                     )
 
-                                result = await importer.import_hosts_bulk(  # type: ignore[attr-defined]
-                                    inventory_id=target_inv_id,
-                                    hosts=inv_hosts,
-                                    progress_callback=bulk_progress,
+                                    # Aggregate this phase's skips into total_skipped
+                                    total_skipped += skipped_in_import
+                                else:
+                                    imported_count = 0
+                                    skipped_in_import = 0  # All resources were skipped by pre-check and counted in skipped_count
+                                    total_skipped += skipped_in_import
+                                    logger.info(
+                                        "all_resources_exist",
+                                        resource_type=rtype,
+                                        total=len(transformed_resources),
+                                    )
+
+                                # NOTE: SCM sync waiting has been removed from automatic flow.
+                                # With two-phase import, users run phase1 (up to projects),
+                                # then manually wait for project sync, then run phase2.
+                                # The wait_for_project_sync() function is still available
+                                # for manual use if needed.
+
+                            elif rtype == "hosts":
+                                # Hosts are imported using bulk API for performance
+                                # Group hosts by inventory for bulk import
+                                hosts_by_inventory: dict[int, list[dict]] = {}
+                                hosts_without_inventory = 0
+
+                                for host in transformed_resources:
+                                    source_id = host.get("_source_id")
+
+                                    # Skip if already imported (resume mode)
+                                    if resume and source_id in imported_source_ids_cache:
+                                        skipped_count += 1
+                                        continue
+
+                                    inv_id = host.get("inventory")
+                                    if inv_id:
+                                        hosts_by_inventory.setdefault(inv_id, []).append(host)
+                                    else:
+                                        hosts_without_inventory += 1
+
+                                if hosts_without_inventory > 0:
+                                    logger.warning(
+                                        "hosts_without_inventory",
+                                        count=hosts_without_inventory,
+                                        message="Hosts skipped - no inventory field",
+                                    )
+
+                                # Track totals across all inventories
+                                total_created = 0
+                                total_failed = hosts_without_inventory
+                                total_skipped_hosts_bulk = 0
+
+                                # Import each inventory's hosts in bulk
+                                for inv_source_id, inv_hosts in hosts_by_inventory.items():
+                                    # Resolve source inventory ID to target inventory ID
+                                    target_inv_id = ctx.migration_state.get_mapped_id(
+                                        "inventories", inv_source_id
+                                    )
+                                    if not target_inv_id:
+                                        logger.warning(
+                                            "inventory_not_mapped",
+                                            source_inventory_id=inv_source_id,
+                                            host_count=len(inv_hosts),
+                                            message="Skipping hosts - inventory not in id_mappings",
+                                        )
+                                        # These are skipped (not failed) since inventory wasn't migrated
+                                        total_skipped_hosts_bulk += len(inv_hosts)
+                                        progress.update_phase(
+                                            phase_id,
+                                            total_created + total_failed,
+                                            total_failed,
+                                            total_skipped_hosts_bulk,
+                                        )
+                                        continue
+
+                                    # Create progress callback that captures current totals
+                                    # Using default args to capture current values
+                                    def bulk_progress(
+                                        created: int,
+                                        failed: int,
+                                        skipped: int,  # Accept skipped from bulk importer
+                                        _phase_id: str = phase_id,
+                                        base_created: int = total_created,
+                                        base_failed: int = total_failed,
+                                        base_skipped: int = total_skipped_hosts_bulk,  # Pass base skipped
+                                    ) -> None:
+                                        # completed = created + failed (NOT skipped - it's passed separately)
+                                        # Progress bar will calculate: completed + skipped = total processed
+                                        progress.update_phase(
+                                            _phase_id,
+                                            completed=base_created + created + base_failed + failed,
+                                            failed=base_failed + failed,
+                                            skipped=base_skipped + skipped,
+                                        )
+
+                                    result = await importer.import_hosts_bulk(  # type: ignore[attr-defined]
+                                        inventory_id=target_inv_id,
+                                        hosts=inv_hosts,
+                                        progress_callback=bulk_progress,
+                                    )
+
+                                    batch_created = result.get("total_created", 0)
+                                    batch_failed = result.get("total_failed", 0)
+                                    batch_skipped = result.get(
+                                        "total_skipped", 0
+                                    )  # Get skipped from bulk import
+                                    total_created += batch_created
+                                    total_failed += batch_failed
+                                    total_skipped_hosts_bulk += batch_skipped
+
+                                imported_count = total_created
+                                failed_count = total_failed
+                                skipped_in_import = (
+                                    total_skipped_hosts_bulk  # Update skipped count for this phase
                                 )
+                            else:
+                                # No import method available for this resource type
+                                logger.info(
+                                    "skipping_no_import_method",
+                                    resource_type=rtype,
+                                    message=f"No import method available for {rtype}",
+                                )
+                                skipped_no_importer.append(rtype)
+                                # Mark as complete (all skipped - pass 0 completed, 0 failed, total_count skipped)
+                                progress.update_phase(phase_id, 0, 0, total_count)
+                                progress.complete_phase(phase_id)
+                                continue
 
-                                batch_created = result.get("total_created", 0)
-                                batch_failed = result.get("total_failed", 0)
-                                batch_skipped = result.get(
-                                    "total_skipped", 0
-                                )  # Get skipped from bulk import
-                                total_created += batch_created
-                                total_failed += batch_failed
-                                total_skipped_hosts_bulk += batch_skipped
+                    if resources_total_count == 0:
+                        echo_warning(f"No {rtype} to import, skipping")
+                        progress.complete_phase(phase_id)
+                        continue
 
-                            imported_count = total_created
-                            failed_count = total_failed
-                            skipped_in_import = (
-                                total_skipped_hosts_bulk  # Update skipped count for this phase
-                            )
-                        else:
-                            # No import method available for this resource type
-                            logger.info(
-                                "skipping_no_import_method",
-                                resource_type=rtype,
-                                message=f"No import method available for {rtype}",
-                            )
-                            skipped_no_importer.append(rtype)
-                            # Mark as complete (all skipped - pass 0 completed, 0 failed, total_count skipped)
-                            progress.update_phase(phase_id, 0, 0, total_count)
-                            progress.complete_phase(phase_id)
-                            continue
+                    total_imported += imported_count
+                    final_skipped_for_phase = (
+                        skipped_in_import + skipped_count
+                    )  # Combine skips from importer and pre-check
+                    total_skipped += final_skipped_for_phase
+                    final_failed_for_phase = (
+                        resources_total_count - imported_count - final_skipped_for_phase
+                    )
+                    total_failed += final_failed_for_phase
 
-                        total_imported += imported_count
-                        final_skipped_for_phase = (
-                            skipped_in_import + skipped_count
-                        )  # Combine skips from importer and pre-check
-                        total_skipped += final_skipped_for_phase
-                        final_failed_for_phase = (
-                            len(resources) - imported_count - final_skipped_for_phase
-                        )
-                        total_failed += final_failed_for_phase
+                    # Store stats for summary
+                    run_stats[rtype] = {
+                        "imported": imported_count,
+                        "skipped": final_skipped_for_phase,
+                        "failed": final_failed_for_phase,
+                        "total": resources_total_count,
+                    }
 
-                        # Store stats for summary
-                        run_stats[rtype] = {
-                            "imported": imported_count,
-                            "skipped": final_skipped_for_phase,
-                            "failed": final_failed_for_phase,
-                            "total": len(resources),
-                        }
-
-                        # Update final progress
-                        progress.update_phase(
-                            phase_id,
-                            imported_count,
-                            final_failed_for_phase,
-                            final_skipped_for_phase,
-                        )
-                        logger.info(
-                            "imported_resources",
-                            resource_type=rtype,
-                            imported=imported_count,
-                            skipped=skipped_count,
-                            failed=failed_count,
-                        )
+                    # Update final progress
+                    progress.update_phase(
+                        phase_id,
+                        imported_count,
+                        final_failed_for_phase,
+                        final_skipped_for_phase,
+                    )
+                    logger.info(
+                        "imported_resources",
+                        resource_type=rtype,
+                        imported=imported_count,
+                        skipped=skipped_count,
+                        failed=failed_count,
+                    )
 
                     # Complete this phase
                     progress.complete_phase(phase_id)

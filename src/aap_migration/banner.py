@@ -127,10 +127,10 @@ def get_container_motd() -> str:
 def get_html_meta_tags() -> str:
     """Get HTML meta tags for report attribution."""
     ver = get_version()
-    return f'''
+    return f"""
     <meta name="author" content="{CREATORS} ({GH_HANDLE})">
     <meta name="generator" content="{TOOL_NAME} v{ver}">
-'''
+"""
 
 
 def get_html_footer() -> str:

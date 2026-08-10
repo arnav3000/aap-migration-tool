@@ -220,3 +220,9 @@ class DependencyError(MigrationError):
     """Raised when resource dependencies cannot be resolved."""
 
     pass
+
+
+class ExportStoppedEarlyError(MigrationError):
+    """Raised when export stops before all resources are fetched."""
+
+    pass

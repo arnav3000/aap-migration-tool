@@ -118,6 +118,10 @@ class ParallelTransformCoordinator:
         )
 
         output_file_num = 0
+        file_errors: list[str] = []
+        inventory_source_ids: set[int] | None = None
+        if resource_type == "hosts":
+            inventory_source_ids = self.migration_state.get_source_mapping_ids("inventories")
 
         for json_file in json_files:
             try:
@@ -229,8 +233,10 @@ class ParallelTransformCoordinator:
                     filtered_batch = []
                     for host in transformed_batch:
                         inventory_id = host.get("inventory")
-                        if inventory_id and self.migration_state.has_source_mapping(
-                            "inventories", inventory_id
+                        if (
+                            inventory_id
+                            and inventory_source_ids is not None
+                            and inventory_id in inventory_source_ids
                         ):
                             filtered_batch.append(host)
                         else:
@@ -266,7 +272,10 @@ class ParallelTransformCoordinator:
                     file=str(json_file),
                     error=str(e),
                 )
-                continue
+                file_errors.append(f"{json_file.name}: {e}")
+
+        if file_errors:
+            raise RuntimeError("Transform failed for one or more files: " + "; ".join(file_errors))
 
         # Add transformer stats
         if transformer:

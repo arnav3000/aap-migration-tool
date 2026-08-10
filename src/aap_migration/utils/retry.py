@@ -13,6 +13,7 @@ import httpx
 from tenacity import (
     AsyncRetrying,
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -26,6 +27,15 @@ logger = get_logger(__name__)
 
 # Type variable for decorated functions
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _is_retryable_server_exception(exc: BaseException) -> bool:
+    """Return True for 5xx ServerError/HTTPStatusError; never retry 4xx."""
+    if isinstance(exc, ServerError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return bool(500 <= exc.response.status_code < 600)
+    return False
 
 
 def retry_on_network_error(
@@ -116,32 +126,19 @@ def retry_on_server_error(
         @retry(
             stop=stop_after_attempt(max_attempts),
             wait=wait_exponential(multiplier=1, min=min_wait, max=max_wait),
-            retry=retry_if_exception_type((ServerError, httpx.HTTPStatusError)),
+            retry=retry_if_exception(_is_retryable_server_exception),
             reraise=True,
         )
         @wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            try:
-                return await func(*args, **kwargs)
-            except httpx.HTTPStatusError as e:
-                # Only retry on 5xx errors
-                if 500 <= e.response.status_code < 600:
-                    logger.warning(
-                        "server_error_retrying",
-                        function=func.__name__,
-                        status_code=e.response.status_code,
-                    )
-                    raise
-                else:
-                    # Don't retry client errors
-                    raise
+            return await func(*args, **kwargs)
 
         @wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             @retry(
                 stop=stop_after_attempt(max_attempts),
                 wait=wait_exponential(multiplier=1, min=min_wait, max=max_wait),
-                retry=retry_if_exception_type(ServerError),
+                retry=retry_if_exception(_is_retryable_server_exception),
                 reraise=True,
             )
             def _inner() -> Any:

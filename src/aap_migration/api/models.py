@@ -34,6 +34,10 @@ class Connection(Base):
     def __repr__(self) -> str:
         return f"<Connection(id={self.id}, name='{self.name}', role='{self.role}')>"
 
+    @property
+    def has_token(self) -> bool:
+        return bool(self.token)
+
 
 class JobRecord(Base):
     """Persisted job record — survives container restarts."""

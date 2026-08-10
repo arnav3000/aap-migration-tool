@@ -4,7 +4,8 @@ export interface Connection {
   type: 'awx' | 'aap';
   role: 'source' | 'destination' | 'target';
   url: string;
-  token: string;
+  token?: string;
+  has_token?: boolean;
   verify_ssl: boolean;
   version?: string;
   api_prefix?: string;

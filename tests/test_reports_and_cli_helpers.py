@@ -13,18 +13,10 @@ from aap_migration.analysis.dependency_analyzer import (
     OrgDependencyReport,
     ResourceDependency,
 )
-from aap_migration.analysis.reports import (
-    format_detailed_report as format_detailed_report_v1,
-)
-from aap_migration.analysis.reports import (
-    format_summary_report as format_summary_report_v1,
-)
-from aap_migration.analysis.text_report import (
-    format_detailed_report as format_detailed_report_v2,
-)
-from aap_migration.analysis.text_report import (
-    format_summary_report as format_summary_report_v2,
-)
+from aap_migration.analysis.reports import format_detailed_report as format_detailed_report_v1
+from aap_migration.analysis.reports import format_summary_report as format_summary_report_v1
+from aap_migration.analysis.text_report import format_detailed_report as format_detailed_report_v2
+from aap_migration.analysis.text_report import format_summary_report as format_summary_report_v2
 from aap_migration.cli.commands.config import (
     _display_config_summary,
     _test_connectivity,

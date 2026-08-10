@@ -97,6 +97,32 @@ def test_handle_error_response_maps_conflicts_and_rate_limits() -> None:
             )
         assert limited.value.retry_after == 9
 
+        from datetime import UTC, datetime, timedelta
+        from email.utils import formatdate
+
+        future = datetime.now(UTC) + timedelta(seconds=90)
+        http_date = formatdate(timeval=future.timestamp(), usegmt=True)
+        with pytest.raises(RateLimitError) as dated:
+            client._handle_error_response(
+                build_response(
+                    429,
+                    json_data={"detail": "slow down"},
+                    headers={"Retry-After": http_date},
+                )
+            )
+        assert dated.value.retry_after is not None
+        assert 85 <= dated.value.retry_after <= 95
+
+        with pytest.raises(RateLimitError) as invalid:
+            client._handle_error_response(
+                build_response(
+                    429,
+                    json_data={"detail": "slow down"},
+                    headers={"Retry-After": "not-a-date"},
+                )
+            )
+        assert invalid.value.retry_after is None
+
         with pytest.raises(APIError, match="x, y"):
             client._handle_error_response(build_response(400, json_data=["x", "y"]))
     finally:

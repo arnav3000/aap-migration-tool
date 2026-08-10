@@ -21,6 +21,24 @@ from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+
+def _alembic_command() -> Any:
+    from importlib import import_module
+
+    return import_module("alembic.command")
+
+
+# State tables managed by Alembic (PostgreSQL). API tables use create_all.
+STATE_TABLES = frozenset(
+    {
+        "migration_progress",
+        "checkpoints",
+        "id_mappings",
+        "migration_metadata",
+        "performance_metrics",
+    }
+)
+
 # Global engine and session factory (initialized on first use)
 _engine: Engine | None = None
 _SessionFactory: sessionmaker | None = None
@@ -91,8 +109,62 @@ def _ensure_source_key_columns(engine: Engine) -> None:
                             )
                         )
     except Exception as e:
-        # Non-fatal: fresh create_all DBs already have the column; legacy DBs may need reset
+        if engine.dialect.name == "postgresql":
+            logger.error("source_key_schema_ensure_failed", error=str(e))
+            raise
+        # SQLite test DBs: warn-only so unit tests are not blocked by DDL edge cases
         logger.warning("source_key_schema_ensure_failed", error=str(e))
+
+
+def _alembic_config(database_url: str) -> Any:
+    """Build Alembic config pointing at the project alembic.ini."""
+    from alembic.config import Config
+
+    alembic_ini = Path(__file__).resolve().parents[3] / "alembic.ini"
+    cfg = Config(str(alembic_ini))
+    cfg.set_main_option("sqlalchemy.url", database_url)
+    return cfg
+
+
+def _has_state_tables(engine: Engine) -> bool:
+    from sqlalchemy import inspect
+
+    inspector = inspect(engine)
+    return any(inspector.has_table(table) for table in STATE_TABLES)
+
+
+def _run_alembic_upgrade(engine: Engine, database_url: str) -> None:
+    """Apply Alembic migrations for PostgreSQL state tables."""
+    from sqlalchemy import inspect
+
+    command = _alembic_command()
+
+    cfg = _alembic_config(database_url)
+    inspector = inspect(engine)
+    has_version = inspector.has_table("alembic_version")
+    has_state_tables = _has_state_tables(engine)
+
+    if has_state_tables and not has_version:
+        # Legacy DB created via create_all before Alembic adoption.
+        _ensure_source_key_columns(engine)
+        command.stamp(cfg, "head")
+        logger.info(
+            "legacy_postgres_db_stamped",
+            message="Stamped alembic head for existing state schema",
+        )
+        return
+
+    with engine.begin() as connection:
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, "head")
+
+
+def _create_api_tables(engine: Engine) -> None:
+    """Create API-layer tables (not managed by Alembic)."""
+    from aap_migration.api import models as api_models  # noqa: F401
+
+    api_tables = [t for name, t in Base.metadata.tables.items() if name not in STATE_TABLES]
+    Base.metadata.create_all(engine, tables=api_tables)
 
 
 def _enable_sqlite_foreign_keys(dbapi_conn: Any, connection_record: Any) -> None:
@@ -239,11 +311,16 @@ def init_database(
             pool_recycle=pool_recycle,
         )
 
-        # Create all tables
-        Base.metadata.create_all(_engine)
+        # Create tables: Alembic for PostgreSQL state schema, create_all for SQLite tests.
+        if _engine.dialect.name == "postgresql":
+            _run_alembic_upgrade(_engine, database_url)
+            _create_api_tables(_engine)
+        else:
+            from aap_migration.api import models as api_models  # noqa: F401
 
-        # Best-effort upgrade for existing DBs that predate source_key scoping
-        _ensure_source_key_columns(_engine)
+            Base.metadata.create_all(_engine)
+            # Best-effort upgrade for SQLite test DBs that predate source_key scoping.
+            _ensure_source_key_columns(_engine)
 
         # Create session factory
         _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False)
@@ -371,12 +448,23 @@ def reset_database(database_url: str) -> None:
     try:
         engine = create_database_engine(database_url)
 
-        # Drop all tables
+        # Drop all tables (state + API)
+        from aap_migration.api import models as api_models  # noqa: F401
+
         Base.metadata.drop_all(engine)
         logger.warning("All database tables dropped", database_url=database_url)
 
-        # Recreate all tables
-        Base.metadata.create_all(engine)
+        # Recreate tables
+        if engine.dialect.name == "postgresql":
+            command = _alembic_command()
+
+            cfg = _alembic_config(database_url)
+            with engine.begin() as connection:
+                cfg.attributes["connection"] = connection
+                command.upgrade(cfg, "head")
+            _create_api_tables(engine)
+        else:
+            Base.metadata.create_all(engine)
         logger.info("Database tables recreated", database_url=database_url)
 
         # Dispose of the engine

@@ -3,26 +3,35 @@ from typing import Any, cast
 import httpx
 
 from aap_migration.api.models import Connection
+from aap_migration.api.services.connection_service import ConnectionService
+from aap_migration.api.services.engine_adapter import connection_to_aap_config
 
 
 class PlatformAdapter:
+    """Lightweight HTTP adapter for platform resource browsing.
+
+    URL and auth align with ``ConnectionService`` / ``connection_to_aap_config``
+    (single api_prefix, decrypted token, connection timeout).
+    """
+
     def __init__(self, conn: Connection) -> None:
         self.conn = conn
-        self.api_prefix = conn.api_prefix or (
-            "/api/v2" if conn.type == "awx" else "/api/controller/v2"
-        )
-        self.base_url = f"{conn.url}{self.api_prefix}"
-        self.headers = {}
-        if conn.token:
-            self.headers["Authorization"] = f"Bearer {conn.token}"
+        config = connection_to_aap_config(conn)
+        self.base_url = config.url.rstrip("/")
+        self.verify_ssl = config.verify_ssl
+        self.timeout = config.timeout
+        self.headers: dict[str, str] = {}
+        if config.token:
+            scheme = ConnectionService._auth_scheme(conn)
+            self.headers["Authorization"] = f"{scheme} {config.token}"
 
     def _get(self, path: str, params: dict | None = None) -> dict[Any, Any]:
         resp = httpx.get(
             f"{self.base_url}{path}",
             headers=self.headers,
             params=params,
-            verify=self.conn.verify_ssl,
-            timeout=30,
+            verify=self.verify_ssl,
+            timeout=self.timeout,
         )
         resp.raise_for_status()
         return cast(dict[Any, Any], resp.json())

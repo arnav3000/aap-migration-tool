@@ -13,6 +13,10 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from aap_migration.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class JobStatus(StrEnum):
     PENDING = "pending"
@@ -23,6 +27,18 @@ class JobStatus(StrEnum):
     WAITING_FOR_INPUT = "waiting_for_input"
     COMPLETED_WITH_ERRORS = "completed_with_errors"
     RESUMED = "resumed"
+
+
+MIGRATION_JOB_TYPES = frozenset(
+    {
+        "migration-run",
+        "migrate",
+        "import",
+        "export",
+        "transform",
+        "preview",
+    }
+)
 
 
 class PhaseStatus(StrEnum):
@@ -52,6 +68,7 @@ class Job:
         "_subscribers",
         "_html_report",
         "_resume_event",
+        "persist_degraded",
     )
 
     def __init__(self, job_id: str, name: str, job_type: str):
@@ -70,6 +87,7 @@ class Job:
         self._subscribers: list[asyncio.Queue] = []
         self._html_report: str | None = None
         self._resume_event: asyncio.Event = asyncio.Event()
+        self.persist_degraded: bool = False
 
     async def wait_for_resume(self) -> None:
         """Block until resume_job() is called, then reset the event."""
@@ -136,10 +154,13 @@ class JobService:
                 job.seq_id = record.seq_id
             except Exception:
                 session.rollback()
+                logger.exception("Failed to persist job record %s", job.id)
+                job.persist_degraded = True
             finally:
                 session.close()
-        except Exception:  # nosec B110
-            pass
+        except Exception:
+            logger.exception("Failed to open session for job persist %s", job.id)
+            job.persist_degraded = True
 
     @staticmethod
     def _next_seq_id(session: Session) -> int:
@@ -187,6 +208,9 @@ class JobService:
         coro_factory: Callable[[Job, Callable[[str], None]], Coroutine],
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> str:
+        if job_type in MIGRATION_JOB_TYPES and self._has_running_migration_job():
+            raise RuntimeError("A migration job is already running")
+
         job_id = str(uuid.uuid4())
         job = Job(job_id, name, job_type)
         job.status = JobStatus.RUNNING
@@ -198,7 +222,19 @@ class JobService:
             try:
                 result = await coro_factory(job, lambda line: self.add_log(job_id, line))
                 job.result = result if isinstance(result, dict) else None
-                job.status = JobStatus.COMPLETED
+                if isinstance(result, dict):
+                    phases_failed = int(result.get("phases_failed") or 0)
+                    total_failed = int(
+                        result.get("total_resources_failed") or result.get("total_failed") or 0
+                    )
+                    if phases_failed > 0:
+                        job.status = JobStatus.FAILED
+                    elif total_failed > 0:
+                        job.status = JobStatus.COMPLETED_WITH_ERRORS
+                    else:
+                        job.status = JobStatus.COMPLETED
+                else:
+                    job.status = JobStatus.COMPLETED
             except asyncio.CancelledError:
                 job.status = JobStatus.CANCELLED
                 job.error = "Job was cancelled"
@@ -227,7 +263,11 @@ class JobService:
             try:
                 q.put_nowait(line)
             except asyncio.QueueFull:
-                pass
+                try:
+                    q.get_nowait()
+                    q.put_nowait(line)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    job._subscribers.remove(q)
 
     def subscribe(self, job_id: str) -> asyncio.Queue | None:
         job = self._jobs.get(job_id)
@@ -263,7 +303,7 @@ class JobService:
                     return None
                 job = Job(record.id, record.name, record.type)
                 job.seq_id = record.seq_id
-                job.status = record.status
+                job.status = JobStatus(record.status)
                 job.error = record.error
                 job.created_at = record.created_at
                 job.started_at = record.started_at
@@ -302,9 +342,9 @@ class JobService:
                             "type": r.type,
                             "status": r.status,
                             "created_at": r.created_at.isoformat() if r.created_at else "",
-                            "started_at": (r.started_at or r.created_at).isoformat()
-                            if r.created_at
-                            else "",
+                            "started_at": (
+                                (r.started_at or r.created_at).isoformat() if r.created_at else ""
+                            ),
                             "finished_at": r.completed_at.isoformat() if r.completed_at else None,
                             "error": r.error,
                         }
@@ -326,6 +366,32 @@ class JobService:
             job._task.cancel()
             return True
         return False
+
+    def _has_running_migration_job(self) -> bool:
+        """Return True if a migration-class job is currently running."""
+        for job in self._jobs.values():
+            if job.status == JobStatus.RUNNING and job.type in MIGRATION_JOB_TYPES:
+                return True
+        if self._db_session_factory is None:
+            return False
+        try:
+            from aap_migration.api.models import JobRecord
+
+            session = self._db_session_factory()
+            try:
+                running = (
+                    session.query(JobRecord.id)
+                    .filter(
+                        JobRecord.status == JobStatus.RUNNING,
+                        JobRecord.type.in_(MIGRATION_JOB_TYPES),
+                    )
+                    .first()
+                )
+                return running is not None
+            finally:
+                session.close()
+        except Exception:
+            return False
 
     def resume_job(self, job_id: str) -> bool:
         """Resume a job that is waiting for user input (e.g. credential pause)."""

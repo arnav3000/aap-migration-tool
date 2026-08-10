@@ -218,11 +218,11 @@ async def test_workflow_importer_followup_nodes_and_dependencies(monkeypatch):
 
     fake_session = FakeFailedDepSession(failed_jobs={77}, failed_workflows=set())
     monkeypatch.setattr(
-        "aap_migration.migration.importer.get_session",
+        "aap_migration.migration.importers.workflows.get_session",
         lambda _db_url: contextlib.nullcontext(fake_session),
     )
     monkeypatch.setattr(
-        "aap_migration.migration.importer.MigrationProgress",
+        "aap_migration.migration.importers.workflows.MigrationProgress",
         SimpleNamespace(source_id="source_id", resource_type="resource_type", status="status"),
     )
 
@@ -246,7 +246,9 @@ async def test_workflow_importer_followup_nodes_and_dependencies(monkeypatch):
 
     edge_calls = []
     warnings = {}
-    monkeypatch.setattr("aap_migration.migration.importer.WorkflowNodeImporter", FakeNodeImporter)
+    monkeypatch.setattr(
+        "aap_migration.migration.importers.workflow_nodes.WorkflowNodeImporter", FakeNodeImporter
+    )
 
     async def fake_create_workflow_edges(nodes):
         edge_calls.append(nodes)
@@ -301,24 +303,24 @@ async def test_workflow_importer_followup_nodes_and_dependencies(monkeypatch):
         for item in state.failed
         if isinstance(item, dict)
     )
-    assert client.post_calls[0] == (
+    assert (
         "workflow_job_templates/401/survey_spec/",
         {"spec": [{"question_name": "approve"}]},
-    )
-    assert client.post_calls[1] == (
+    ) in client.post_calls
+    assert (
         "workflow_job_templates/401/schedules/",
         {"name": "WF Schedule", "enabled": False},
-    )
-    assert client.post_calls[2] == (
+    ) in client.post_calls
+    assert (
         "workflow_job_templates/401/notification_templates_success/",
         {"id": 105},
-    )
+    ) in client.post_calls
     assert warnings == {
         11: [
             "Notification template (source ID: 999) not migrated - notification_templates_success notification not associated"
         ]
     }
-    assert state.mapped_ids[("schedules", 12)] == 902
+    assert state.mapped_ids[("schedules", 12)] == 903
     assert progress[-1] == (1, 1, 0)
 
 

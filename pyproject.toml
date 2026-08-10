@@ -193,6 +193,7 @@ strict_optional = true
 [[tool.mypy.overrides]]
 module = [
     "hvac.*",
+    "alembic.*",
 ]
 ignore_missing_imports = true
 
@@ -208,6 +209,7 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "performance: marks tests as performance tests",
+    "postgres: marks tests that require PostgreSQL (TEST_DATABASE_URL or compose db)",
 ]
 asyncio_mode = "auto"
 

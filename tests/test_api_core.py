@@ -25,8 +25,9 @@ def test_encrypt_and_decrypt_round_trip() -> None:
     assert crypto.decrypt_token(encrypted) == "super-secret"
 
 
-def test_decrypt_legacy_plaintext_token_returns_original_value() -> None:
-    assert crypto.decrypt_token("legacy-token") == "legacy-token"
+def test_decrypt_plaintext_token_raises() -> None:
+    with pytest.raises(ValueError, match="not encrypted"):
+        crypto.decrypt_token("legacy-token")
     assert crypto.decrypt_token("") == ""
 
 
@@ -142,8 +143,7 @@ def test_migrate_add_seq_id_backfills_legacy_jobs(tmp_path) -> None:
     engine = create_database_engine(f"sqlite:///{db_path}")
     with engine.begin() as conn:
         conn.execute(
-            text(
-                """
+            text("""
                 CREATE TABLE api_jobs (
                     id VARCHAR(36) PRIMARY KEY,
                     name VARCHAR(255) NOT NULL,
@@ -151,18 +151,15 @@ def test_migrate_add_seq_id_backfills_legacy_jobs(tmp_path) -> None:
                     status VARCHAR(20) NOT NULL,
                     created_at DATETIME NOT NULL
                 )
-                """
-            )
+                """)
         )
         conn.execute(
-            text(
-                """
+            text("""
                 INSERT INTO api_jobs (id, name, type, status, created_at)
                 VALUES
                     ('job-1', 'First', 'test', 'completed', '2024-01-01 00:00:00'),
                     ('job-2', 'Second', 'test', 'completed', '2024-01-02 00:00:00')
-                """
-            )
+                """)
         )
 
     _migrate_add_seq_id(engine)

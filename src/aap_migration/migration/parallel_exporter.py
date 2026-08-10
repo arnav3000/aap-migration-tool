@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from aap_migration.client.aap_source_client import AAPSourceClient
+from aap_migration.client.exceptions import ExportStoppedEarlyError
 from aap_migration.config import ExportConfig, PerformanceConfig
 from aap_migration.migration.exporter import create_exporter
 from aap_migration.migration.state import MigrationState
@@ -341,6 +342,7 @@ class ParallelExportCoordinator:
         total_failed = 0
         total_skipped = 0
         skipped_types = []
+        type_errors: list[str] = []
 
         for item in results:
             if isinstance(item, BaseException):
@@ -348,16 +350,25 @@ class ParallelExportCoordinator:
                     "parallel_export_task_exception",
                     error=str(item),
                 )
+                type_errors.append(str(item))
             else:
                 rtype, stats = item
                 self.results[rtype] = stats
                 total_exported += stats.get("exported", 0)
                 total_failed += stats.get("failed", 0)
 
+                if stats.get("error"):
+                    type_errors.append(f"{rtype}: {stats['error']}")
+
                 # Track skipped types (those without exporters)
                 if stats.get("skipped", 0) > 0 and "skip_reason" in stats:
                     total_skipped += 1
                     skipped_types.append(rtype)
+
+        if type_errors:
+            raise ExportStoppedEarlyError(
+                "Parallel export failed for one or more resource types: " + "; ".join(type_errors)
+            )
 
         logger.info(
             "parallel_export_all_completed",

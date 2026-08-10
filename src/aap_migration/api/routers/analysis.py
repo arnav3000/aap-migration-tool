@@ -119,9 +119,11 @@ def _serialize_report(report: Any) -> dict[str, Any]:
         "dependent_orgs": report.dependent_orgs,
         "migration_order": report.migration_order,
         "migration_phases": [
-            p
-            if isinstance(p, dict)
-            else {"phase": i + 1, "orgs": p, "description": f"Phase {i + 1}"}
+            (
+                p
+                if isinstance(p, dict)
+                else {"phase": i + 1, "orgs": p, "description": f"Phase {i + 1}"}
+            )
             for i, p in enumerate(report.migration_phases or [])
         ],
         "organizations": orgs,
@@ -180,12 +182,9 @@ def get_analysis_result(job_id: str) -> dict[str, Any]:
     job = svc.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    data = job.to_dict()
-    if job.status == JobStatus.COMPLETED and job.result:
-        result = job.result
-        _fix_migration_phases(result)
-        data["data"] = result
-    return data
+    if job.result and job.status in (JobStatus.COMPLETED, JobStatus.COMPLETED_WITH_ERRORS):
+        _fix_migration_phases(job.result)
+    return job.to_dict()
 
 
 def _fix_migration_phases(result: dict[str, Any]) -> None:

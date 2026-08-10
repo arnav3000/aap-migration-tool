@@ -273,9 +273,9 @@ def _format_workflow_nodes_failures(
             entry = {
                 "source_id": source_id,
                 "jt_source_id": jt_source_id,
-                "jt_name": jt_name or f"Unknown (source ID: {jt_source_id})"
-                if jt_source_id
-                else "Unknown",
+                "jt_name": (
+                    jt_name or f"Unknown (source ID: {jt_source_id})" if jt_source_id else "Unknown"
+                ),
                 "jt_status": jt_status if jt_source_id else None,
                 "error": error,
             }

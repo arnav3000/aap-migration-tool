@@ -15,7 +15,7 @@ export interface Job {
   name?: string;
   type: string;
   connection_id?: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'waiting_for_input';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'waiting_for_input' | 'completed_with_errors' | 'resumed';
   started_at: string;
   finished_at?: string;
   error?: string;
@@ -42,6 +42,7 @@ export interface MigrationResource {
   type: string;
   action: string;
   dest_id?: number;
+  target_id?: number;
 }
 
 export interface MigrationPreviewData {

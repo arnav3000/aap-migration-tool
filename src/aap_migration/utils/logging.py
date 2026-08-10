@@ -6,11 +6,12 @@ and human-readable console output for development.
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from rich.console import Console
 from rich.logging import RichHandler
+from structlog.stdlib import BoundLogger
 from structlog.typing import EventDict, WrappedLogger
 
 
@@ -184,7 +185,7 @@ def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     Returns:
         structlog.stdlib.BoundLogger: Configured logger instance
     """
-    return structlog.get_logger(name)
+    return cast(BoundLogger, structlog.get_logger(name))
 
 
 def log_api_request(

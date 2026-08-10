@@ -10,18 +10,19 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from aap_migration.api.dependencies import get_job_service
+from aap_migration.api.schemas import JobResponse, JobSummaryResponse
 from aap_migration.api.services.job_service import JobStatus
 
 router = APIRouter()
 
 
-@router.get("/jobs")
+@router.get("/jobs", response_model=list[JobSummaryResponse])
 def list_jobs() -> list[dict[str, Any]]:
     svc = get_job_service()
     return svc.list_jobs()
 
 
-@router.get("/jobs/{job_id}")
+@router.get("/jobs/{job_id}", response_model=JobResponse)
 def get_job(job_id: str) -> dict[str, Any]:
     svc = get_job_service()
     job = svc.get_job(job_id)

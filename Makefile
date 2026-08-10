@@ -1,8 +1,8 @@
-.PHONY: help install install-dev clean format lint typecheck test test-unit test-integration \
+.PHONY: help install install-dev clean format lint typecheck test test-unit test-integration test-postgres \
        test-performance test-cov test-watch check pre-commit docs docs-serve run-example \
        init-env setup version venv install-editable all \
        build build-api build-ui build-test prepare-pgdata prepare-volumes check-container-env up up-build up-dev down down-images destroy shell shell-engine logs \
-       c-test c-test-backend c-test-frontend c-test-smoke c-test-all c-ci-full c-lint c-format c-typecheck c-check \
+       c-test c-test-backend c-test-frontend c-test-smoke c-test-aap c-test-all c-ci-full c-lint c-format c-typecheck c-check \
        web-install web-dev web-build serve
 
 .DEFAULT_GOAL := help
@@ -85,10 +85,20 @@ test: ## Run all tests
 	$(PYTEST) $(TESTS_DIR)
 
 test-unit: ## Run only unit tests
-	$(PYTEST) $(TESTS_DIR) -v -m "not integration and not performance and not requires_aap and not requires_vault"
+	$(PYTEST) $(TESTS_DIR) -v -m "not integration and not performance and not requires_aap and not requires_vault and not postgres"
 
 test-integration: ## Run only integration tests
 	$(PYTEST) $(TESTS_DIR) -v -m "integration or requires_aap or requires_vault"
+
+test-postgres: ## Run PostgreSQL integration tests (skip if TEST_DATABASE_URL unavailable)
+	@if [ -z "$$TEST_DATABASE_URL" ] && ! $(PYTHON) -c "import socket; s=socket.socket(); s.settimeout(1); s.connect(('localhost',5432)); s.close()" 2>/dev/null; then \
+		echo "Skipping PostgreSQL tests (no TEST_DATABASE_URL and localhost:5432 unreachable)"; \
+	else \
+		$(PYTEST) $(TESTS_DIR) -v -m postgres; \
+	fi
+
+test-aap: ## Run tests that require a live AAP instance (requires_aap marker)
+	$(PYTEST) $(TESTS_DIR) -v -m "requires_aap"
 
 test-performance: ## Run only performance tests
 	$(PYTEST) $(TESTS_DIR) -v -m performance
@@ -100,6 +110,13 @@ test-watch: ## Run tests in watch mode
 	$(PYTEST) $(TESTS_DIR) -f
 
 check: format lint typecheck test ## Run all checks (format, lint, typecheck, test)
+
+db-migrate: ## Apply Alembic migrations to PostgreSQL state database
+	@if [ -z "$$MIGRATION_STATE_DB_PATH" ]; then \
+		echo "Set MIGRATION_STATE_DB_PATH (e.g. postgresql://aap_user:changeme@localhost:5432/aap_migration)"; \
+		exit 1; \
+	fi
+	uv run alembic upgrade head
 
 pre-commit: ## Run pre-commit hooks on all files
 	$(PYTHON) -m pre_commit run --all-files
@@ -215,6 +232,9 @@ c-test-frontend: build-test ## Run frontend tests and production build inside te
 
 c-test-smoke: build-test ## Run container/runtime smoke tests inside test container
 	$(run-test) python3.12 -m pytest tests/test_container_runtime.py -v
+
+c-test-aap: build-test ## Run requires_aap smoke tests inside test container (needs live AAP)
+	$(run-test) python3.12 -m pytest tests -v -m "requires_aap"
 
 c-test-all: c-test-backend c-test-frontend c-test-smoke ## Run complete containerized regression suite
 

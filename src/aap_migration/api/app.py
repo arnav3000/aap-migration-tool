@@ -22,21 +22,24 @@ from aap_migration.api.models import (  # noqa: F401 — registers tables
     MigrationPlanSource,
 )
 from aap_migration.api.services.job_service import JobService
-from aap_migration.migration.database import create_database_engine
-from aap_migration.migration.models import Base
+from aap_migration.migration.database import init_database
 
 
 def _migrate_add_seq_id(engine: object) -> None:
     """Add seq_id column to api_jobs if it doesn't exist, backfill existing rows."""
     from sqlalchemy import inspect, text
+    from sqlalchemy.engine import Engine
 
-    insp = inspect(engine)
+    eng = engine if isinstance(engine, Engine) else None
+    if eng is None:
+        return
+    insp = inspect(eng)
     if not insp.has_table("api_jobs"):
         return
     columns = [c["name"] for c in insp.get_columns("api_jobs")]
     if "seq_id" in columns:
         return
-    with engine.begin() as conn:  # type: ignore[attr-defined]
+    with eng.begin() as conn:
         conn.execute(text("ALTER TABLE api_jobs ADD COLUMN seq_id INTEGER"))
         conn.execute(
             text(
@@ -53,12 +56,16 @@ def _migrate_add_seq_id(engine: object) -> None:
 def _migrate_phase_resource_types(engine: object) -> None:
     """Add update_mode column and phase_resource_types table if missing."""
     from sqlalchemy import inspect, text
+    from sqlalchemy.engine import Engine
 
-    insp = inspect(engine)
+    eng = engine if isinstance(engine, Engine) else None
+    if eng is None:
+        return
+    insp = inspect(eng)
     if insp.has_table("api_migration_plan_phases"):
         columns = [c["name"] for c in insp.get_columns("api_migration_plan_phases")]
         if "update_mode" not in columns:
-            with engine.begin() as conn:  # type: ignore[attr-defined]
+            with eng.begin() as conn:
                 conn.execute(
                     text(
                         "ALTER TABLE api_migration_plan_phases "
@@ -80,9 +87,8 @@ def create_app(db_url: str | None = None) -> FastAPI:
             f"Got {effective_url!r}. Bare file paths are no longer supported."
         )
 
-    engine = create_database_engine(effective_url)
+    engine = init_database(effective_url)
     _migrate_phase_resource_types(engine)
-    Base.metadata.create_all(engine)
     _migrate_add_seq_id(engine)
 
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -119,6 +125,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
     from aap_migration.api.routers import (
         analysis,
         connections,
+        iam,
         jobs,
         migration,
         operations,
@@ -135,6 +142,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
     app.include_router(planner.router, prefix="/api", tags=["planner"])
     app.include_router(jobs.router, prefix="/api", tags=["jobs"])
     app.include_router(analysis.router, prefix="/api", tags=["analysis"])
+    app.include_router(iam.router, prefix="/api", tags=["iam"])
     app.include_router(sizing.router, prefix="/api", tags=["sizing"])
     app.include_router(settings.router, prefix="/api", tags=["settings"])
     app.include_router(websocket.router)

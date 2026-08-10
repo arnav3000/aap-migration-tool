@@ -58,7 +58,7 @@ async def test_migration_router_preview_run_and_state(
     monkeypatch.setattr(migration, "get_db_url", lambda: f"sqlite:///{tmp_path / 'preview.db'}")
     monkeypatch.setattr(
         "aap_migration.resources.get_fully_supported_types",
-        lambda: ["organizations", "users"],
+        lambda: ["organizations", "users", "inventories"],
     )
 
     async def _async_zero(*_a, **_k):
@@ -86,6 +86,16 @@ async def test_migration_router_preview_run_and_state(
                 return [
                     {"id": 2, "username": "alice"},
                     {"id": 3, "username": "bob"},
+                ]
+            if endpoint == "inventories/":
+                return [
+                    {
+                        "id": 10,
+                        "name": "InvA",
+                        "organization": 1,
+                        "total_hosts": 3,
+                        "total_groups": 1,
+                    }
                 ]
             return []
 
@@ -117,6 +127,12 @@ async def test_migration_router_preview_run_and_state(
     assert preview_result["resources"]["organizations"][0]["action"] == "create"
     assert preview_result["resources"]["users"][0]["action"] == "skip"
     assert preview_result["resources"]["users"][0]["name"] == "alice"
+    assert (
+        preview_result["resources"]["users"][0]["dest_id"]
+        == preview_result["resources"]["users"][0]["target_id"]
+    )
+    assert preview_result["host_counts"] == {"InvA": 3}
+    assert preview_result["group_counts"] == {"InvA": 1}
     assert preview_result["bootstrap"]["mapped"] >= 1
     assert any("Filtering to organizations: [1]" in line for line in logs)
     assert any("Scanning source and target" in line for line in logs)
@@ -164,15 +180,15 @@ async def test_migration_router_preview_run_and_state(
         return 0
 
     monkeypatch.setattr(
-        "aap_migration.api.routers.planner._build_source_contexts",
+        "aap_migration.migration.runner._build_source_contexts",
         fake_build_source_contexts,
     )
     monkeypatch.setattr(
-        "aap_migration.api.routers.planner._migrate_resource_type",
+        "aap_migration.migration.runner._migrate_resource_type",
         fake_migrate_resource_type,
     )
     monkeypatch.setattr(
-        "aap_migration.api.routers.planner._run_cac_org_update",
+        "aap_migration.migration.runner._run_cac_org_update",
         fake_run_cac_org_update,
     )
 
@@ -193,11 +209,11 @@ async def test_migration_router_preview_run_and_state(
     run_result = await run_callback(FakeJob(), run_logs.append)
     assert run_result == {
         "total_created": 1,
-        "total_skipped": 1,
+        "total_skipped": 2,
         "total_failed": 0,
         "total_updated": 0,
     }
-    assert captured["migrated_types"] == ["organizations", "users"]
+    assert captured["migrated_types"] == ["organizations", "users", "inventories"]
     assert captured["source_configs"][0]["name_prefix"] == "pre-"  # type: ignore[index]
     assert captured["source_configs"][0]["org_ids"] == [1]  # type: ignore[index]
     events = [json.loads(line[1:]) for line in run_logs if line.startswith("\t{")]
@@ -229,7 +245,7 @@ async def test_migration_router_preview_run_and_state(
     clear_result = migration.clear_migration_state(db=FakeDb())
     assert clear_result.cleared_progress == 2
     assert clear_result.deleted_mappings == 3
-    assert migration.get_exclusions() == {"migration": {}, "cleanup": {}}
+    assert migration.get_exclusions()["migration"]["organizations"] == ["Default"]
 
 
 @pytest.mark.asyncio
@@ -776,3 +792,108 @@ def test_classify_import_no_result_skips_when_not_failed() -> None:
     assert action == "skipped"
     assert "already migrated" in detail.lower()
     assert any("Skipping projects/1" in line for line in logs)
+
+
+@pytest.mark.asyncio
+async def test_migration_router_disk_etl_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+    svc = FakeJobService()
+    source = SimpleNamespace(id="src", name="Source", url="https://source.example.com")
+    target = SimpleNamespace(id="dst", name="Target", url="https://target.example.com")
+    monkeypatch.setattr(
+        migration.ConnectionService,
+        "get",
+        lambda db, conn_id: {"src": source, "dst": target}.get(conn_id),
+    )
+    monkeypatch.setattr(
+        migration.ConnectionService,
+        "build_instance_config",
+        lambda conn: SimpleNamespace(
+            url=conn.url,
+            token="tok",
+            verify_ssl=True,
+            timeout=30,
+        ),
+    )
+    monkeypatch.setattr(migration.ConnectionService, "_auth_scheme", lambda conn: "Token")
+    monkeypatch.setattr(migration, "get_job_service", lambda: svc)
+    monkeypatch.setattr(migration, "get_db_url", lambda: "sqlite:///:memory:")
+
+    async def fake_export(*args, **kwargs):
+        return {"output_dir": "/tmp/exports", "total_resources": 5, "resource_types": {}}
+
+    async def fake_transform(*args, **kwargs):
+        return {
+            "input_dir": "/tmp/exports",
+            "output_dir": "/tmp/xformed",
+            "total_transformed": 5,
+            "total_failed": 0,
+            "resource_types": {},
+        }
+
+    async def fake_import(*args, **kwargs):
+        return {
+            "input_dir": "/tmp/xformed",
+            "total_imported": 4,
+            "total_skipped": 1,
+            "total_failed": 0,
+            "resource_types": {},
+        }
+
+    monkeypatch.setattr("aap_migration.migration.runner.run_disk_export", fake_export)
+    monkeypatch.setattr("aap_migration.migration.runner.run_disk_transform", fake_transform)
+    monkeypatch.setattr("aap_migration.migration.runner.run_disk_import", fake_import)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr("aap_migration.client.aap_source_client.AAPSourceClient", FakeClient)
+    monkeypatch.setattr("aap_migration.client.aap_target_client.AAPTargetClient", FakeClient)
+
+    from aap_migration.api.schemas import (
+        MigrationExportRequest,
+        MigrationImportRequest,
+        MigrationTransformRequest,
+    )
+
+    export_response = await migration.migration_export(
+        MigrationExportRequest(source_id="src", output_dir="/tmp/exports"),
+        db=None,
+    )
+    assert export_response.job_id == "export-job"
+    _, export_type, export_cb = svc.started[0]
+    assert export_type == "export"
+    export_result = await export_cb(FakeJob(), lambda _m: None)
+    assert export_result["output_dir"] == "/tmp/exports"
+
+    svc.jobs["export-job"] = FakeJob(result={"output_dir": "/tmp/exports"})
+    transform_response = await migration.migration_transform(
+        MigrationTransformRequest(export_job_id="export-job", output_dir="/tmp/xformed"),
+        db=None,
+    )
+    assert transform_response.job_id == "transform-job"
+    _, transform_type, transform_cb = svc.started[1]
+    assert transform_type == "transform"
+    transform_result = await transform_cb(FakeJob(), lambda _m: None)
+    assert transform_result["output_dir"] == "/tmp/xformed"
+
+    svc.jobs["transform-job"] = FakeJob(result={"output_dir": "/tmp/xformed"})
+    import_response = await migration.migration_import(
+        MigrationImportRequest(
+            source_id="src",
+            destination_id="dst",
+            transform_job_id="transform-job",
+        ),
+        db=None,
+    )
+    assert import_response.job_id == "import-job"
+    _, import_type, import_cb = svc.started[2]
+    assert import_type == "import"
+    import_result = await import_cb(FakeJob(), lambda _m: None)
+    assert import_result["total_imported"] == 4

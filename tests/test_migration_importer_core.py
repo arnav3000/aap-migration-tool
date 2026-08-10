@@ -1,6 +1,6 @@
 import pytest
 
-from aap_migration.client.exceptions import APIError, ConflictError
+from aap_migration.client.exceptions import APIError, ConflictError, DependencyError
 from aap_migration.config import PerformanceConfig
 from aap_migration.migration.importer import (
     CredentialImporter,
@@ -138,13 +138,11 @@ async def test_resource_importer_helpers_and_base_flow(monkeypatch):
     )
     assert "Main Inv" in enriched
 
-    resolved = await importer._resolve_dependencies(
-        "inventories",
-        {"name": "Inventory", "organization": 1, "inventory": 999},
-    )
-    assert resolved["organization"] == 101
-    assert "inventory" not in resolved
-    assert importer.unresolved_dependencies[0]["missing_source_id"] == 999
+    with pytest.raises(DependencyError, match="Unresolved dependencies"):
+        await importer._resolve_dependencies(
+            "inventories",
+            {"name": "Inventory", "organization": 1, "inventory": 999},
+        )
 
     async def fake_import_resource(resource_type, source_id, data, resolve_dependencies=True):
         if source_id == 1:
@@ -501,6 +499,126 @@ async def test_user_importer_maps_existing_username_on_400():
 
 
 @pytest.mark.asyncio
+async def test_non_managed_existing_credential_patches_org_and_description():
+    """Non-managed credentials on target get PATCH via update_resource (org + description)."""
+    performance = PerformanceConfig()
+    state = FakeState(
+        mapped_ids={
+            ("organizations", 7): 107,
+            ("credential_types", 30): 330,
+        }
+    )
+    client = FakeTargetClient()
+    client.get_results[
+        (
+            "credentials/",
+            (("credential_type", 330), ("name", "Git Cred"), ("organization", 107)),
+        )
+    ] = {"results": [{"id": 55, "managed": False, "name": "Git Cred"}]}
+    importer = CredentialImporter(client, state, performance)
+
+    result = await importer.import_resource(
+        "credentials",
+        30,
+        {
+            "name": "Git Cred",
+            "organization": 7,
+            "credential_type": 30,
+            "description": "Updated description",
+        },
+    )
+
+    assert result is not None
+    assert result["_patched"] is True
+    assert client.update_calls == [
+        ("credentials", 55, {"organization": 107, "description": "Updated description"})
+    ]
+    assert state.get_mapped_id("credentials", 30) == 55
+    assert state.migrated == {("credentials", 30)}
+
+
+@pytest.mark.asyncio
+async def test_deferred_scm_project_transform_import_reimport_patches_credential(sqlite_db_url):
+    """Transform deferred SCM → import manual project → re-import after cred mapping patches."""
+    from aap_migration.config import StateConfig
+    from aap_migration.migration.state import MigrationState
+    from aap_migration.migration.transformer import ProjectTransformer
+
+    state = MigrationState(
+        StateConfig(db_path=sqlite_db_url),
+        migration_id="deferred-scm-e2e",
+    )
+    state.save_id_mapping(
+        resource_type="organizations",
+        source_id=1,
+        target_id=101,
+        source_name="Default",
+        target_name="Default",
+    )
+
+    source_project = {
+        "id": 11,
+        "name": "SCM Project",
+        "organization": 1,
+        "scm_type": "git",
+        "scm_url": "https://git.example.com/repo.git",
+        "scm_branch": "main",
+        "credential": 9,
+        "summary_fields": {
+            "organization": {"id": 1, "name": "Default"},
+            "credential": {"id": 9, "name": "git-cred"},
+        },
+    }
+    transformer = ProjectTransformer(state=state, defer_project_sync=True)
+    transformed = transformer.transform_resource("projects", source_project)
+    assert transformed["scm_type"] == ""
+    assert transformed["_deferred_scm_details"]["credential"] == 9
+
+    client = FakeTargetClient()
+    client.create_result = {"id": 501, "name": "SCM Project", "scm_type": "", "credential": None}
+    client.get_results[("projects/501/", ())] = {
+        "id": 501,
+        "name": "SCM Project",
+        "scm_type": "",
+        "credential": None,
+    }
+    importer = ProjectImporter(client, state, PerformanceConfig())
+
+    first = await importer.import_resource(
+        "projects",
+        11,
+        dict(transformed),
+        resolve_dependencies=False,
+    )
+    assert first is not None
+    assert first["id"] == 501
+    assert client.update_calls == []
+
+    state.save_id_mapping(
+        resource_type="credentials",
+        source_id=9,
+        target_id=209,
+        source_name="git-cred",
+        target_name="git-cred",
+    )
+
+    reimport_payload = dict(transformed)
+    deferred = reimport_payload.get("_deferred_scm_details", {})
+    reimport_payload["credential"] = deferred.get("credential")
+
+    second = await importer.import_resource(
+        "projects",
+        11,
+        reimport_payload,
+        resolve_dependencies=True,
+    )
+    assert second is not None
+    assert second["_already_migrated"] is True
+    assert "credential attached" in second["_skip_reason"]
+    assert client.update_calls == [("projects", 501, {"credential": 209})]
+
+
+@pytest.mark.asyncio
 async def test_project_importer_attaches_credential_on_already_migrated():
     """Re-runs must PATCH SCM credential onto projects created without one."""
     state = FakeState(
@@ -585,7 +703,7 @@ async def test_project_importer_schedule_followup_wait_and_factory(monkeypatch):
     async def fake_sleep(_seconds):
         return None
 
-    monkeypatch.setattr("aap_migration.migration.importer.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("aap_migration.migration.importers.projects.asyncio.sleep", fake_sleep)
     progress = []
     synced, failed, failed_ids = await wait_for_project_sync(
         SyncClient(),

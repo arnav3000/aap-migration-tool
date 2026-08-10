@@ -81,13 +81,16 @@ export function JobDetail() {
   useEffect(() => {
     if (!id || !job || job.type !== 'analysis') return;
     if (analysisData || analysisLoading) return;
-    if (job.status !== 'completed') return;
+    if (job.status !== 'completed' && job.status !== 'completed_with_errors') return;
     setAnalysisLoading(true);
     (async () => {
       try {
-        const res = await api.getAnalysisResult(id) as { status: string; data?: AnalysisData };
-        if (res.status === 'completed' && res.data) {
-          setAnalysisData(res.data);
+        const res = await api.getAnalysisResult(id) as { status: string; result?: AnalysisData };
+        if (
+          (res.status === 'completed' || res.status === 'completed_with_errors')
+          && res.result
+        ) {
+          setAnalysisData(res.result);
           setActiveTab('results');
         }
       } catch { /* ignore */ }
@@ -152,6 +155,8 @@ export function JobDetail() {
     switch (status) {
       case 'running': return 'blue';
       case 'completed': return 'green';
+      case 'completed_with_errors': return 'orange';
+      case 'resumed': return 'blue';
       case 'failed': return 'red';
       case 'cancelled': return 'orange';
       case 'waiting_for_input': return 'gold';

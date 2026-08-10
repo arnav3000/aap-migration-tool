@@ -12,6 +12,9 @@ Containerized deployment for running AAP Bridge as a temporary migration applian
 
 ### Option 1: Using Podman/Docker Directly
 
+**Production:** use Option 2 (compose) with the default PostgreSQL state database.
+SQLite is supported only for local development and unit tests — not for production migrations.
+
 ```bash
 # 1. Create working directory
 mkdir -p ~/aap-migration/{database,logs,exports,xformed,config}
@@ -67,8 +70,8 @@ vi .env  # Update credentials and set AAP_TOKEN_ENCRYPTION_KEY
 # 4. Start the full stack (PostgreSQL is the default database)
 podman-compose up -d
 
-# Optional: switch to SQLite by replacing MIGRATION_STATE_DB_PATH in .env,
-# then bring the stack up again.
+# SQLite (dev/tests only): replace MIGRATION_STATE_DB_PATH in .env with a sqlite:/// DSN,
+# then bring the stack up again. Do not use SQLite for production migrations.
 
 # 5. Run migration
 podman exec -it aap-bridge bash
@@ -169,9 +172,10 @@ MIGRATION_STATE_DB_PATH=postgresql://aap_user:changeme@db:5432/aap_migration
 
 **Important:** If you change `POSTGRES_PASSWORD`, update `MIGRATION_STATE_DB_PATH` to match.
 
-### Using SQLite (Fallback)
+### Using SQLite (dev and unit tests only)
 
-Replace the database DSN in `.env`:
+Replace the database DSN in `.env` when you explicitly want a file-backed database
+for local development or test harnesses — not for production:
 
 ```bash
 MIGRATION_STATE_DB_PATH=sqlite:///./database/migration_state.db

@@ -42,13 +42,16 @@ def encrypt_token(plaintext: str) -> str:
 def decrypt_token(ciphertext: str) -> str:
     """Decrypt a token string.
 
-    Plaintext legacy tokens are returned unchanged for backward compatibility.
-    Encrypted tokens must be decryptable with the configured key.
+    Tokens must be Fernet-encrypted (written via encrypt_token). Plaintext values
+    stored before encryption was enforced must be re-saved through the connections
+    API so encrypt_token runs on write.
     """
     if not ciphertext:
         return ""
     if not ciphertext.startswith("gAAAAA"):
-        return ciphertext
+        raise ValueError(
+            "Stored token is not encrypted. Re-save the connection to encrypt the token."
+        )
     try:
         return str(_get_fernet().decrypt(ciphertext.encode()).decode())
     except InvalidToken as exc:

@@ -6,6 +6,8 @@ rate limiting, retry logic, and comprehensive logging.
 
 import asyncio
 import time
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin
 
@@ -32,6 +34,24 @@ from aap_migration.utils.logging import (
 )
 
 logger = get_logger(__name__)
+
+
+def _parse_retry_after_header(value: str | None) -> int | None:
+    """Parse Retry-After as integer seconds or HTTP-date; None if unparseable."""
+    if not value:
+        return None
+    try:
+        return max(int(value), 0)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at is None:
+                return None
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=UTC)
+            return max(int((retry_at - datetime.now(UTC)).total_seconds()), 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 class BaseAPIClient:
@@ -234,7 +254,7 @@ class BaseAPIClient:
             )
         elif status_code == 429:
             retry_after = response.headers.get("Retry-After")
-            retry_seconds = int(retry_after) if retry_after else None
+            retry_seconds = _parse_retry_after_header(retry_after)
             raise RateLimitError(
                 message="Rate limit exceeded",
                 status_code=status_code,

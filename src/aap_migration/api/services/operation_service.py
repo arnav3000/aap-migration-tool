@@ -86,7 +86,7 @@ class OperationService:
             "token": decrypt_token(conn.token) if conn.token else None,
             "verify_ssl": conn.verify_ssl,
             "type": conn.type,
-            "api_prefix": conn.api_prefix,
+            "api_prefix": getattr(conn, "api_prefix", None),
         }
 
     def start_cleanup(self, conn: Connection) -> str:

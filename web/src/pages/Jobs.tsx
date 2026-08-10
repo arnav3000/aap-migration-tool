@@ -31,8 +31,11 @@ export function Jobs() {
       case 'pending': return 'grey';
       case 'running': return 'blue';
       case 'completed': return 'green';
+      case 'completed_with_errors': return 'orange';
+      case 'resumed': return 'blue';
       case 'failed': return 'red';
       case 'cancelled': return 'orange';
+      case 'waiting_for_input': return 'gold';
       default: return 'grey';
     }
   };
