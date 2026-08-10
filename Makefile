@@ -129,8 +129,8 @@ docs-serve: ## Serve documentation locally
 	uv pip install -e ".[docs]"
 	uv run mkdocs serve -a localhost:8001
 
-run-example: ## Run example migration (requires config)
-	$(PYTHON) -m aap_migration.cli migrate full --config config/config.yaml --dry-run
+run-example: ## Start API server for local development
+	aap-bridge --host 0.0.0.0 --port 8000
 
 init-env: ## Initialize .env file from .env.example
 	@if [ ! -f .env ]; then \
@@ -171,7 +171,7 @@ endef
 
 GIT_COMMIT       := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
-build: ## Build all container images (cli, api, ui)
+build: ## Build all container images (api, ui)
 	podman build -t $(BRIDGE_IMAGE) -f container/Containerfile .
 	podman build -t $(BRIDGE_API_IMAGE) -f container/Containerfile.api .
 	podman build --build-arg GIT_COMMIT=$(GIT_COMMIT) -t $(UI_IMAGE) -f container/Containerfile.ui .
@@ -200,8 +200,8 @@ up: prepare-pgdata check-container-env ## Start db + engine + ui (web interface)
 
 up-build: build up ## Rebuild all images then start db + engine + ui
 
-up-dev: prepare-pgdata check-container-env ## Start db + bridge (CLI dev container)
-	$(COMPOSE) up -d db bridge
+up-dev: prepare-pgdata check-container-env ## Start db + engine (API dev stack)
+	$(COMPOSE) up -d db engine
 
 down: ## Stop containers (keeps volumes and images — migration state is preserved)
 	$(COMPOSE) down
@@ -267,4 +267,4 @@ web-build: ## Build frontend for production
 	cd web && npm run build
 
 serve: ## Start FastAPI API server (requires pip install '.[api]')
-	aap-bridge serve --host 0.0.0.0 --port 8000
+	aap-bridge --host 0.0.0.0 --port 8000

@@ -1,7 +1,7 @@
 """
 Banner and attribution module for AAP Migration Toolkit.
 
-Provides consistent branding across CLI, container, and HTML reports.
+Provides consistent branding across container MOTD and HTML reports.
 """
 
 import datetime
@@ -31,78 +31,6 @@ def get_version() -> str:
         return "dev"
 
 
-def get_cli_banner() -> str:
-    """Get informative banner for CLI startup."""
-    ver = get_version()
-    line = "=" * 62
-    return f"""
-{CYAN}{line}{R}
-
-  {RED}{BOLD}AAP Migration Toolkit{R} {DIM}v{ver}{R}
-  Automated migration from {YELLOW}{BOLD}AAP 2.4{R} to {GREEN}{BOLD}AAP 2.6{R}
-
-{CYAN}{line}{R}
-
-{CYAN}{BOLD}  Resources:{R}
-  {YELLOW}Identity       {R} Organizations, Teams, Users, Credentials
-  {YELLOW}Automation     {R} Job Templates, Workflow Templates, Projects
-  {YELLOW}Infrastructure {R} Inventories, Hosts, Groups, Sources
-  {YELLOW}Operations     {R} Schedules, Notifications, Execution Environments
-
-{CYAN}{BOLD}  Migration Phases (run in order):{R}
-
-  {WHITE}{BOLD}# Phase 1: Foundation{R}
-  {GREEN}${R} aap-bridge migrate -r organizations --skip-prep
-  {GREEN}${R} aap-bridge migrate -r users --skip-prep
-  {GREEN}${R} aap-bridge migrate -r teams --skip-prep
-
-  {DIM}NOTE: The above migrates ONLY local users/teams.{R}
-  {DIM}For LDAP/AD users: migrate settings first (Phase 9),{R}
-  {DIM}skip users/teams - they authenticate automatically.{R}
-
-  {WHITE}{BOLD}# Phase 2: Credentials (must be 100% complete){R}
-  {GREEN}${R} aap-bridge migrate -r credential_types --skip-prep
-  {GREEN}${R} aap-bridge migrate -r credentials --skip-prep
-
-  {WHITE}{BOLD}# Phase 3: Infrastructure{R}
-  {GREEN}${R} aap-bridge migrate -r execution_environments --skip-prep
-  {GREEN}${R} aap-bridge migrate -r projects --skip-prep
-  {GREEN}${R} aap-bridge migrate -r inventories --skip-prep
-  {GREEN}${R} aap-bridge migrate -r inventory_sources --skip-prep
-
-  {WHITE}{BOLD}# Phase 4: Hosts{R}
-  {GREEN}${R} aap-bridge migrate -r hosts --skip-prep
-
-  {WHITE}{BOLD}# Phase 5: Instance Groups{R}
-  {GREEN}${R} aap-bridge migrate -r instance_groups --skip-prep
-
-  {WHITE}{BOLD}# Phase 6: Automation{R}
-  {GREEN}${R} aap-bridge migrate -r job_templates --skip-prep
-  {GREEN}${R} aap-bridge migrate -r workflow_job_templates --skip-prep
-
-  {WHITE}{BOLD}# Phase 7: Applications (OAuth){R}
-  {GREEN}${R} aap-bridge migrate -r applications --skip-prep
-
-  {WHITE}{BOLD}# Phase 8: Schedules{R}
-  {GREEN}${R} aap-bridge migrate -r schedules --skip-prep
-
-  {WHITE}{BOLD}# Phase 9: Settings (optional - review before applying){R}
-  {GREEN}${R} aap-bridge migrate -r settings --skip-prep
-
-  {WHITE}{BOLD}# Phase 10: Notification Templates (optional){R}
-  {GREEN}${R} aap-bridge migrate -r notification_templates --skip-prep
-
-  {RED}{BOLD}IMPORTANT:{R} Phase ordering matters. Each phase depends on
-  resources from prior phases. Run them sequentially.
-
-  {GREEN}${R} aap-bridge {WHITE}{BOLD}migration-report{R}  {DIM}Generate report after migration{R}
-  {GREEN}${R} aap-bridge {WHITE}{BOLD}--help{R}             {DIM}Show all commands{R}
-
-{CYAN}{line}{R}
-  {DIM}Crafted by{R} {WHITE}{BOLD}{CREATORS}{R} {DIM}|{R} {RED}{BOLD}{ORGANIZATION}{R}
-"""
-
-
 def get_container_motd() -> str:
     """Get Message of the Day for container shell login."""
     ver = get_version()
@@ -110,10 +38,11 @@ def get_container_motd() -> str:
 {RED}{BOLD}  AAP Migration Toolkit{R} {DIM}v{ver}{R}
   {DIM}Ansible Automation Platform 2.4 -> 2.6{R}
 
-  {CYAN}{BOLD}Quick Start:{R}
-  {GREEN}${R} aap-bridge {WHITE}{BOLD}migrate -r organizations --skip-prep{R}
-  {GREEN}${R} aap-bridge {WHITE}{BOLD}migration-report{R}
-  {GREEN}${R} aap-bridge {WHITE}{BOLD}--help{R}
+  {CYAN}{BOLD}Web UI:{R}
+  {GREEN}${R} Open the AAP Bridge web interface (engine + ui containers)
+
+  {CYAN}{BOLD}API:{R}
+  {GREEN}${R} aap-bridge {WHITE}{BOLD}--host 0.0.0.0 --port 8000{R}
 
   {CYAN}{BOLD}Paths:{R}
   {WHITE}Config:{R}   /app/aap-bridge/config/config.yaml
@@ -160,8 +89,3 @@ def inject_html_attribution(html_content: str) -> str:
     html_content = html_content[:body_end] + get_html_footer() + html_content[body_end:]
 
     return html_content
-
-
-def print_cli_banner() -> None:
-    """Print CLI banner to stdout."""
-    print(get_cli_banner())

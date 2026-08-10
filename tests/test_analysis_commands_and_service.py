@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
-
-import pytest
 
 import aap_migration.api.models as api_models
 from aap_migration.analysis.dependency_analyzer import (
@@ -14,7 +11,6 @@ from aap_migration.analysis.dependency_analyzer import (
     OrgDependencyReport,
     ResourceDependency,
 )
-from aap_migration.cli.commands import analyze_dependencies as cli_analysis
 
 
 def _build_report() -> GlobalDependencyReport:
@@ -80,83 +76,6 @@ def _build_report() -> GlobalDependencyReport:
     report.average_quality_score = 91.5
     report.get_quality_summary = lambda: {"overall": "good"}  # type: ignore[attr-defined]
     return report
-
-
-@pytest.mark.asyncio
-async def test_analyze_dependencies_cli_modes(tmp_path, monkeypatch) -> None:
-    outputs = []
-    report = _build_report()
-
-    class FakeAnalyzer:
-        def __init__(self, client) -> None:
-            self.client = client
-
-        async def analyze_all_organizations(self):
-            return report
-
-        async def analyze_organization(self, org_name):
-            return report.org_reports["DependentOrg" if org_name == "DependentOrg" else "SharedOrg"]
-
-    monkeypatch.setattr(cli_analysis, "CrossOrgDependencyAnalyzer", FakeAnalyzer)
-    monkeypatch.setattr(cli_analysis, "generate_html_report", lambda report: "<html>deps</html>")
-    monkeypatch.setattr(cli_analysis, "format_summary_report", lambda report: "summary")
-    monkeypatch.setattr(cli_analysis, "format_detailed_report", lambda report: "details")
-    monkeypatch.setattr(
-        "aap_migration.analysis.dependency_graph.topological_sort", lambda graph: list(graph)
-    )
-    monkeypatch.setattr(
-        "aap_migration.analysis.dependency_graph.group_into_phases", lambda graph, order: [order]
-    )
-    monkeypatch.setattr(cli_analysis.click, "echo", lambda msg="": outputs.append(str(msg)))
-
-    ctx = SimpleNamespace(source_client=SimpleNamespace(base_url="https://source.example.com"))
-
-    html_path = tmp_path / "report.html"
-    json_path = tmp_path / "report.json"
-    await cli_analysis.run_analysis(
-        ctx,
-        (),
-        True,
-        False,
-        "text",
-        None,
-        str(html_path),
-        str(json_path),
-    )
-    assert html_path.read_text() == "<html>deps</html>"
-    assert (
-        json.loads(json_path.read_text())["organizations"]["DependentOrg"]["dependencies"][
-            "SharedOrg"
-        ][0]["resource_type"]
-        == "projects"
-    )
-
-    outputs.clear()
-    await cli_analysis.run_analysis(
-        ctx,
-        ("DependentOrg",),
-        False,
-        False,
-        "text",
-        None,
-        None,
-        None,
-    )
-    assert "details" in outputs
-
-    outputs.clear()
-    await cli_analysis.run_analysis(
-        ctx,
-        ("SharedOrg", "DependentOrg"),
-        False,
-        True,
-        "text",
-        None,
-        None,
-        None,
-    )
-    assert "summary" in outputs
-    assert "DETAILED ANALYSIS" in outputs
 
 
 def test_analysis_service_serialization_and_background_run(monkeypatch) -> None:

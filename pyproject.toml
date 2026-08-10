@@ -29,7 +29,6 @@ dependencies = [
     "httpx==0.28.1",
     "h11>=0.16.0",
     "requests>=2.33.0",
-    "click==8.4.2",
     "rich>=13.0.0",
     "structlog==26.1.0",
     "tenacity==8.2.3",
@@ -76,8 +75,7 @@ docs = [
 ]
 
 [project.scripts]
-aap-migrate = "aap_migration.cli.main:main"
-aap-bridge = "aap_migration.cli.main:main"
+aap-bridge = "aap_migration.serve:main"
 
 [project.urls]
 Homepage = "https://github.com/arnav3000/aap-migration-tool"
