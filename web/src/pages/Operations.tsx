@@ -387,54 +387,59 @@ export function Operations() {
             <Text>Pick job templates or workflows from a source and migrate them with all their dependencies to a destination.</Text>
           </TextContent>
 
-          <Flex style={{ marginBottom: 16 }}>
-            <FlexItem>
-              <Text component="small" style={{ marginBottom: 4, fontWeight: 600 }}>Source</Text>
-              <Select
-                isOpen={smSourceOpen}
-                selected={smSourceId || undefined}
-                onSelect={(_e, val) => { setSmSourceId(val as string); setSmSourceOpen(false); }}
-                onOpenChange={setSmSourceOpen}
-                toggle={(toggleRef) => (
-                  <MenuToggle ref={toggleRef} onClick={() => setSmSourceOpen(prev => !prev)} isExpanded={smSourceOpen} style={{ minWidth: 200 }}>
-                    {sources.find(c => c.id === smSourceId)?.name || 'Select source...'}
-                  </MenuToggle>
-                )}
-              >
-                <SelectList>
-                  {sources.map(c => (
-                    <SelectOption key={c.id} value={c.id}>{c.name}</SelectOption>
-                  ))}
-                </SelectList>
-              </Select>
-            </FlexItem>
-            <FlexItem>
-              <Text component="small" style={{ marginBottom: 4, fontWeight: 600 }}>Destination</Text>
-              <Select
-                isOpen={smDestOpen}
-                selected={smDestId || undefined}
-                onSelect={(_e, val) => { setSmDestId(val as string); setSmDestOpen(false); }}
-                onOpenChange={setSmDestOpen}
-                toggle={(toggleRef) => (
-                  <MenuToggle ref={toggleRef} onClick={() => setSmDestOpen(prev => !prev)} isExpanded={smDestOpen} style={{ minWidth: 200 }}>
-                    {destinations.find(c => c.id === smDestId)?.name || 'Select destination...'}
-                  </MenuToggle>
-                )}
-              >
-                <SelectList>
-                  {destinations.map(c => (
-                    <SelectOption key={c.id} value={c.id}>{c.name}</SelectOption>
-                  ))}
-                </SelectList>
-              </Select>
-            </FlexItem>
-            <FlexItem>
-              <FormGroup label="Name prefix (optional)" fieldId="sm-name-prefix">
+          <Card style={{ marginBottom: 16 }}>
+            <CardBody>
+              <Flex style={{ gap: 16, marginBottom: 16 }}>
+                <FlexItem>
+                  <FormGroup label="Source" fieldId="sm-source">
+                    <Select
+                      isOpen={smSourceOpen}
+                      selected={smSourceId || undefined}
+                      onSelect={(_e, val) => { setSmSourceId(val as string); setSmSourceOpen(false); }}
+                      onOpenChange={setSmSourceOpen}
+                      toggle={(toggleRef) => (
+                        <MenuToggle ref={toggleRef} onClick={() => setSmSourceOpen(prev => !prev)} isExpanded={smSourceOpen} style={{ minWidth: 220 }}>
+                          {sources.find(c => c.id === smSourceId)?.name || 'Select source...'}
+                        </MenuToggle>
+                      )}
+                    >
+                      <SelectList>
+                        {sources.map(c => (
+                          <SelectOption key={c.id} value={c.id}>{c.name}</SelectOption>
+                        ))}
+                      </SelectList>
+                    </Select>
+                  </FormGroup>
+                </FlexItem>
+                <FlexItem>
+                  <FormGroup label="Destination" fieldId="sm-destination">
+                    <Select
+                      isOpen={smDestOpen}
+                      selected={smDestId || undefined}
+                      onSelect={(_e, val) => { setSmDestId(val as string); setSmDestOpen(false); }}
+                      onOpenChange={setSmDestOpen}
+                      toggle={(toggleRef) => (
+                        <MenuToggle ref={toggleRef} onClick={() => setSmDestOpen(prev => !prev)} isExpanded={smDestOpen} style={{ minWidth: 220 }}>
+                          {destinations.find(c => c.id === smDestId)?.name || 'Select destination...'}
+                        </MenuToggle>
+                      )}
+                    >
+                      <SelectList>
+                        {destinations.map(c => (
+                          <SelectOption key={c.id} value={c.id}>{c.name}</SelectOption>
+                        ))}
+                      </SelectList>
+                    </Select>
+                  </FormGroup>
+                </FlexItem>
+              </Flex>
+              <FormGroup label="Name Prefix (optional)" fieldId="sm-name-prefix">
                 <TextInput
                   id="sm-name-prefix"
                   value={smNamePrefix}
                   onChange={(_e, val) => setSmNamePrefix(val)}
                   placeholder="e.g. dev_"
+                  style={{ maxWidth: 320 }}
                 />
                 <FormHelperText>
                   <HelperText>
@@ -444,8 +449,8 @@ export function Operations() {
                   </HelperText>
                 </FormHelperText>
               </FormGroup>
-            </FlexItem>
-          </Flex>
+            </CardBody>
+          </Card>
 
           {smError && (
             <Alert variant="danger" isInline title={smError} style={{ marginBottom: 16 }} />
