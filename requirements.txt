@@ -29,7 +29,7 @@ hvac==2.1.0
 
 # Database
 sqlalchemy==2.0.51
-alembic==1.18.5
+alembic==1.19.0
 
 # Version Parsing
 packaging>=24.0
