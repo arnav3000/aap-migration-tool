@@ -17,7 +17,7 @@ from aap_migration.cli.utils import echo_info, echo_success, echo_warning
 from aap_migration.validate.report import (
     resolve_validate_report_dir,
 )
-from aap_migration.validate.org_reports import write_org_scoped_validation_reports
+from aap_migration.validate.org_report import write_org_scoped_validation_reports
 from aap_migration.validate.runner import parse_orgs_arg, run_validation
 
 
