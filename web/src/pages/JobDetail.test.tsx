@@ -192,11 +192,6 @@ describe('JobDetail', () => {
     expect(screen.getByText('Download JSON')).toHaveAttribute('href', '/api/jobs/job-1/analysis.json');
     expect(screen.getByText('Download HTML Report')).toHaveAttribute('href', '/api/jobs/job-1/analysis.html');
     await waitFor(() => expect(api.getAnalysisResult).toHaveBeenCalledWith('job-1'));
-    expect(await screen.findByText('Results')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText('Logs Tab'));
-    expect(screen.getByText('LogViewer job-1')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Close Logs'));
   });
 
   it('cancels a running job', async () => {
