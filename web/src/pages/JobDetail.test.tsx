@@ -5,6 +5,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const navigate = vi.fn();
 const useJobLogsMock = vi.fn();
 
+const apiMockState = vi.hoisted(() => ({
+  analysisResult: { status: 'completed', data: null as Record<string, unknown> | null },
+}));
+
 vi.mock('@patternfly/react-core', () => ({
   Button: ({
     children,
@@ -107,7 +111,7 @@ vi.mock('../api/client', () => ({
     getJob: vi.fn(),
     cancelJob: vi.fn(),
     resumeJob: vi.fn(),
-    getAnalysisResult: vi.fn(),
+    getAnalysisResult: vi.fn(async () => apiMockState.analysisResult),
     exportAnalysisJson: vi.fn((id: string) => `/api/jobs/${id}/analysis.json`),
     exportAnalysisHtml: vi.fn((id: string) => `/api/jobs/${id}/analysis.html`),
     getJobCredentialsCsvUrl: vi.fn((id: string) => `/api/jobs/${id}/credentials.csv`),
@@ -171,6 +175,7 @@ describe('JobDetail', () => {
   });
 
   it('renders completed analysis job with results and export links', async () => {
+    apiMockState.analysisResult = { status: 'completed', data: analysisData };
     vi.mocked(api.getJob).mockResolvedValue({
       id: 'job-1',
       seq_id: 7,
@@ -178,10 +183,6 @@ describe('JobDetail', () => {
       status: 'completed',
       started_at: '2026-01-01T10:00:00Z',
       finished_at: '2026-01-01T10:05:00Z',
-    });
-    vi.mocked(api.getAnalysisResult).mockResolvedValue({
-      status: 'completed',
-      data: analysisData,
     });
 
     render(<JobDetail />);
