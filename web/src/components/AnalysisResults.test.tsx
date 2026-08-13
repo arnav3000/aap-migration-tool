@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { AnalysisResults, type AnalysisData } from './AnalysisResults';
 
+let activeTabKey = 0;
+
 vi.mock('@patternfly/react-core', () => ({
   Title: ({ children }: { children: ReactNode }) => <h3>{children}</h3>,
   Text: ({ children }: { children: ReactNode }) => <p>{children}</p>,
@@ -33,15 +35,19 @@ vi.mock('@patternfly/react-core', () => ({
     children: ReactNode;
     onSelect?: (_e: unknown, key: number) => void;
     activeKey?: number;
-  }) => (
-    <div data-active-tab={activeKey}>
-      {children}
-      <button type="button" onClick={() => onSelect?.(undefined, 1)}>Tab Phases</button>
-      <button type="button" onClick={() => onSelect?.(undefined, 2)}>Tab Orgs</button>
-      <button type="button" onClick={() => onSelect?.(undefined, 3)}>Tab Quality</button>
-    </div>
-  ),
-  Tab: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  }) => {
+    activeTabKey = activeKey ?? 0;
+    return (
+      <div data-active-tab={activeTabKey}>
+        {children}
+        <button type="button" onClick={() => onSelect?.(undefined, 1)}>Tab Phases</button>
+        <button type="button" onClick={() => onSelect?.(undefined, 2)}>Tab Orgs</button>
+        <button type="button" onClick={() => onSelect?.(undefined, 3)}>Tab Quality</button>
+      </div>
+    );
+  },
+  Tab: ({ children, eventKey }: { children: ReactNode; eventKey: number }) =>
+    activeTabKey === eventKey ? <div>{children}</div> : null,
   TabTitleText: ({ children }: { children: ReactNode }) => <span>{children}</span>,
   ExpandableSection: ({ children, toggleText }: { children: ReactNode; toggleText: string }) => (
     <div>
@@ -180,6 +186,7 @@ describe('AnalysisResults', () => {
   });
 
   it('renders summary, phases, organizations, and quality tabs', () => {
+    activeTabKey = 0;
     render(<AnalysisResults data={makeAnalysisData()} />);
 
     expect(screen.getByText('Total Orgs')).toBeInTheDocument();
