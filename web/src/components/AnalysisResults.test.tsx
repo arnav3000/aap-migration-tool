@@ -202,7 +202,7 @@ describe('AnalysisResults', () => {
 
     fireEvent.click(screen.getByText('Tab Orgs'));
     expect(screen.getByText('OrgA')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('▶'));
+    fireEvent.click(screen.getAllByText('▶')[0]);
     expect(screen.getByText('Resource Breakdown')).toBeInTheDocument();
     expect(screen.getByText('Dependencies (1 org(s))')).toBeInTheDocument();
 
