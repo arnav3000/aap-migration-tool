@@ -4,62 +4,63 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { AnalysisResults, type AnalysisData } from './AnalysisResults';
 
-let activeTabKey = 0;
-
-vi.mock('@patternfly/react-core', () => ({
-  Title: ({ children }: { children: ReactNode }) => <h3>{children}</h3>,
-  Text: ({ children }: { children: ReactNode }) => <p>{children}</p>,
-  Button: ({
-    children,
-    onClick,
-  }: ButtonHTMLAttributes<HTMLButtonElement>) => (
-    <button type="button" onClick={onClick}>{children}</button>
-  ),
-  Card: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  CardBody: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  CardTitle: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  Alert: ({ title, children }: { title: string; children?: ReactNode }) => (
-    <div>
-      {title}
-      {children}
-    </div>
-  ),
-  Label: ({ children }: { children: ReactNode }) => <span>{children}</span>,
-  Split: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  SplitItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  Tabs: ({
-    children,
-    onSelect,
-    activeKey,
-  }: {
-    children: ReactNode;
-    onSelect?: (_e: unknown, key: number) => void;
-    activeKey?: number;
-  }) => {
-    activeTabKey = activeKey ?? 0;
-    return (
-      <div data-active-tab={activeTabKey}>
+vi.mock('@patternfly/react-core', () => {
+  let activeTabKey = 0;
+  return {
+    Title: ({ children }: { children: ReactNode }) => <h3>{children}</h3>,
+    Text: ({ children }: { children: ReactNode }) => <p>{children}</p>,
+    Button: ({
+      children,
+      onClick,
+    }: ButtonHTMLAttributes<HTMLButtonElement>) => (
+      <button type="button" onClick={onClick}>{children}</button>
+    ),
+    Card: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+    CardBody: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+    CardTitle: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+    Alert: ({ title, children }: { title: string; children?: ReactNode }) => (
+      <div>
+        {title}
         {children}
-        <button type="button" onClick={() => onSelect?.(undefined, 1)}>Tab Phases</button>
-        <button type="button" onClick={() => onSelect?.(undefined, 2)}>Tab Orgs</button>
-        <button type="button" onClick={() => onSelect?.(undefined, 3)}>Tab Quality</button>
       </div>
-    );
-  },
-  Tab: ({ children, eventKey }: { children: ReactNode; eventKey: number }) =>
-    activeTabKey === eventKey ? <div>{children}</div> : null,
-  TabTitleText: ({ children }: { children: ReactNode }) => <span>{children}</span>,
-  ExpandableSection: ({ children, toggleText }: { children: ReactNode; toggleText: string }) => (
-    <div>
-      <span>{toggleText}</span>
-      {children}
-    </div>
-  ),
-  DescriptionList: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DescriptionListGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DescriptionListTerm: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DescriptionListDescription: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-}));
+    ),
+    Label: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+    Split: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+    SplitItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+    Tabs: ({
+      children,
+      onSelect,
+      activeKey,
+    }: {
+      children: ReactNode;
+      onSelect?: (_e: unknown, key: number) => void;
+      activeKey?: number;
+    }) => {
+      activeTabKey = activeKey ?? 0;
+      return (
+        <div data-active-tab={activeTabKey}>
+          {children}
+          <button type="button" onClick={() => onSelect?.(undefined, 1)}>Tab Phases</button>
+          <button type="button" onClick={() => onSelect?.(undefined, 2)}>Tab Orgs</button>
+          <button type="button" onClick={() => onSelect?.(undefined, 3)}>Tab Quality</button>
+        </div>
+      );
+    },
+    Tab: ({ children, eventKey }: { children: ReactNode; eventKey: number }) =>
+      activeTabKey === eventKey ? <div>{children}</div> : null,
+    TabTitleText: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+    ExpandableSection: ({ children, toggleText }: { children: ReactNode; toggleText: string }) => (
+      <div>
+        <span>{toggleText}</span>
+        {children}
+      </div>
+    ),
+    DescriptionList: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+    DescriptionListGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+    DescriptionListTerm: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+    DescriptionListDescription: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  };
+});
 
 vi.mock('@patternfly/react-table', () => ({
   Table: ({ children }: { children: ReactNode }) => <table>{children}</table>,
@@ -186,7 +187,6 @@ describe('AnalysisResults', () => {
   });
 
   it('renders summary, phases, organizations, and quality tabs', () => {
-    activeTabKey = 0;
     render(<AnalysisResults data={makeAnalysisData()} />);
 
     expect(screen.getByText('Total Orgs')).toBeInTheDocument();
