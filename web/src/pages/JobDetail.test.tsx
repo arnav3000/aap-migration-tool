@@ -190,7 +190,8 @@ describe('JobDetail', () => {
     expect(await screen.findByText(/Job #7: analysis/)).toBeInTheDocument();
     expect(screen.getByText('Download JSON')).toHaveAttribute('href', '/api/jobs/job-1/analysis.json');
     expect(screen.getByText('Download HTML Report')).toHaveAttribute('href', '/api/jobs/job-1/analysis.html');
-    expect(await screen.findByText('Analysis Results View')).toBeInTheDocument();
+    await waitFor(() => expect(api.getAnalysisResult).toHaveBeenCalledWith('job-1'));
+    expect(await screen.findByText('Results')).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('Logs Tab'));
     expect(screen.getByText('LogViewer job-1')).toBeInTheDocument();
