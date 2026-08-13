@@ -26,7 +26,6 @@ classifiers = [
 ]
 
 dependencies = [
-    "awxkit==24.6.1",
     "httpx==0.28.1",
     "h11>=0.16.0",
     "requests>=2.33.0",
@@ -42,7 +41,7 @@ dependencies = [
     "hvac==2.1.0",
     "aiofiles==25.1.0",
     "sqlalchemy==2.0.51",
-    "alembic==1.18.5",
+    "alembic==1.19.0",
     "packaging>=24.0",
     "python-dateutil==2.9.0.post0",
     "psutil==7.2.2",
@@ -189,7 +188,6 @@ strict_optional = true
 
 [[tool.mypy.overrides]]
 module = [
-    "awxkit.*",
     "hvac.*",
 ]
 ignore_missing_imports = true
