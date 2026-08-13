@@ -9,6 +9,34 @@ const apiMockState = vi.hoisted(() => ({
   analysisResult: { status: 'completed', data: null as Record<string, unknown> | null },
 }));
 
+const stableAnalysisData = vi.hoisted(() => ({
+  analysis_date: '2026-01-01',
+  source_url: 'https://src.example.com',
+  total_organizations: 1,
+  analyzed_organizations: ['Default'],
+  independent_orgs: ['Default'],
+  dependent_orgs: [],
+  migration_order: ['Default'],
+  migration_phases: [{ phase: 1, orgs: ['Default'], description: 'Phase 1' }],
+  organizations: {
+    Default: {
+      org_id: 1,
+      resource_count: 5,
+      has_cross_org_deps: false,
+      can_migrate_standalone: true,
+      required_migrations_before: [],
+      blocks: [],
+      dependencies: {},
+      quality: null,
+      resources: { inventory: 5 },
+    },
+  },
+  global_resources: {},
+  total_duplicates: 0,
+  average_quality_score: 80,
+  circular_dependencies: [],
+}));
+
 vi.mock('@patternfly/react-core', () => ({
   Button: ({
     children,
@@ -121,37 +149,11 @@ vi.mock('../api/client', () => ({
 import { api } from '../api/client';
 import { JobDetail } from './JobDetail';
 
-const analysisData = {
-  analysis_date: '2026-01-01',
-  source_url: 'https://src.example.com',
-  total_organizations: 1,
-  analyzed_organizations: ['Default'],
-  independent_orgs: ['Default'],
-  dependent_orgs: [],
-  migration_order: ['Default'],
-  migration_phases: [{ phase: 1, orgs: ['Default'], description: 'Phase 1' }],
-  organizations: {
-    Default: {
-      org_id: 1,
-      resource_count: 5,
-      has_cross_org_deps: false,
-      can_migrate_standalone: true,
-      required_migrations_before: [],
-      blocks: [],
-      dependencies: {},
-      quality: null,
-      resources: { inventory: 5 },
-    },
-  },
-  global_resources: {},
-  total_duplicates: 0,
-  average_quality_score: 80,
-  circular_dependencies: [],
-};
-
 describe('JobDetail', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    apiMockState.analysisResult = { status: 'completed', data: stableAnalysisData };
+    vi.mocked(api.getAnalysisResult).mockImplementation(async () => apiMockState.analysisResult);
     useJobLogsMock.mockReturnValue({
       status: 'completed',
       events: [],
@@ -175,7 +177,6 @@ describe('JobDetail', () => {
   });
 
   it('renders completed analysis job with results and export links', async () => {
-    apiMockState.analysisResult = { status: 'completed', data: analysisData };
     vi.mocked(api.getJob).mockResolvedValue({
       id: 'job-1',
       seq_id: 7,
