@@ -322,6 +322,190 @@ def _build_export_lookup(export_dir: Path) -> dict:
     return lookup
 
 
+def _build_user_email_lookup(export_dir: Path, org_mapper: OrganizationMapper, source_config=None) -> dict[str, list[str]]:
+    """Build org_name -> [emails] mapping from export user data, excluding auditors.
+
+    Strategy:
+    1. Read organization export to get org IDs and names.
+    2. Fetch /api/v2/organizations/{id}/users/ from source API to build
+       user_id → [org_ids] mapping (users are global in AAP, membership is via roles).
+    3. Read user export for emails and is_system_auditor.
+    4. Match user_id → org_names using the API-fetched membership.
+    5. Exclude system auditors and users without email.
+    6. A user belonging to multiple orgs will appear in ALL of them.
+
+    Falls back to org_mapper if the source API is unreachable.
+    """
+    users_dir = export_dir / "users"
+    if not users_dir.is_dir():
+        return {}
+
+    # Load users from export: _source_id → {email, is_system_auditor}
+    user_data: dict[int, dict] = {}
+    for json_file in sorted(users_dir.glob("*.json")):
+        try:
+            with open(json_file, "r") as f:
+                items = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            continue
+        if not isinstance(items, list):
+            continue
+        for user in items:
+            uid = user.get("_source_id") or user.get("id")
+            if uid is None:
+                continue
+            user_data[uid] = {
+                "email": user.get("email", "").strip(),
+                "is_system_auditor": user.get("is_system_auditor", False),
+            }
+
+    if not user_data:
+        return {}
+
+    # Build user_id → [org_names] mapping from source API
+    user_orgs_map: dict[int, list[str]] = {}
+
+    if source_config is not None:
+        user_orgs_map = _fetch_org_user_memberships(export_dir, source_config)
+
+    # If API fetch failed or wasn't attempted, fall back to org_mapper
+    if not user_orgs_map:
+        for uid in user_data:
+            org_name = org_mapper.get_organization_name("users", uid)
+            user_orgs_map[uid] = [org_name]
+
+    # Assemble org_name → [emails], excluding auditors and empty emails.
+    # A user in multiple orgs appears under each org.
+    org_emails: dict[str, list[str]] = defaultdict(list)
+    for uid, info in user_data.items():
+        if info["is_system_auditor"]:
+            continue
+        if not info["email"]:
+            continue
+        org_names = user_orgs_map.get(uid, ["(Unknown)"])
+        for org_name in org_names:
+            org_emails[org_name].append(info["email"])
+
+    return dict(org_emails)
+
+
+def _fetch_org_user_memberships(export_dir: Path, source_config) -> dict[int, list[str]]:
+    """Fetch user→org membership from source API for all exported organizations.
+
+    Calls GET /api/v2/organizations/{id}/users/?page_size=200 for each org,
+    using connection pooling and batched requests for performance on large datasets.
+
+    Returns:
+        Mapping of user_id → [org_names]. A user belonging to multiple
+        organizations will have all org names in the list.
+    """
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    import httpx
+
+    # Read orgs from export to get (org_id, org_name) pairs
+    orgs_dir = export_dir / "organizations"
+    if not orgs_dir.is_dir():
+        return {}
+
+    org_list: list[tuple[int, str]] = []
+    for json_file in sorted(orgs_dir.glob("*.json")):
+        try:
+            with open(json_file, "r") as f:
+                items = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            continue
+        if not isinstance(items, list):
+            continue
+        for org in items:
+            org_id = org.get("id") or org.get("_source_id")
+            org_name = org.get("name")
+            if org_id and org_name:
+                org_list.append((org_id, org_name))
+
+    if not org_list:
+        return {}
+
+    org_list.sort(key=lambda x: x[1])
+
+    # Build API session
+    base_url = source_config.url.rstrip("/")
+    headers = {
+        "Authorization": f"Bearer {source_config.token}",
+        "Content-Type": "application/json",
+    }
+    verify = source_config.verify_ssl
+    timeout = getattr(source_config, "timeout", 60)
+
+    user_orgs_map: dict[int, list[str]] = defaultdict(list)
+
+    try:
+        with httpx.Client(
+            headers=headers,
+            verify=verify,
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+        ) as client:
+            for org_id, org_name in org_list:
+                try:
+                    _fetch_org_members(
+                        client, base_url, org_id, org_name, user_orgs_map
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "org_users_fetch_failed",
+                        org_id=org_id,
+                        org_name=org_name,
+                        error=str(e),
+                    )
+                    continue
+
+    except Exception as e:
+        logger.warning(
+            "user_email_api_fetch_failed",
+            error=str(e),
+            message="Falling back to org_mapper for user-org mapping",
+        )
+        return {}
+
+    logger.info(
+        "user_org_memberships_fetched",
+        total_users_mapped=len(user_orgs_map),
+        organizations_queried=len(org_list),
+    )
+    return dict(user_orgs_map)
+
+
+def _fetch_org_members(
+    client, base_url: str, org_id: int, org_name: str, user_orgs_map: dict[int, list[str]]
+) -> None:
+    """Fetch all user IDs for a single organization with pagination.
+
+    Queries both /users/ (member role) and /admins/ (admin role) endpoints
+    to capture all users associated with the organization.
+    """
+    for endpoint in ("users", "admins"):
+        page = 1
+        page_size = 200
+
+        while True:
+            resp = client.get(
+                f"{base_url}/organizations/{org_id}/{endpoint}/",
+                params={"page": page, "page_size": page_size},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            for user in data.get("results", []):
+                uid = user.get("id")
+                if uid is not None and org_name not in user_orgs_map[uid]:
+                    user_orgs_map[uid].append(org_name)
+
+            if not data.get("next"):
+                break
+            page += 1
+
+
 _MISSING_DEPENDENCY_PATTERNS = [
     "playbook not found",
     "must have a project assigned",
@@ -690,7 +874,7 @@ def generate_enhanced_report(
         # Step 6: Generate report in chosen format
         if output_format == "html":
             echo_info("Generating enhanced HTML report...")
-            report_content = _generate_enhanced_html(org_summary, migration_state)
+            report_content = _generate_enhanced_html(org_summary, migration_state, export_dir, org_mapper, source_config=ctx.config.source)
         elif output_format == "markdown":
             echo_info("Generating enhanced Markdown report...")
             report_content = _format_enhanced_markdown(org_summary, migration_state, error_counter)
@@ -698,7 +882,7 @@ def generate_enhanced_report(
             echo_info("Generating enhanced CSV report...")
             report_content = _format_enhanced_csv(org_summary)
         else:
-            report_content = _generate_enhanced_html(org_summary, migration_state)
+            report_content = _generate_enhanced_html(org_summary, migration_state, export_dir, org_mapper, source_config=ctx.config.source)
 
         output_path.write_text(report_content, encoding="utf-8")
 
@@ -989,9 +1173,11 @@ def _format_enhanced_csv(org_summary: dict) -> str:
 # ---------------------------------------------------------------------------
 # HTML Generation
 # ---------------------------------------------------------------------------
-def _generate_enhanced_html(org_summary: dict, migration_state) -> str:
+def _generate_enhanced_html(org_summary: dict, migration_state, export_dir: Path, org_mapper: OrganizationMapper, source_config=None) -> str:
     """Generate the enhanced interactive HTML report."""
     from html import escape
+
+    user_emails = _build_user_email_lookup(export_dir, org_mapper, source_config)
 
     json_data = {
         "metadata": {
@@ -999,6 +1185,7 @@ def _generate_enhanced_html(org_summary: dict, migration_state) -> str:
             "migration_id": str(migration_state.migration_id),
         },
         "organizations": {},
+        "user_emails": user_emails,
     }
 
     for org_name, summary in org_summary.items():
@@ -1135,22 +1322,24 @@ def _generate_enhanced_html(org_summary: dict, migration_state) -> str:
     </div>
     <div class="tabs">
         <button class="tab active" data-tab="summary">&#x1F4CA; Overview</button>
-        <button class="tab" data-tab="failures">&#x274C; Failures</button>
-        <button class="tab" data-tab="skipped">&#x23ED;&#xFE0F; Skipped</button>
         <button class="tab" data-tab="successful">&#x2705; Successful</button>
+        <button class="tab" data-tab="failures">&#x274C; Failed</button>
+        <button class="tab" data-tab="skipped">&#x23ED;&#xFE0F; Skipped</button>
+        <button class="tab" data-tab="pending">&#x23F3; Pending</button>
         <button class="tab" data-tab="complete">&#x1F4CB; Org Summary</button>
     </div>
     <div class="controls hidden" id="controls">
         <div class="control-group"><label for="orgSelect">Organization</label><select id="orgSelect"><option value="">All Organizations</option></select></div>
         <div class="control-group"><label for="resourceTypeFilter">Resource Type</label><select id="resourceTypeFilter"><option value="">All Types</option></select></div>
         <div class="control-group"><label for="errorFilter">Error</label><select id="errorFilter"><option value="">All Errors</option></select></div>
-        <div class="control-group"><label for="migrationStatusFilter">Migration Status</label><select id="migrationStatusFilter"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="skipped">Skipped</option></select></div>
+        <div class="control-group"><label for="migrationStatusFilter">Migration Status</label><select id="migrationStatusFilter"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="skipped">Skipped</option><option value="pending">Pending</option></select></div>
         <div class="control-group"><label for="statusFilter">Resource Status in AAP</label><select id="statusFilter"><option value="">All</option><option value="Active">Active</option><option value="Probably Stale">Probably Stale</option><option value="Unknown">Unknown</option></select></div>
         <div class="control-group"><label for="searchInput">Search</label><input type="text" id="searchInput" placeholder="Search by name, ID, org, or error..."></div>
         <div class="control-group"><label>&nbsp;</label>
             <div style="display:flex;gap:8px;">
                 <button id="groupToggle" class="btn-toggle" title="Group failures by error pattern">Group Errors</button>
                 <button class="btn-toggle" onclick="exportCSV()">Export CSV</button>
+                <button class="btn-toggle" onclick="exportCSVWithEmails()">Export CSV + Emails</button>
             </div>
         </div>
     </div>
@@ -1163,9 +1352,10 @@ def _generate_enhanced_html(org_summary: dict, migration_state) -> str:
     </div>
     <div class="stats" id="statsContainer"></div>
     <div class="content" id="summaryContent"></div>
+    <div class="content hidden" id="successfulContent"></div>
     <div class="content hidden" id="failuresContent"></div>
     <div class="content hidden" id="skippedContent"></div>
-    <div class="content hidden" id="successfulContent"></div>
+    <div class="content hidden" id="pendingContent"></div>
     <div class="content hidden" id="completeContent"></div>
     <div class="pagination hidden" id="paginationContainer">
         <button id="prevPage">&larr; Previous</button>
@@ -1307,7 +1497,7 @@ function renderSummaryTab() {{
         if (!searchTerm) return true;
         return name.toLowerCase().includes(searchTerm);
     }});
-    const tC = orgs.reduce((s,[_,d])=>s+d.completed,0), tF = orgs.reduce((s,[_,d])=>s+d.failed,0), tSk = orgs.reduce((s,[_,d])=>s+d.skipped,0), tAll = orgs.reduce((s,[_,d])=>s+d.total,0);
+    const tC = orgs.reduce((s,[_,d])=>s+d.completed,0), tF = orgs.reduce((s,[_,d])=>s+d.failed,0), tSk = orgs.reduce((s,[_,d])=>s+d.skipped,0), tP = orgs.reduce((s,[_,d])=>s+d.pending,0), tAll = orgs.reduce((s,[_,d])=>s+d.total,0);
     let tSt = 0; orgs.forEach(([_,o]) => o.resources.forEach(r => {{ if(r.resource_status==='Probably Stale') tSt++; }}));
     const sr = tAll > 0 ? Math.round((tC/tAll)*100) : 0;
     document.getElementById('statsContainer').innerHTML =
@@ -1315,10 +1505,11 @@ function renderSummaryTab() {{
         '<div class="stat-card success"><div class="value">' + tC + '</div><div class="label">Successful</div></div>' +
         '<div class="stat-card failed"><div class="value">' + tF + '</div><div class="label">Failed</div></div>' +
         '<div class="stat-card skipped"><div class="value">' + tSk + '</div><div class="label">Skipped</div></div>' +
+        '<div class="stat-card pending"><div class="value">' + tP + '</div><div class="label">Pending</div></div>' +
         '<div class="stat-card stalled"><div class="value">' + tSt + '</div><div class="label">Prob. Stale</div></div>' +
         '<div class="stat-card"><div class="value">' + sr + '%</div><div class="label">Success Rate</div></div>';
     const sorted = orgs.sort((a,b) => b[1].total - a[1].total);
-    let h = '<table style="table-layout:auto"><thead><tr><th>Organization</th><th>Total</th><th>Successful</th><th>Failed</th><th>Skipped</th><th>Prob. Stale</th><th>Success Rate</th><th>Resource Types</th></tr></thead><tbody>';
+    let h = '<table style="table-layout:auto"><thead><tr><th>Organization</th><th>Total</th><th>Successful</th><th>Failed</th><th>Skipped</th><th>Pending</th><th>Prob. Stale</th><th>Success Rate</th><th>Resource Types</th></tr></thead><tbody>';
     sorted.forEach(([n,s]) => {{
         const r = s.total>0?Math.round((s.completed/s.total)*100):0;
         const rc = r<50?'low':r<80?'medium':'high';
@@ -1330,6 +1521,7 @@ function renderSummaryTab() {{
             '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'successful\\')" title="View Successful"><span class="status-completed">' + s.completed + '</span></td>' +
             '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'failures\\')" title="View Failures"><span class="status-failed">' + s.failed + '</span></td>' +
             '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'skipped\\')" title="View Skipped"><span class="status-skipped">' + s.skipped + '</span></td>' +
+            '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'pending\\')" title="View Pending"><span class="status-pending">' + s.pending + '</span></td>' +
             '<td>' + (st>0?'<span class="resource-status-stale">'+st+'</span>':'0') + '</td>' +
             '<td><span class="success-rate '+rc+'">' + r + '%</span></td>' +
             '<td style="font-size:0.85em">' + s.resource_types.join(', ') + '</td></tr>';
@@ -1384,6 +1576,7 @@ function renderDetailTab() {{
     else if (currentTab==='failures') msf=['failed'];
     else if (currentTab==='skipped') msf=['skipped'];
     else if (currentTab==='successful') msf=['completed'];
+    else if (currentTab==='pending') msf=['pending'];
     else msf=['completed','failed','skipped','pending'];
     filteredData = resources.filter(r => {{
         if (!msf.includes(r.status)) return false;
@@ -1415,7 +1608,7 @@ function renderDetailTab() {{
         '<div class="stat-card stalled"><div class="value">' + stl + '</div><div class="label">Prob. Stale</div></div>' +
         '<div class="stat-card"><div class="value">' + rate + '%</div><div class="label">Success Rate</div></div>';
     applySortToFiltered();
-    if (viewMode === 'grouped' && (currentTab === 'failures' || currentTab === 'skipped' || currentTab === 'complete')) {{ renderGroupedView(); }}
+    if (viewMode === 'grouped' && (currentTab === 'failures' || currentTab === 'skipped' || currentTab === 'pending' || currentTab === 'complete')) {{ renderGroupedView(); }}
     else {{ renderPage(); }}
 }}
 
@@ -1558,6 +1751,25 @@ function exportCSV() {{
     }});
     const blob = new Blob([csv],{{type:'text/csv'}}), url = URL.createObjectURL(blob), a = document.createElement('a');
     a.href = url; a.download = 'report_' + (currentOrg||'all') + '_' + new Date().toISOString().split('T')[0] + '.csv'; a.click(); URL.revokeObjectURL(url);
+}}
+
+function exportCSVWithEmails() {{
+    if (filteredData.length===0) return;
+    const cols = ['org_name','resource_type','source_id','source_name','status','error_key','error_explanation','error_message','resource_status','modified','created_by','modified_by','created','last_job_run','last_job_failed','next_job_run','sync_status'];
+    const headers = ['Organization','Resource Type','Source ID','Name','Migration Status','Error Classification','Error Explanation','Error Message','Resource Status in AAP','Last Modified','Created By','Last Modified By','Created','Last Job Run','Last Job Failed','Next Job Run','Sync Status','Emails'];
+    let csv = headers.join(',') + '\\n';
+    filteredData.forEach(r => {{
+        const row = cols.map(c => {{
+            let v = r[c] != null ? String(r[c]) : '';
+            if (v.includes(',') || v.includes('"') || v.includes('\\n')) v = '"' + v.replace(/"/g, '""') + '"';
+            return v;
+        }});
+        const orgEmails = (DATA.user_emails[r.org_name] || []).join('; ');
+        row.push('"' + orgEmails.replace(/"/g, '""') + '"');
+        csv += row.join(',') + '\\n';
+    }});
+    const blob = new Blob([csv],{{type:'text/csv'}}), url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.download = 'report_emails_' + (currentOrg||'all') + '_' + new Date().toISOString().split('T')[0] + '.csv'; a.click(); URL.revokeObjectURL(url);
 }}
 
 function attachEventListeners() {{
