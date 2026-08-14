@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from aap_migration.client.exceptions import NetworkError, ServerError
 from aap_migration.migration.database import get_session
 from aap_migration.migration.models import IDMapping, MigrationProgress
 from aap_migration.utils.logging import get_logger
@@ -36,7 +37,9 @@ from aap_migration.validate.common import (
     SCHEDULE_PARENT_TYPES,
     UNSCOPED_TYPES,
     WORKFLOW_NODE_TYPES,
+    apply_migration_buckets,
     build_executive_summary,
+    classify_sync_from_api,
     count_explained_gaps,
 )
 from aap_migration.validate.models import (
@@ -52,6 +55,7 @@ from aap_migration.validate.models import (
     OrgValidationSummary,
     PerInventoryCountParity,
     PerTypeResult,
+    SyncEntry,
     T1Counts,
     T2Existence,
     T3FieldParity,
@@ -495,6 +499,17 @@ def _object_source_id(obj: dict) -> int | None:
         return None
 
 
+def _prefixed_import_reason(prefix: str, err_msg: str | None) -> str:
+    """Format an import gap explanation without duplicating Failed:/Skipped:."""
+    text = (err_msg or "").strip()
+    if not text:
+        return prefix
+    marker = f"{prefix.lower()}:"
+    if text.lower().startswith(marker):
+        return text
+    return f"{prefix}: {text}"
+
+
 def _classify_unmatched_gap(
     status_by_id: dict[tuple[str, int], tuple[str, str]],
     rtype: str,
@@ -508,30 +523,26 @@ def _classify_unmatched_gap(
       bucket: "failed" | "skipped" | "unexplained"
       object_status: ObjectEntry status (failed/skipped/pending) — never conflates
         unexplained live gaps with import failures
+
+    In live mode, when migration DB status is available the explanation is the
+    import reason only (Failed/Skipped/Pending/Status) — the Missing tab already
+    implies the object is absent on the live target. Without DB status, live
+    gaps use ``Not found on live target``.
     """
     status_info = status_by_id.get((rtype, sid))
     if status_info:
         status_val, err_msg = status_info
         if status_val == "failed":
-            explanation = f"Failed: {err_msg}" if err_msg else "Failed"
-            if live_mode:
-                explanation = f"Not found on live target ({explanation})"
+            explanation = _prefixed_import_reason("Failed", err_msg)
             return "failed", "failed", explanation
         if status_val == "skipped":
-            explanation = f"Skipped: {err_msg}" if err_msg else "Skipped"
-            if live_mode:
-                explanation = f"Not found on live target ({explanation})"
+            explanation = _prefixed_import_reason("Skipped", err_msg)
             return "skipped", "skipped", explanation
         if status_val == "pending":
-            explanation = "Pending migration"
-            if live_mode:
-                explanation = f"Not found on live target ({explanation})"
-            return "unexplained", "pending", explanation
+            return "unexplained", "pending", "Pending migration"
         explanation = (
             f"Status: {status_val}" if status_val else "Not tracked in migration DB"
         )
-        if live_mode:
-            explanation = f"Not found on live target ({explanation})"
         return "unexplained", "pending", explanation
 
     if live_mode:
@@ -1939,6 +1950,37 @@ def _build_extra_details(
     return details, truncated, omitted
 
 
+_SYNC_ENTRY_TYPES = ("projects", "inventory_sources")
+
+
+def _build_sync_entries(
+    live_fetched: dict[str, list[dict]],
+    inv_org_by_name: dict[str, tuple[str, Optional[int]]],
+    inv_org_by_id: dict[int, tuple[str, Optional[int]]],
+    ujt_org_by_name: dict[str, tuple[str, Optional[int]]],
+) -> list[SyncEntry]:
+    """Build sync status rows for all live target projects and inventory sources."""
+    entries: list[SyncEntry] = []
+    for rtype in _SYNC_ENTRY_TYPES:
+        for obj in live_fetched.get(rtype, []):
+            sync_status, failed, job_id = classify_sync_from_api(obj)
+            tid = _object_target_id(obj)
+            name = _object_display_name(obj) or (f"id:{tid}" if tid is not None else "unknown")
+            org_name, _ = _resolve_object_org(
+                rtype, obj, inv_org_by_name, inv_org_by_id, ujt_org_by_name,
+            )
+            entries.append(SyncEntry(
+                name=name,
+                resource_type=rtype,
+                organization=org_name,
+                target_id=tid,
+                sync_status=sync_status,
+                failed=failed,
+                last_job_id=job_id,
+            ))
+    return entries
+
+
 def build_validation_result(
     exports: dict[str, list[dict]],
     all_stats: dict[str, dict],
@@ -2319,14 +2361,31 @@ def build_validation_result(
             if entry.source_id is not None and entry.source_id in sid_set:
                 entry.field_changed = True
 
+    sync_entries: list[SyncEntry] = []
+    if live_mode and live_fetched:
+        sync_entries = _build_sync_entries(
+            live_fetched,
+            tgt_inv_org_by_name,
+            tgt_inv_org_by_id,
+            tgt_ujt_org_by_name,
+        )
+
+    sync_failed = sum(1 for entry in sync_entries if entry.failed)
+
+    per_type_results = apply_migration_buckets(per_type_results, object_inventory)
+
     return ValidationResult(
         metadata=meta,
-        executive_summary=build_executive_summary(per_type_results),
+        executive_summary=build_executive_summary(
+            per_type_results,
+            sync_failed=sync_failed,
+        ),
         per_type=per_type_results,
         per_org=per_org_data,
         object_inventory=object_inventory,
         t4_host_sampling=t4,
         auditor_cross_check=auditor_cross_check or AuditorCrossCheck(),
+        sync_entries=sync_entries,
     )
 
 
@@ -2415,6 +2474,16 @@ async def run_validation(
     if live:
         if target_client is None:
             raise ValueError("--live requires target API access (target_client)")
+
+        base_url = getattr(target_client, "base_url", "target AAP")
+        try:
+            await target_client.get("ping/")
+        except (NetworkError, ServerError) as exc:
+            raise ValueError(
+                f"Target AAP is not available ({base_url}). "
+                f"Could not reach GET /api/controller/v2/ping/: {exc}"
+            ) from exc
+        logger.info("validate_target_ping_ok", target_url=base_url)
 
         types = sorted(exports.keys())
         if resource_type:

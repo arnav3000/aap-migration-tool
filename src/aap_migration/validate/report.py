@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from aap_migration.validate.common import count_failed_resource_types
 from aap_migration.validate.models import ValidationResult
 
 
@@ -68,6 +69,8 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
         for t in result.per_type
     )
     total_field_mm = sum(t.t3_field_parity.mismatching for t in result.per_type)
+    total_sync_failed = sum(1 for s in result.sync_entries if s.failed)
+    types_failed = count_failed_resource_types(result.per_type)
     n_types = len(result.per_type)
     n_orgs = len(result.per_org)
     orgs_red = sum(1 for o in result.per_org.values() if o.health == "red")
@@ -493,9 +496,10 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
   <div class="shell">
   <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
   <button class="tab-btn" data-tab="orgs">Org Health <span class="ct{' ok' if (orgs_red + orgs_amber) == 0 else ''}" title="Organizations with red or amber health">{_fmt(orgs_red + orgs_amber)}</span></button>
-  <button class="tab-btn" data-tab="types">Resource Types <span style="opacity:.55;font-weight:600">T1</span></button>
+  <button class="tab-btn" data-tab="types">Resource Types <span style="opacity:.55;font-weight:600">T1</span> <span class="ct{' ok' if types_failed == 0 else ''}" title="Resource types with failures">{_fmt(types_failed)}</span></button>
   <button class="tab-btn" data-tab="missing">Missing <span style="opacity:.55;font-weight:600">T2</span> <span class="ct{' ok' if total_missing == 0 else ''}">{_fmt(total_missing)}</span></button>
   <button class="tab-btn" data-tab="extra">Extra <span style="opacity:.55;font-weight:600">T2</span>{f' <span class="ct{" ok" if total_extra_listed == 0 else " warn"}" title="Target objects not matched to export (hosts omitted from list)">{_fmt(total_extra_listed)}</span>' if is_live_validate else ''}</button>
+  <button class="tab-btn" data-tab="syncs">Syncs <span style="opacity:.55;font-weight:600">T2</span>{f' <span class="ct{" ok" if total_sync_failed == 0 else ""}" title="Failed project or inventory source syncs">{_fmt(total_sync_failed)}</span>' if is_live_validate else ''}</button>
   <button class="tab-btn" data-tab="fields">Field Changes <span style="opacity:.55;font-weight:600">T3</span>{f' <span class="ct{" ok" if total_field_mm == 0 else " warn"}" title="Objects with ≥1 field mismatch">{_fmt(total_field_mm)}</span>' if is_live_validate else ''}</button>
   <button class="tab-btn" data-tab="hosts">Hosts <span style="opacity:.55;font-weight:600">T4</span>{f' <span class="ct{" ok" if host_issues == 0 else ""}">{_fmt(host_issues)}</span>' if host_tab_ran else ""}</button>
   <button class="tab-btn" data-tab="auditor">Auditor{auditor_tab_badge}</button>
@@ -511,6 +515,7 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 <div class="content hidden" id="typesContent"></div>
 <div class="content hidden" id="missingContent"></div>
 <div class="content hidden" id="extraContent"></div>
+<div class="content hidden" id="syncsContent"></div>
 <div class="content hidden" id="fieldsContent"></div>
 
 <!-- Hosts tab: client-rendered (mismatch default + inventory search) -->
@@ -641,13 +646,26 @@ function restoreKeptFocus(){{
   _keepFocus=null;
 }}
 /* Shared list-tab pagination sizes */
-var PAGE_MISSING=50,PAGE_EXTRA=50,PAGE_FIELDS=20,PAGE_OBJECTS=100;
+var PAGE_MISSING=50,PAGE_EXTRA=50,PAGE_SYNC=50,PAGE_FIELDS=20,PAGE_OBJECTS=100;
 function cmpLocale(a,b){{return String(a||'').localeCompare(String(b||''));}}
 function paginateSlice(page,perPage,total){{
   var pages=Math.ceil(total/perPage)||1;
   page=clampPage(page,pages);
   var start=(page-1)*perPage;
   return {{page:page,pages:pages,start:start,sliceStart:start,sliceEnd:start+perPage}};
+}}
+function showTotalSuffix(filteredCount,poolCount,totalCount,totalLabel){{
+  if(totalCount==null)return '';
+  if(totalCount!==poolCount||(filteredCount<poolCount&&poolCount<totalCount)){{
+    return ' &middot; '+fmt(totalCount)+(totalLabel?' '+totalLabel:'')+' total';
+  }}
+  return '';
+}}
+function showingLine(filteredCount,poolCount,unit,totalCount){{
+  var suffix=unit?' '+unit:'';
+  var line='Showing '+fmt(filteredCount)+' of '+fmt(poolCount)+suffix;
+  line+=showTotalSuffix(filteredCount,poolCount,totalCount);
+  return '<div style="font-size:.82rem;color:var(--fg2);margin:.3rem 0">'+line+'</div>';
 }}
 function renderPager(page,pages,total,prevExpr,nextExpr,unit){{
   if(pages<=1)return'';
@@ -673,7 +691,7 @@ function jumpToTab(tab,opts){{
   opts=opts||{{}};
   if(tab==='missing'){{
     misType=opts.type||'all';misOrg=opts.org||'';misSearch='';
-    misExplReason='';misPage=1;
+    misExplReason='';misExplClass=opts.explClass||'';misPage=1;
   }}else if(tab==='extra'){{
     extraType=opts.type||'all';extraOrg=opts.org||'';extraSearch='';extraPage=1;
   }}else if(tab==='fields'){{
@@ -848,29 +866,8 @@ function countIssueObjects(items){{
     return e.st==='f'||e.st==='p'||e.st==='s'||!!e.fc;
   }}).length;
 }}
-/* Resource-type status for T1 summary cards — use T1 counts + inventory, not
-   inventory alone (live gaps with completed/skipped import status are still
-   problem types; empty inventory must not hide explained_failures). */
 function typeMigrationBucket(t){{
-  var items=INV[t.resource_type]||[];
-  var c=t.t1_counts||{{}};
-  var e=t.t2_existence||{{}};
-  if((c.explained_failures||0)>0||(c.unexplained||0)>0)return'f';
-  var i;
-  for(i=0;i<items.length;i++){{if(items[i].st==='f')return'f'}}
-  if(!items.length){{
-    // No inventory rows for this type in current view/output.
-    // If there are known gaps, keep this non-success; otherwise pending.
-    return (e.missing_on_target||0)>0?'f':'p';
-  }}
-  var hasS=false,hasP=false;
-  for(i=0;i<items.length;i++){{
-    if(items[i].st==='s')hasS=true;
-    else if(items[i].st==='p')hasP=true;
-  }}
-  if(hasS)return's';
-  if(hasP)return'p';
-  return'c';
+  return t.migration_bucket||'p';
 }}
 function clampPage(page,pages){{
   if(!pages||pages<1)return 1;
@@ -961,7 +958,7 @@ function init(){{
 function switchTab(tab){{
   curTab=tab;
   document.querySelectorAll('.tab-btn').forEach(function(b){{b.classList.toggle('active',b.dataset.tab===tab)}});
-  var lazy=['dashboardContent','orgsContent','typesContent','missingContent','extraContent','fieldsContent','hostsContent'];
+  var lazy=['dashboardContent','orgsContent','typesContent','missingContent','extraContent','syncsContent','fieldsContent','hostsContent'];
   document.querySelectorAll('.content').forEach(function(c){{
     var on=c.id===tab+'Content';
     c.classList.toggle('hidden',!on);
@@ -973,17 +970,28 @@ function switchTab(tab){{
   else if(tab==='types')renderTypes();
   else if(tab==='missing')renderMissing();
   else if(tab==='extra')renderExtra();
+  else if(tab==='syncs')renderSyncs();
   else if(tab==='fields')renderFields();
   else if(tab==='hosts')renderHosts();
 }}
 function jumpToMissing(typeFilter,orgFilter){{
   jumpToTab('missing',{{type:typeFilter,org:orgFilter}});
 }}
+function jumpToUnexplained(){{
+  jumpToTab('missing',{{explClass:'unexplained'}});
+}}
 function jumpToExtra(typeFilter,orgFilter){{
   jumpToTab('extra',{{type:typeFilter,org:orgFilter}});
 }}
 function jumpToFields(typeFilter,orgFilter){{
   jumpToTab('fields',{{type:typeFilter,org:orgFilter}});
+}}
+function jumpToSyncs(){{
+  syncShow='failed';syncType='all';syncOrg='';syncSearch='';syncPage=1;
+  switchTab('syncs');
+}}
+function jumpToFailedTypes(){{
+  allObjView=null;typeDrill=null;typesBucketFilter='f';switchTab('types');
 }}
 function jumpToAllObjects(statusFilter){{
   allObjView=true;typeDrill=null;objSt=statusFilter||'issues';allObjType='all';objOrg='';objSearch='';objPage=1;switchTab('types');
@@ -1012,6 +1020,8 @@ function renderDashboard(){{
   var okeys=Object.keys(po),nOrgs=okeys.length;
   var oR=0,oA=0,oG=0;
   okeys.forEach(function(k){{var h=po[k].health;if(h==='red')oR++;else if(h==='amber')oA++;else oG++}});
+  var typesFailed=0;
+  pt.forEach(function(t){{if(typeMigrationBucket(t)==='f')typesFailed++;}});
 
   var h='<h2>Migration Overview</h2>';
 
@@ -1058,9 +1068,14 @@ function renderDashboard(){{
   h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'all\\')" title="Target-side object count from T1 (browse source inventory via All Objects)"><div class="v">'+fmt(tgt)+'</div><div class="l">Target objects &#8594;</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="jumpToAllObjects(\\'c\\')" title="T2 matched count; opens Completed inventory rows"><div class="v ok">'+fmt(mat)+'</div><div class="l">Matched &#8594;</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="jumpToMissing()"><div class="v'+(mis===0?' ok':' bad')+'">'+fmt(mis)+'</div><div class="l">Missing &#8594;</div></div>';
+  h+='<div class="card" style="cursor:pointer" onclick="jumpToFailedTypes()" title="Resource types with missing objects or import failures"><div class="v'+(typesFailed===0?' ok':' bad')+'">'+fmt(typesFailed)+'</div><div class="l">Failed resource types &#8594;</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="jumpToExtra()" title="Listed extras exclude hosts (see Extra tab)"><div class="v'+(extListed===0?' ok':' warn')+'">'+fmt(extListed)+'</div><div class="l">Extra on target &#8594;</div></div>';
   h+='<div class="card" style="cursor:pointer" onclick="jumpToFields()"><div class="v'+(fmm===0?' ok':' warn')+'">'+fmt(fmm)+'</div><div class="l">Objects with field changes &#8594;</div></div>';
-  h+='<div class="card" style="cursor:pointer" onclick="jumpToMissing()"><div class="v'+(unex===0?' ok':' bad')+'">'+fmt(unex)+'</div><div class="l">Unexplained &#8594;</div></div>';
+  if(D.metadata&&D.metadata.mode==='validate-live'){{
+    var syncFailed=(D.executive_summary&&D.executive_summary.total_sync_failed)||0;
+    h+='<div class="card" style="cursor:pointer" onclick="jumpToSyncs()" title="Failed project or inventory source syncs on the live target"><div class="v'+(syncFailed===0?' ok':' bad')+'">'+fmt(syncFailed)+'</div><div class="l">Failed syncs &#8594;</div></div>';
+  }}
+  h+='<div class="card" style="cursor:pointer" onclick="jumpToUnexplained()" title="Missing objects with no DB explanation"><div class="v'+(unex===0?' ok':' bad')+'">'+fmt(unex)+'</div><div class="l">Unexplained &#8594;</div></div>';
   h+='</div>';
 
   // Migration status cards — completed/failed/skipped
@@ -1127,8 +1142,11 @@ function renderOrgs(){{
   }});
 
   // Filter
-  var filtered=orgs.filter(function(o){{
+  var pool=orgs.filter(function(o){{
     if(orgFilter!=='all'&&o.health!==orgFilter)return false;
+    return true;
+  }});
+  var filtered=pool.filter(function(o){{
     if(orgSearch&&o.org_name!==orgSearch)return false;
     return true;
   }});
@@ -1172,6 +1190,7 @@ function renderOrgs(){{
   orgPage=clampPage(orgPage,pages);
   var start=(orgPage-1)*PER,slice=filtered.slice(start,start+PER);
 
+  h+=showingLine(filtered.length,pool.length,'organizations',orgs.length);
   h+='<table><thead><tr><th>Organization</th><th style="width:200px">Progress</th><th class="num">Objects</th><th class="num">Missing</th><th class="num">Failed</th><th class="num">Changed</th><th class="num">Unexplained</th><th>Health</th></tr></thead><tbody>';
   if(!slice.length){{
     h+='<tr><td colspan="8" class="empty-msg">No organizations match your filter.</td></tr>';
@@ -1333,8 +1352,11 @@ function renderOrgObj(orgName,rt){{
   var o=(D.per_org||{{}})[orgName];
   if(!o){{orgObjType=null;orgDrill=null;renderOrgs();return}}
   var items=invForTypeOrg(rt,o.org_name);
-  var filtered=sortProblemsFirst(items.filter(function(e){{
+  var pool=items.filter(function(e){{
     if(!matchesObjFilter(e))return false;
+    return true;
+  }});
+  var filtered=sortProblemsFirst(pool.filter(function(e){{
     if(objSearch&&e.n.toLowerCase().indexOf(objSearch.toLowerCase())<0)return false;
     return true;
   }}));
@@ -1367,7 +1389,7 @@ function renderOrgObj(orgName,rt){{
   h+='<div class="v skip">'+fmt(cP)+'</div><div class="l">Pending objects</div></div>';}}
   h+='</div>';
 
-  h+=renderObjectTable(items,filtered,'orgsContent','&#9664; Back','renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')',rt,'flt-orgobj');
+  h+=renderObjectTable(items,pool,filtered,'orgsContent','&#9664; Back','renderOrgObj(\\''+oSafe+'\\',\\''+esc(rt)+'\\')',rt,'flt-orgobj');
   h+='</div>';
   document.getElementById('orgsContent').innerHTML=h;
   restoreKeptFocus();
@@ -1389,10 +1411,13 @@ function renderAllObjects(){{
     if(e.st==='c')cC++;else if(e.st==='f')cF++;else if(e.st==='s')cS++;else cP++;
     if(e.fc)cFc++;
   }});
-  var filtered=sortProblemsFirst(items.filter(function(e){{
+  var pool=sortProblemsFirst(items.filter(function(e){{
     if(!matchesObjFilter(e))return false;
     if(allObjType!=='all'&&e._rt!==allObjType)return false;
     if(objOrg&&e.o!==objOrg)return false;
+    return true;
+  }}));
+  var filtered=sortProblemsFirst(pool.filter(function(e){{
     if(objSearch&&e.n.toLowerCase().indexOf(objSearch.toLowerCase())<0)return false;
     return true;
   }}));
@@ -1433,7 +1458,7 @@ function renderAllObjects(){{
   var PER=100,total=filtered.length,pages=Math.ceil(total/PER)||1;
   objPage=clampPage(objPage,pages);
   var start=(objPage-1)*PER,slice=filtered.slice(start,start+PER);
-  h+='<div style="font-size:.82rem;color:var(--fg2);margin:.3rem 0">Showing '+fmt(filtered.length)+' of '+fmt(items.length)+' objects</div>';
+  h+=showingLine(filtered.length,pool.length,'objects',items.length);
   h+='<table class="obj-tbl"><thead><tr><th>Object Name</th><th>Type</th><th>Organization</th><th class="num">Source ID</th><th class="num">Target ID</th><th>Status</th><th>Error / Notes</th></tr></thead><tbody>';
   if(!slice.length)h+='<tr><td colspan="7" class="empty-msg">No objects match your filters.</td></tr>';
   slice.forEach(function(e){{
@@ -1463,6 +1488,8 @@ function renderAllObjects(){{
   document.getElementById('typesContent').innerHTML=h;
   restoreKeptFocus();
 }}
+/* ── Tab 3: Resource Types ── */
+var typesBucketFilter='all';
 function renderTypes(){{
   if(allObjView){{renderAllObjects();return}}
   if(typeDrill){{renderTypeDrill(typeDrill);return}}
@@ -1482,11 +1509,15 @@ function renderTypes(){{
   h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr));margin-bottom:.8rem">';
   h+='<div class="card" style="cursor:pointer" onclick="allObjView=true;objSt=\\'issues\\';objPage=1;renderTypes()"><div class="v">'+fmt(allInv.length)+'</div><div class="l">All Objects &#8594;</div></div>';
   h+='<div class="card"><div class="v ok">'+fmt(tC)+'</div><div class="l">Successful resource types</div></div>';
-  h+='<div class="card"><div class="v'+(tF>0?' bad':' skip')+'">'+fmt(tF)+'</div><div class="l">Failed resource types</div></div>';
+  h+='<div class="card"><div class="v'+(tF>0?' bad':' skip')+'">'+fmt(tF)+'</div><div class="l">Resource Types with Failures</div></div>';
   h+='<div class="card"><div class="v skip">'+fmt(tS)+'</div><div class="l">Skipped resource types</div></div>';
   h+='<div class="card"><div class="v skip">'+fmt(tP)+'</div><div class="l">Pending resource types</div></div>';
   h+='</div>';
   h+='<div class="callout callout-info">Status cards above summarize resource types. Use <strong>All Objects</strong> to browse object-level records (loads on click), or click a type below. Types with gaps/changes appear first.</div>';
+  if(typesBucketFilter!=='all'){{
+    var bucketLabel=typesBucketFilter==='f'?'failed':typesBucketFilter==='s'?'skipped':typesBucketFilter==='p'?'pending':'complete';
+    h+='<div class="callout callout-info">Showing <strong>'+esc(bucketLabel)+'</strong> resource types only. <a href="#" onclick="event.preventDefault();typesBucketFilter=\\'all\\';renderTypes()">Show all types</a></div>';
+  }}
   h+='<div class="type-legend">';
   h+='<span><i class="ok"></i>Matched / field OK</span>';
   h+='<span><i class="bad"></i>Missing on target</span>';
@@ -1502,6 +1533,9 @@ function renderTypes(){{
     if(d)return d;
     return String(a.resource_type).localeCompare(String(b.resource_type));
   }});
+  if(typesBucketFilter!=='all'){{
+    sorted=sorted.filter(function(t){{return typeMigrationBucket(t)===typesBucketFilter}});
+  }}
 
   sorted.forEach(function(t){{
     var c=t.t1_counts,e=t.t2_existence,fp=t.t3_field_parity;
@@ -1584,9 +1618,12 @@ function renderTypeDrill(rt){{
     var allSame=items.every(function(e){{return (e.o||'')===firstOrg}});
     if(allSame&&firstOrg&&objOrg&&objOrg!==firstOrg)objOrg='';
   }}
-  var filtered=sortProblemsFirst(items.filter(function(e){{
+  var pool=items.filter(function(e){{
     if(!matchesObjFilter(e))return false;
     if(objOrg&&e.o!==objOrg)return false;
+    return true;
+  }});
+  var filtered=sortProblemsFirst(pool.filter(function(e){{
     if(objSearch&&e.n.toLowerCase().indexOf(objSearch.toLowerCase())<0)return false;
     return true;
   }}));
@@ -1619,13 +1656,13 @@ function renderTypeDrill(rt){{
   h+='<div class="v skip">'+fmt(cP)+'</div><div class="l">Pending objects</div></div>';}}
   h+='</div>';
 
-  h+=renderObjectTable(items,filtered,'typesContent','&#9664; Back','renderTypeDrill(\\''+esc(rt)+'\\')',rt,'flt-type');
+  h+=renderObjectTable(items,pool,filtered,'typesContent','&#9664; Back','renderTypeDrill(\\''+esc(rt)+'\\')',rt,'flt-type');
   h+='</div>';
   document.getElementById('typesContent').innerHTML=h;
   restoreKeptFocus();
 }}
 
-function renderObjectTable(items,filtered,targetEl,backLabel,renderSelf,rt,fltPrefix){{
+function renderObjectTable(items,pool,filtered,targetEl,backLabel,renderSelf,rt,fltPrefix){{
   var h='';
   var showOrg=true;
   var prefix=fltPrefix||'flt-obj';
@@ -1679,7 +1716,7 @@ function renderObjectTable(items,filtered,targetEl,backLabel,renderSelf,rt,fltPr
   objPage=pg.page;
   var slice=sorted.slice(pg.sliceStart,pg.sliceEnd);
 
-  h+='<div style="font-size:.82rem;color:var(--fg2);margin:.3rem 0">Showing '+fmt(sorted.length)+' of '+fmt(items.length)+' objects</div>';
+  h+=showingLine(sorted.length,pool.length,'objects',items.length);
 
   var cols=showOrg?6:5;
   h+='<table class="obj-tbl"><thead><tr>';
@@ -1715,7 +1752,7 @@ function renderObjectTable(items,filtered,targetEl,backLabel,renderSelf,rt,fltPr
 }}
 
 /* ── Tab 4: Missing Objects ── */
-var misPage=1,misType='all',misOrg='',misSearch='',misExplReason='',misSort='severity';
+var misPage=1,misType='all',misOrg='',misSearch='',misExplReason='',misExplClass='',misSort='severity';
 var _misOrgInit=false;
 function renderMissing(){{
   seedScopedOrgOnce('_misOrgInit',function(){{return misOrg}},function(v){{misOrg=v}});
@@ -1727,6 +1764,9 @@ function renderMissing(){{
   }});
 
   var h='<h2>Missing Objects &mdash; T2 <span style="font-size:.78rem;color:var(--fg2);font-weight:400">('+fmt(all.length)+' total)</span></h2>';
+  if(misExplClass==='unexplained'){{
+    h+='<div class="callout callout-warn"><strong>Unexplained only.</strong> Objects missing on target with no failed/skipped/pending explanation in the migration DB. <a href="#" onclick="event.preventDefault();misExplClass=\\'\\';misPage=1;renderMissing()">Show all missing</a></div>';
+  }}
 
   if(!all.length){{
     h+='<div class="callout callout-pass">No missing objects detected.</div>';
@@ -1761,14 +1801,18 @@ function renderMissing(){{
   h+='<option value="sid"'+(misSort==='sid'?' selected':'')+'>Sort: source id</option>';
   h+='</select>';
   h+=searchFilterHtml('flt-name-missing',misSearch,'Search object name...','misSearch=this.value;misPage=1;renderMissing()','misSearch=\\'\\';misPage=1;renderMissing()');
-  if(misType!=='all'||misOrg||misSearch||misExplReason)h+='<button onclick="misType=\\'all\\';misOrg=\\'\\';misSearch=\\'\\';misExplReason=\\'\\';misPage=1;renderMissing()">Clear</button>';
+  if(misType!=='all'||misOrg||misSearch||misExplReason||misExplClass)h+='<button onclick="misType=\\'all\\';misOrg=\\'\\';misSearch=\\'\\';misExplReason=\\'\\';misExplClass=\\'\\';misPage=1;renderMissing()">Clear</button>';
   h+='</div>';
 
-  var filtered=all.filter(function(m){{
+  var pool=all.filter(function(m){{
     if(misType!=='all'&&m.type!==misType)return false;
     if(misOrg&&m.org!==misOrg)return false;
-    if(misSearch&&m.name.toLowerCase().indexOf(misSearch.toLowerCase())<0)return false;
+    if(misExplClass&&explClass(m.expl)!==misExplClass)return false;
     if(misExplReason&&(m.expl||'Unknown')!==misExplReason)return false;
+    return true;
+  }});
+  var filtered=pool.filter(function(m){{
+    if(misSearch&&m.name.toLowerCase().indexOf(misSearch.toLowerCase())<0)return false;
     return true;
   }});
   // Worst explanations first: unexplained → failed → pending → skipped → live → other
@@ -1786,7 +1830,7 @@ function renderMissing(){{
   misPage=pg.page;
   var slice=filtered.slice(pg.sliceStart,pg.sliceEnd);
 
-  h+='<div style="font-size:.82rem;color:var(--fg2);margin:.3rem 0">Showing '+fmt(filtered.length)+' of '+fmt(all.length)+'</div>';
+  h+=showingLine(filtered.length,pool.length,'',all.length);
   h+='<table><thead><tr><th>Type</th><th>Object</th><th>Explanation</th></tr></thead><tbody>';
   if(!slice.length){{
     h+='<tr><td colspan="3" class="empty-msg">No missing objects match your filters.</td></tr>';
@@ -1870,9 +1914,12 @@ function renderExtra(){{
   if(extraType!=='all'||extraOrg||extraSearch)h+='<button onclick="extraType=\\'all\\';extraOrg=\\'\\';extraSearch=\\'\\';extraPage=1;renderExtra()">Clear</button>';
   h+='</div>';
 
-  var filtered=all.filter(function(m){{
+  var pool=all.filter(function(m){{
     if(extraType!=='all'&&m.type!==extraType)return false;
     if(extraOrg&&m.org!==extraOrg)return false;
+    return true;
+  }});
+  var filtered=pool.filter(function(m){{
     if(extraSearch&&m.name.toLowerCase().indexOf(extraSearch.toLowerCase())<0)return false;
     return true;
   }});
@@ -1891,7 +1938,7 @@ function renderExtra(){{
   extraPage=pg.page;
   var slice=filtered.slice(pg.sliceStart,pg.sliceEnd);
 
-  h+='<div style="font-size:.82rem;color:var(--fg2);margin:.3rem 0">Showing '+fmt(filtered.length)+' of '+fmt(all.length)+'</div>';
+  h+=showingLine(filtered.length,pool.length,'',all.length);
   h+='<table><thead><tr><th>Type</th><th>Object</th><th>Note</th></tr></thead><tbody>';
   if(!slice.length){{
     h+='<tr><td colspan="3" class="empty-msg">No extra objects match your filters.</td></tr>';
@@ -1910,6 +1957,131 @@ function renderExtra(){{
   }}
 
   document.getElementById('extraContent').innerHTML=h;
+  restoreKeptFocus();
+}}
+
+/* ── Tab: Syncs (live project / inventory source updates) ── */
+var syncPage=1,syncType='all',syncOrg='',syncSearch='',syncSort='name',syncShow='failed';
+var _syncOrgInit=false;
+function syncTypeLabel(rt){{
+  if(rt==='inventory_sources')return 'Inventory source';
+  if(rt==='projects')return 'Project';
+  return rt||'';
+}}
+function syncStatusStyle(st,failed){{
+  if(failed)return 'color:var(--fail);font-weight:600';
+  var s=(st||'').toLowerCase();
+  if(s==='successful'||s==='ok')return 'color:var(--pass);font-weight:600';
+  if(s==='pending'||s==='running'||s==='waiting'||s==='new'||s==='canceling')return 'color:var(--warn);font-weight:600';
+  return 'color:var(--fg2)';
+}}
+function renderSyncs(){{
+  seedScopedOrgOnce('_syncOrgInit',function(){{return syncOrg}},function(v){{syncOrg=v}});
+  var all=(D.sync_entries||[]).map(function(s){{
+    return {{
+      name:s.name||'',
+      type:s.resource_type||'',
+      org:s.organization||'',
+      tid:s.target_id,
+      status:s.sync_status||'',
+      failed:!!s.failed,
+      jobId:s.last_job_id
+    }};
+  }});
+  var isLive=D.metadata&&D.metadata.mode==='validate-live';
+  var failedCount=all.filter(function(s){{return s.failed}}).length;
+  var h='<h2>Syncs <span style="font-size:.78rem;color:var(--fg2);font-weight:400">('+fmt(all.length)+' projects &amp; inventory sources)</span></h2>';
+  h+='<div class="callout callout-info"><strong>Project and inventory source updates:</strong> SCM/update sync status from the live target API. Use the last job ID in AAP to inspect failure details.';
+  if(SCOPED_ORGS&&SCOPED_ORGS.length){{
+    h+=' Scoped to: <strong>'+esc(SCOPED_ORGS.join(', '))+'</strong>.';
+  }}
+  h+='</div>';
+
+  if(!isLive){{
+    h+='<div class="callout callout-warn"><strong>Not run:</strong> Sync status requires <code>--live</code>.</div>';
+    document.getElementById('syncsContent').innerHTML=h;return;
+  }}
+
+  if(!all.length){{
+    h+='<div class="callout callout-warn">No projects or inventory sources in this run.</div>';
+    document.getElementById('syncsContent').innerHTML=h;return;
+  }}
+
+  h+='<div class="filter-bar">';
+  h+='<select onchange="syncShow=this.value;syncPage=1;renderSyncs()">';
+  h+='<option value="failed"'+(syncShow==='failed'?' selected':'')+'>Failed only ('+fmt(failedCount)+')</option>';
+  h+='<option value="all"'+(syncShow==='all'?' selected':'')+'>All syncs ('+fmt(all.length)+')</option>';
+  h+='</select>';
+  h+='<select onchange="syncType=this.value;syncPage=1;renderSyncs()">';
+  h+='<option value="all"'+(syncType==='all'?' selected':'')+'>All types</option>';
+  h+='<option value="projects"'+(syncType==='projects'?' selected':'')+'>Projects</option>';
+  h+='<option value="inventory_sources"'+(syncType==='inventory_sources'?' selected':'')+'>Inventory sources</option>';
+  h+='</select>';
+  h+=orgFilterHtml('flt-org-sync',syncOrg,'syncOrg','syncPage=1;renderSyncs()');
+  h+='<select onchange="syncSort=this.value;syncPage=1;renderSyncs()">';
+  h+='<option value="name"'+(syncSort==='name'?' selected':'')+'>Sort: name</option>';
+  h+='<option value="type"'+(syncSort==='type'?' selected':'')+'>Sort: type</option>';
+  h+='<option value="org"'+(syncSort==='org'?' selected':'')+'>Sort: org</option>';
+  h+='<option value="status"'+(syncSort==='status'?' selected':'')+'>Sort: sync status</option>';
+  h+='<option value="job_id"'+(syncSort==='job_id'?' selected':'')+'>Sort: last job ID</option>';
+  h+='</select>';
+  h+=searchFilterHtml('flt-name-sync',syncSearch,'Search object name...','syncSearch=this.value;syncPage=1;renderSyncs()','syncSearch=\\'\\';syncPage=1;renderSyncs()');
+  if(syncShow!=='failed'||syncType!=='all'||syncOrg||syncSearch)h+='<button onclick="syncShow=\\'failed\\';syncType=\\'all\\';syncOrg=\\'\\';syncSearch=\\'\\';syncPage=1;renderSyncs()">Clear</button>';
+  h+='</div>';
+
+  function syncPoolFilter(s){{
+    if(syncShow==='failed'&&!s.failed)return false;
+    if(syncType!=='all'&&s.type!==syncType)return false;
+    if(syncOrg&&s.org!==syncOrg)return false;
+    return true;
+  }}
+  var pool=all.filter(syncPoolFilter);
+  var filtered=pool.filter(function(s){{
+    if(syncSearch&&s.name.toLowerCase().indexOf(syncSearch.toLowerCase())<0)return false;
+    return true;
+  }});
+  filtered.sort(function(a,b){{
+    var by=sortByNameTypeOrg(a,b,syncSort);
+    if(by)return by;
+    if(syncSort==='status')return cmpLocale(a.status,b.status);
+    if(syncSort==='job_id'){{
+      var ai=a.jobId==null?-1:a.jobId,bi=b.jobId==null?-1:b.jobId;
+      if(ai<bi)return -1;if(ai>bi)return 1;return cmpLocale(a.name,b.name);
+    }}
+    return cmpLocale(a.name,b.name);
+  }});
+
+  if(!filtered.length){{
+    if(syncShow==='failed'&&failedCount===0){{
+      h+='<div class="callout callout-pass">No failed syncs detected.</div>';
+    }}else{{
+      h+='<div class="callout callout-warn">No sync rows match your filters.</div>';
+    }}
+    document.getElementById('syncsContent').innerHTML=h;return;
+  }}
+
+  var pg=paginateSlice(syncPage,PAGE_SYNC,filtered.length);
+  syncPage=pg.page;
+  var slice=filtered.slice(pg.sliceStart,pg.sliceEnd);
+
+  h+=showingLine(filtered.length,pool.length,'',all.length);
+  h+='<table><thead><tr><th>Name</th><th>Resource Type</th><th>Organization</th><th>Sync status</th><th class="num">Last job ID</th></tr></thead><tbody>';
+  slice.forEach(function(s){{
+    h+='<tr>';
+    h+='<td>'+objD(s.name,s.org||'Global / Unscoped',null,s.tid)+'</td>';
+    h+='<td>'+esc(syncTypeLabel(s.type))+'</td>';
+    h+='<td>'+esc(s.org||'—')+'</td>';
+    h+='<td><span style="'+syncStatusStyle(s.status,s.failed)+'">'+esc(s.status||'—')+'</span></td>';
+    h+='<td class="num">'+(s.jobId!=null?fmt(s.jobId):'<span style="color:var(--fg2)">—</span>')+'</td>';
+    h+='</tr>';
+  }});
+  h+='</tbody></table>';
+
+  if(pg.pages>1){{
+    h+=renderPager(pg.page,pg.pages,filtered.length,'syncPage--;renderSyncs()','syncPage++;renderSyncs()');
+  }}
+
+  document.getElementById('syncsContent').innerHTML=h;
   restoreKeptFocus();
 }}
 
@@ -1978,19 +2150,30 @@ function renderFields(){{
   if(fldType!=='all'||fldOrg||fldSearch||fldField!=='all')h+='<button onclick="fldType=\\'all\\';fldOrg=\\'\\';fldSearch=\\'\\';fldField=\\'all\\';fldPage=1;renderFields()">Clear</button>';
   h+='</div>';
 
-  var filtered=all.filter(function(f){{
+  var pool=all.filter(function(f){{
     if(fldType!=='all'&&f.type!==fldType)return false;
     if(fldField!=='all'&&f.field!==fldField)return false;
     if(fldOrg&&f.org!==fldOrg)return false;
+    return true;
+  }});
+  var filtered=pool.filter(function(f){{
     if(fldSearch&&f.name.toLowerCase().indexOf(fldSearch.toLowerCase())<0)return false;
     return true;
   }});
+
+  function fieldObjKey(f){{
+    return f.type+'\\0'+(f.sid!=null?f.sid:f.name)+'\\0'+f.name;
+  }}
+  var poolObjKeys={{}};
+  pool.forEach(function(f){{poolObjKeys[fieldObjKey(f)]=true;}});
+  var allObjKeys={{}};
+  all.forEach(function(f){{allObjKeys[fieldObjKey(f)]=true;}});
 
   // Group all field changes for the same object into one card
   var byObj={{}};
   var order=[];
   filtered.forEach(function(f){{
-    var key=f.type+'\\0'+(f.sid!=null?f.sid:f.name)+'\\0'+f.name;
+    var key=fieldObjKey(f);
     if(!byObj[key]){{
       byObj[key]={{type:f.type,name:f.name,org:f.org,sid:f.sid,tid:f.tid,tier:f.tier,fields:[]}};
       order.push(key);
@@ -2012,7 +2195,13 @@ function renderFields(){{
   fldPage=pg.page;
   var slice=order.slice(pg.sliceStart,pg.sliceEnd);
 
-  h+='<div style="font-size:.82rem;color:var(--fg2);margin:.3rem 0">Showing '+fmt(order.length)+' objects ('+fmt(filtered.length)+' field changes) of '+fmt(all.length)+' field changes</div>';
+  var poolObjCount=Object.keys(poolObjKeys).length;
+  var allObjCount=Object.keys(allObjKeys).length;
+  var fieldsLine='Showing '+fmt(order.length)+' objects ('+fmt(filtered.length)+' field changes) of '+fmt(poolObjCount)+' objects ('+fmt(pool.length)+' field changes)';
+  if(all.length!==pool.length||(filtered.length<pool.length&&pool.length<all.length)){{
+    fieldsLine+=' &middot; '+fmt(allObjCount)+' objects ('+fmt(all.length)+' field changes) total';
+  }}
+  h+='<div style="font-size:.82rem;color:var(--fg2);margin:.3rem 0">'+fieldsLine+'</div>';
 
   if(!slice.length){{
     h+='<div class="empty-msg" style="padding:1.5rem;text-align:center">No field changes match your filters.</div>';
@@ -2099,8 +2288,11 @@ function renderHosts(){{
   if(hostInvMode!=='mismatch'||hostInvName)h+='<button onclick="hostInvMode=\\'mismatch\\';hostInvName=\\'\\';renderHosts()">Clear</button>';
   h+='</div>';
 
-  var filtered=invs.filter(function(inv){{
+  var pool=invs.filter(function(inv){{
     if(hostInvMode==='mismatch'&&!(inv.delta))return false;
+    return true;
+  }});
+  var filtered=pool.filter(function(inv){{
     if(hostInvName&&String(inv.inventory||'').toLowerCase().indexOf(hostInvName.toLowerCase())<0)return false;
     return true;
   }});
@@ -2112,7 +2304,7 @@ function renderHosts(){{
     return String(a.inventory||'').localeCompare(String(b.inventory||''));
   }});
 
-  h+='<div style="font-size:.82rem;color:var(--fg2);margin:.3rem 0">Showing '+fmt(filtered.length)+' of '+fmt(invs.length)+' inventories</div>';
+  h+=showingLine(filtered.length,pool.length,'inventories',invs.length);
   h+='<table><thead><tr><th>Inventory</th><th class="num">Source</th><th class="num">Target</th><th class="num">Delta</th></tr></thead><tbody>';
   if(!filtered.length){{
     h+='<tr><td colspan="4" class="empty-msg">'+(hostInvMode==='mismatch'&&!hostInvName?'All inventory counts match.':'No inventories match your filters.')+'</td></tr>';

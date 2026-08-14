@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from aap_migration.validate.common import (
+    apply_migration_buckets,
     build_executive_summary,
     belongs_to_org,
     count_explained_from_missing,
@@ -168,15 +169,26 @@ def filter_validation_result_for_org(
 
     t4 = _filter_t4_for_org(result.t4_host_sampling, object_inventory)
 
+    sync_entries = [
+        entry for entry in result.sync_entries
+        if belongs_to_org(entry, org_name)
+    ]
+
+    per_type = apply_migration_buckets(per_type, object_inventory)
+
     return ValidationResult(
         metadata=meta,
-        executive_summary=build_executive_summary(per_type),
+        executive_summary=build_executive_summary(
+            per_type,
+            sync_failed=sum(1 for entry in sync_entries if entry.failed),
+        ),
         per_type=per_type,
         per_org=per_org,
         object_inventory=object_inventory,
         t4_host_sampling=t4,
         # Org-scoped runs skip auditor; keep empty on slices too
         auditor_cross_check=result.auditor_cross_check,
+        sync_entries=sync_entries,
     )
 
 
