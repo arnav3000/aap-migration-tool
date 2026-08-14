@@ -44,9 +44,11 @@ class ValidationMetadata:
     total_api_calls: int = 0
     comparison_rules_version: str = "1.0"
     exclusion_sets: ExclusionSets = field(default_factory=ExclusionSets)
+    # When set, validation was limited to these organization names (--orgs)
+    organizations: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "run_id": self.run_id,
             "mode": self.mode,
             "started_at": self.started_at,
@@ -61,6 +63,9 @@ class ValidationMetadata:
             "comparison_rules_version": self.comparison_rules_version,
             "exclusion_sets": self.exclusion_sets.to_dict(),
         }
+        if self.organizations:
+            d["organizations"] = list(self.organizations)
+        return d
 
 
 @dataclass
@@ -71,6 +76,7 @@ class ExecutiveSummary:
     total_extra_on_target: int = 0
     total_field_mismatches: int = 0
     total_explained: int = 0
+    total_sync_failed: int = 0
     verdict: str = "PASS"
 
     def to_dict(self) -> dict[str, Any]:
@@ -81,6 +87,7 @@ class ExecutiveSummary:
             "total_extra_on_target": self.total_extra_on_target,
             "total_field_mismatches": self.total_field_mismatches,
             "total_explained": self.total_explained,
+            "total_sync_failed": self.total_sync_failed,
             "verdict": self.verdict,
         }
 
@@ -128,19 +135,75 @@ class MissingDetail:
 
 
 @dataclass
+class SyncEntry:
+    """SCM/update sync status for a live target project or inventory source."""
+
+    name: str = ""
+    resource_type: str = ""
+    organization: str = ""
+    target_id: Optional[int] = None
+    sync_status: str = ""
+    failed: bool = False
+    last_job_id: Optional[int] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "name": self.name,
+            "resource_type": self.resource_type,
+            "sync_status": self.sync_status,
+            "failed": self.failed,
+        }
+        if self.organization:
+            d["organization"] = self.organization
+        if self.target_id is not None:
+            d["target_id"] = self.target_id
+        if self.last_job_id is not None:
+            d["last_job_id"] = self.last_job_id
+        return d
+
+
+@dataclass
+class ExtraDetail:
+    """Target object with no identity match to an exported source object."""
+
+    name: str = ""
+    organization: str = ""
+    parent_type: str = ""
+    parent_name: str = ""
+    target_id: Optional[int] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "organization": self.organization,
+            "parent_type": self.parent_type,
+            "parent_name": self.parent_name,
+            "target_id": self.target_id,
+        }
+
+
+@dataclass
 class T2Existence:
     matched: int = 0
     missing_on_target: int = 0
     extra_on_target: int = 0
     missing_details: list[MissingDetail] = field(default_factory=list)
+    extra_details: list[ExtraDetail] = field(default_factory=list)
+    extra_truncated: bool = False
+    extra_truncated_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "matched": self.matched,
             "missing_on_target": self.missing_on_target,
             "extra_on_target": self.extra_on_target,
             "missing_details": [d.to_dict() for d in self.missing_details],
+            "extra_details": [d.to_dict() for d in self.extra_details],
         }
+        if self.extra_truncated:
+            d["extra_truncated"] = True
+            d["extra_truncated_count"] = self.extra_truncated_count
+        return d
 
 
 @dataclass
@@ -194,6 +257,8 @@ class PerTypeResult:
     t1_counts: T1Counts = field(default_factory=T1Counts)
     t2_existence: T2Existence = field(default_factory=T2Existence)
     t3_field_parity: T3FieldParity = field(default_factory=T3FieldParity)
+    # c=complete, f=failed, s=skipped, p=pending (T1 summary bucket)
+    migration_bucket: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -202,6 +267,7 @@ class PerTypeResult:
             "t1_counts": self.t1_counts.to_dict(),
             "t2_existence": self.t2_existence.to_dict(),
             "t3_field_parity": self.t3_field_parity.to_dict(),
+            "migration_bucket": self.migration_bucket,
         }
 
 
@@ -416,9 +482,10 @@ class ValidationResult:
     auditor_cross_check: AuditorCrossCheck = field(
         default_factory=AuditorCrossCheck
     )
+    sync_entries: list[SyncEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "metadata": self.metadata.to_dict(),
             "executive_summary": self.executive_summary.to_dict(),
             "per_type": [t.to_dict() for t in self.per_type],
@@ -426,6 +493,9 @@ class ValidationResult:
             "t4_host_sampling": self.t4_host_sampling.to_dict(),
             "auditor_cross_check": self.auditor_cross_check.to_dict(),
         }
+        if self.sync_entries:
+            d["sync_entries"] = [e.to_dict() for e in self.sync_entries]
+        return d
 
     def inventory_to_dict(self) -> dict[str, list[dict[str, Any]]]:
         return {

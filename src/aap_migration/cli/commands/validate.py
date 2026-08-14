@@ -14,8 +14,11 @@ import click
 from aap_migration.cli.context import MigrationContext
 from aap_migration.cli.decorators import handle_errors, pass_context, requires_config
 from aap_migration.cli.utils import echo_info, echo_success, echo_warning
-from aap_migration.validate.report import write_validation_report
-from aap_migration.validate.runner import run_validation
+from aap_migration.validate.report import (
+    resolve_validate_report_dir,
+)
+from aap_migration.validate.org_report import write_org_scoped_validation_reports
+from aap_migration.validate.runner import parse_orgs_arg, run_validation
 
 
 @click.command(name="validate")
@@ -23,7 +26,7 @@ from aap_migration.validate.runner import run_validation
     "--output-dir",
     "-o",
     type=click.Path(),
-    help="Output directory for report files (default: reports/)",
+    help="Base report directory (default: reports/). Writes under validate/<date>/…",
 )
 @click.option(
     "--live",
@@ -46,6 +49,20 @@ from aap_migration.validate.runner import run_validation
     default=False,
     help="Skip hosts (T1–T4 host checks and live host listing)",
 )
+@click.option(
+    "--orgs",
+    type=str,
+    default=None,
+    help=(
+        "Comma-separated organization names to scope validation. "
+        "Skips pure globals (users, credential_types, instance_groups, "
+        "instances, settings) and the auditor check. Live mode uses API "
+        "org/parent filters (Plan B); FK name maps for globals are still "
+        "loaded for field compare. Multi-org writes a combined report under "
+        "…/multi/ plus per-org reports under …/<org-name>/ (same path as a "
+        "single --orgs run)"
+    ),
+)
 @pass_context
 @requires_config
 @handle_errors
@@ -55,6 +72,7 @@ def validate(
     live: bool,
     resource_type: str | None,
     skip_hosts: bool,
+    orgs: str | None,
 ) -> None:
     """Post-migration validation report.
 
@@ -64,19 +82,35 @@ def validate(
     uses the migration DB to classify unmatched objects as explained
     (failed/skipped) or unexplained gaps.
 
+    Reports are written under::
+
+        <output-dir>/validate/<YYYY-MM-DD>/<live|database>/[org|multi]/[type]/report.html
+
+    With multiple --orgs::
+
+        …/multi/report.html          # combined
+        …/<OrgA>/report.html         # per org (same path as --orgs OrgA)
+        …/<OrgB>/report.html
+
+    Same calendar day overwrites the matching path.
+
     \b
     Examples:
         aap-bridge validate
         aap-bridge validate --live
         aap-bridge validate --live --skip-hosts
         aap-bridge validate --live -r credentials
+        aap-bridge validate --orgs Team-alan
+        aap-bridge validate --live --orgs Team-alan
+        aap-bridge validate --orgs "OrgA, OrgB"
         aap-bridge validate -o /tmp/reports
-        # With -r, writes validation_report_<resource>.html/.json
     """
     if skip_hosts and resource_type == "hosts":
         raise click.ClickException("--skip-hosts conflicts with -r hosts")
 
-    output = Path(output_dir or ctx.config.paths.report_dir)
+    organizations = parse_orgs_arg(orgs)
+
+    base_output = Path(output_dir or ctx.config.paths.report_dir)
     target_client = None
     migration_state = ctx.migration_state
 
@@ -90,6 +124,14 @@ def validate(
 
     if resource_type:
         echo_info(f"Resource type filter: {resource_type}")
+    if organizations:
+        echo_info(f"Organization scope: {', '.join(organizations)}")
+        if live:
+            echo_info("Auditor check skipped (org-scoped run)")
+        if len(organizations) > 1:
+            echo_info(
+                "Writing combined report under multi/ plus per-org reports"
+            )
     if skip_hosts:
         echo_info("Skipping hosts validation")
 
@@ -101,27 +143,32 @@ def validate(
             live=live,
             resource_type=resource_type,
             skip_hosts=skip_hosts,
+            organizations=organizations,
         )
     )
 
-    json_filename = "validation_report.json"
-    html_filename = "validation_report.html"
-    if resource_type:
-        # Safe single-segment suffix for filenames (e.g. credentials → validation_report_credentials.html)
-        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in resource_type.strip())
-        safe = safe.strip("_") or "resource"
-        json_filename = f"validation_report_{safe}.json"
-        html_filename = f"validation_report_{safe}.html"
+    report_dir = resolve_validate_report_dir(
+        base_output,
+        live=live,
+        organizations=organizations,
+        resource_type=resource_type,
+    )
+    echo_info(f"Report directory: {report_dir}")
 
-    json_path, html_path = write_validation_report(
+    written = write_org_scoped_validation_reports(
         result,
-        str(output),
-        json_filename=json_filename,
-        html_filename=html_filename,
+        base_dir=base_output,
+        live=live,
+        organizations=organizations or [],
+        resource_type=resource_type,
         field_data=field_data,
     )
 
-    echo_success(f"Validation report: {html_path}")
+    for label, _json_path, html_path in written:
+        if label == "combined":
+            echo_success(f"Validation report: {html_path}")
+        else:
+            echo_success(f"  Org report ({label}): {html_path}")
 
     total_source = sum(t.t1_counts.source for t in result.per_type)
     total_target = sum(t.t1_counts.target for t in result.per_type)
