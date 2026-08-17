@@ -183,7 +183,7 @@ def audit(
     type=int,
     default=1,
     show_default=True,
-    help="Concurrent workers for role membership scanning.",
+    help="Concurrent workers for scan phase. Does not affect execute phase speed (sequential).",
 )
 @click.option(
     "--scan-strategy",

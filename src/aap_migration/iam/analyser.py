@@ -232,6 +232,7 @@ class IAMAnalyser:
 
     _PAGINATE_MAX_RETRIES = 3
     _PAGINATE_BACKOFF_BASE = 1.0  # seconds; doubles each retry
+    _EXECUTE_CHECKPOINT_INTERVAL = 1000  # save checkpoint every N permissions
 
     @staticmethod
     def _retry_delay(resp: requests.Response, attempt: int, backoff_base: float) -> float:
@@ -1469,7 +1470,19 @@ class IAMAnalyser:
         self._progress(f"Phase 7: {label} resource permissions...")
         target_role_cache: dict[str, dict[str, int]] = {}
 
+        # Recount already-completed entries so stats are accurate on resume.
+        for entry in permissions:
+            if entry.status == "migrated":
+                stats.permissions_migrated += 1
+            elif entry.status == "failed":
+                stats.permissions_failed += 1
+            elif entry.status in ("skipped",):
+                stats.permissions_skipped += 1
+
         for idx, entry in enumerate(permissions):
+            # Skip entries already processed in a prior run.
+            if entry.status in ("migrated", "failed", "skipped", "dry_run"):
+                continue
             target_resource_id = self._get_target_id(
                 entry.resource_type, entry.resource_id
             )
@@ -1518,23 +1531,34 @@ class IAMAnalyser:
                 roles_data = self._target_paginate(
                     f"{entry.resource_type}/{target_resource_id}/object_roles/"
                 )
-                target_role_cache[cache_key] = {
-                    r["name"]: r["id"] for r in roles_data
-                }
+                # None = endpoint returned 404 or empty (roles not available).
+                # {} or populated dict = endpoint responded but role may be absent.
+                target_role_cache[cache_key] = (
+                    {r["name"]: r["id"] for r in roles_data}
+                    if roles_data else None
+                )
+
+            role_map = target_role_cache[cache_key]
+            if role_map is None:
+                entry.status = "failed"
+                entry.error = (
+                    f"object_roles/ returned HTTP 404 for "
+                    f"{entry.resource_type} target_id={target_resource_id} "
+                    f"— resource may not be fully initialised on target"
+                )
+                stats.permissions_failed += 1
+                continue
 
             mapped_role = self._map_role_name(entry.role_name)
-            target_role_id = target_role_cache.get(cache_key, {}).get(
-                mapped_role
-            )
+            target_role_id = role_map.get(mapped_role)
             if not target_role_id and mapped_role != entry.role_name:
-                target_role_id = target_role_cache.get(cache_key, {}).get(
-                    entry.role_name
-                )
+                target_role_id = role_map.get(entry.role_name)
 
             if not target_role_id:
                 entry.status = "failed"
                 entry.error = (
-                    f"Role '{entry.role_name}' not found on target resource"
+                    f"Role '{entry.role_name}' not found in object_roles/ "
+                    f"for {entry.resource_type} target_id={target_resource_id}"
                 )
                 stats.permissions_failed += 1
                 continue
@@ -1579,6 +1603,13 @@ class IAMAnalyser:
 
             time.sleep(self.rate_limit_delay)
 
+            if (idx + 1) % self._EXECUTE_CHECKPOINT_INTERVAL == 0:
+                self._save_checkpoint(permissions, stats)
+                self._progress(
+                    f"  Checkpoint saved ({idx + 1}/{len(permissions)} processed)"
+                )
+
+        self._save_checkpoint(permissions, stats)
         self._progress(
             f"  Permissions — migrated: {stats.permissions_migrated}, "
             f"failed: {stats.permissions_failed}, "
