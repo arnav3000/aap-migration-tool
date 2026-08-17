@@ -28,8 +28,8 @@ tqdm>=4.66.3
 hvac==2.1.0
 
 # Database
-sqlalchemy==2.0.51
-alembic==1.19.0
+sqlalchemy==2.0.52
+alembic==1.19.1
 
 # Version Parsing
 packaging>=24.0
