@@ -2601,6 +2601,19 @@ class WorkflowNodeImporter(ResourceImporter):
             phase="import",
         )
 
+        # Dispatch specialised node types to dedicated handlers.
+        # This keeps all new node-type logic isolated in new methods and leaves
+        # the existing UJT resolution path below completely untouched.
+        ujt_unified_type = (
+            (data.get("summary_fields") or {})
+            .get("unified_job_template", {})
+            .get("unified_job_type")
+        )
+        if ujt_unified_type == "workflow_approval":
+            return await self._handle_approval_node(source_id, data, workflow_target_id)
+        if ujt_unified_type == "system_job":
+            return await self._handle_system_job_node(source_id, data, workflow_target_id)
+
         try:
             # Resolve unified_job_template dependency only
             # (workflow_job_template is already the target ID)
@@ -2815,6 +2828,230 @@ class WorkflowNodeImporter(ResourceImporter):
                 }
             )
 
+            return None
+
+    # ── Specialised node-type handlers ───────────────────────────────────────
+    # These methods handle node types that require a different API flow from the
+    # standard UJT resolution path in import_resource().  All new code — the
+    # existing import_resource() logic above is untouched.
+
+    async def _handle_approval_node(
+        self,
+        source_id: int,
+        data: dict[str, Any],
+        workflow_target_id: int,
+    ) -> dict[str, Any] | None:
+        """Create an approval workflow node via the two-step AAP API.
+
+        AAP approval nodes cannot be created by setting unified_job_template
+        directly.  The correct flow is:
+          1. POST node without unified_job_template
+          2. POST to create_approval_template to create and link the template
+        """
+        resource_type = "workflow_nodes"
+        ujt_summary = (
+            (data.get("summary_fields") or {}).get("unified_job_template") or {}
+        )
+        approval_name = ujt_summary.get("name") or data.get("identifier", "approval")
+        approval_timeout = ujt_summary.get("timeout") or 0
+        approval_description = ujt_summary.get("description") or ""
+
+        # Build node payload — omit unified_job_template and read-only fields
+        skip_fields = {
+            "id", "type", "url", "related", "summary_fields", "created",
+            "modified", "natural_key", "unified_job_template",
+            "success_nodes", "failure_nodes", "always_nodes",
+            "_source_id", "_source_workflow_id", "_ujt_resource_type",
+        }
+        resolved = {k: v for k, v in data.items()
+                    if k not in skip_fields and v is not None}
+
+        nested_endpoint = (
+            f"workflow_job_templates/{workflow_target_id}/workflow_nodes/"
+        )
+
+        try:
+            result = await self.client.post(nested_endpoint, json_data=resolved)
+            node_id = result["id"]
+
+            # Step 2: create and link the approval template
+            await self.client.post(
+                f"workflow_job_template_nodes/{node_id}/create_approval_template/",
+                json_data={
+                    "name": approval_name,
+                    "description": approval_description,
+                    "timeout": approval_timeout,
+                },
+            )
+
+            self.state.mark_completed(
+                resource_type=resource_type,
+                source_id=source_id,
+                target_id=node_id,
+                target_name=result.get("identifier", "unknown"),
+            )
+            self.stats["imported_count"] += 1
+
+            logger.info(
+                "workflow_approval_node_imported",
+                source_id=source_id,
+                target_node_id=node_id,
+                approval_name=approval_name,
+            )
+
+            result["_edge_data"] = {
+                "success_nodes": data.get("success_nodes", []),
+                "failure_nodes": data.get("failure_nodes", []),
+                "always_nodes": data.get("always_nodes", []),
+            }
+            result["_source_id"] = source_id
+            return result
+
+        except Exception as e:
+            error_msg = f"Failed to import approval node: {e}"
+            logger.error(
+                "workflow_approval_node_import_failed",
+                source_id=source_id,
+                error=str(e),
+            )
+            self.stats["error_count"] += 1
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=error_msg,
+            )
+            self.import_errors.append({
+                "resource_type": resource_type,
+                "source_id": source_id,
+                "name": data.get("identifier", "unknown"),
+                "error": error_msg,
+                "error_type": type(e).__name__,
+            })
+            return None
+
+    async def _handle_system_job_node(
+        self,
+        source_id: int,
+        data: dict[str, Any],
+        workflow_target_id: int,
+    ) -> dict[str, Any] | None:
+        """Create a workflow node that references a system_job_template.
+
+        System job templates (Cleanup Activity Stream, etc.) are pre-existing
+        on every AAP instance with consistent names but potentially different
+        IDs.  Resolved by name lookup on the target rather than id_mappings.
+        """
+        resource_type = "workflow_nodes"
+        ujt_summary = (
+            (data.get("summary_fields") or {}).get("unified_job_template") or {}
+        )
+        ujt_name = ujt_summary.get("name")
+        ujt_source_id = data.get("unified_job_template")
+
+        # Look up the system_job_template on target by name
+        target_ujt_id = None
+        if ujt_name:
+            try:
+                results = await self.client.get(
+                    "system_job_templates/",
+                    params={"name": ujt_name},
+                )
+                resources = (results or {}).get("results", [])
+                if resources:
+                    target_ujt_id = resources[0]["id"]
+            except Exception as e:
+                logger.warning(
+                    "system_job_template_lookup_failed",
+                    ujt_name=ujt_name,
+                    error=str(e),
+                )
+
+        if not target_ujt_id:
+            error_msg = (
+                f"Cannot import workflow node: system_job_template '{ujt_name}' "
+                f"(source_id={ujt_source_id}) not found on target"
+            )
+            logger.error(
+                "workflow_node_system_job_not_found",
+                source_id=source_id,
+                ujt_name=ujt_name,
+            )
+            self.stats["error_count"] += 1
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=error_msg,
+            )
+            self.import_errors.append({
+                "resource_type": resource_type,
+                "source_id": source_id,
+                "name": data.get("identifier", "unknown"),
+                "error": error_msg,
+                "error_type": "DependencyError",
+            })
+            return None
+
+        # Build node payload with resolved target UJT ID
+        skip_fields = {
+            "id", "type", "url", "related", "summary_fields", "created",
+            "modified", "natural_key", "success_nodes", "failure_nodes",
+            "always_nodes", "_source_id", "_source_workflow_id",
+            "_ujt_resource_type",
+        }
+        resolved = {k: v for k, v in data.items()
+                    if k not in skip_fields and v is not None}
+        resolved["unified_job_template"] = target_ujt_id
+
+        nested_endpoint = (
+            f"workflow_job_templates/{workflow_target_id}/workflow_nodes/"
+        )
+
+        try:
+            result = await self.client.post(nested_endpoint, json_data=resolved)
+
+            self.state.mark_completed(
+                resource_type=resource_type,
+                source_id=source_id,
+                target_id=result["id"],
+                target_name=result.get("identifier", "unknown"),
+            )
+            self.stats["imported_count"] += 1
+
+            logger.info(
+                "workflow_system_job_node_imported",
+                source_id=source_id,
+                target_id=result["id"],
+                ujt_name=ujt_name,
+            )
+
+            result["_edge_data"] = {
+                "success_nodes": data.get("success_nodes", []),
+                "failure_nodes": data.get("failure_nodes", []),
+                "always_nodes": data.get("always_nodes", []),
+            }
+            result["_source_id"] = source_id
+            return result
+
+        except Exception as e:
+            error_msg = f"Failed to import system job node: {e}"
+            logger.error(
+                "workflow_system_job_node_import_failed",
+                source_id=source_id,
+                error=str(e),
+            )
+            self.stats["error_count"] += 1
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=error_msg,
+            )
+            self.import_errors.append({
+                "resource_type": resource_type,
+                "source_id": source_id,
+                "name": data.get("identifier", "unknown"),
+                "error": error_msg,
+                "error_type": type(e).__name__,
+            })
             return None
 
     async def import_workflow_nodes(
