@@ -13,7 +13,7 @@ LABEL org.opencontainers.image.title="aap-bridge" \
 MAINTAINER Magnus Glantz <sudo@redhat.com>
 
 # Prereqs
-RUN dnf install python3 python3-pip wget unzip -y
+RUN dnf install python3 python3-pip wget unzip openssh-clients ncurses -y && dnf clean all
 
 RUN mkdir /app
 

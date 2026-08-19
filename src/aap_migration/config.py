@@ -101,6 +101,14 @@ class VaultConfig(BaseModel):
     token_ttl: int = Field(
         default=3600, ge=300, le=14400, description="Token TTL in seconds (5min - 4hrs)"
     )
+    verify_ssl: bool | str | None = Field(
+        default=None,
+        description="Verify SSL certificates (True, False, path to CA bundle, or None to use VAULT_CACERT env var)",
+    )
+    client_cert: tuple[str, str] | None = Field(
+        default=None,
+        description="Client certificate and key paths for mTLS as (cert_path, key_path)",
+    )
 
     @field_validator("url")
     @classmethod
@@ -727,18 +735,20 @@ def _expand_env_vars(data: dict) -> dict:
         return data
 
 
-def save_config_to_yaml(config: MigrationConfig, output_path: str | Path) -> None:
-    """Save configuration to YAML file.
+_SENSITIVE_FIELDS = {
+    "source": {"token"},
+    "target": {"token"},
+    "vault": {"role_id", "secret_id"},
+}
 
-    Args:
-        config: Configuration to save
-        output_path: Path to output YAML file
-    """
+
+def save_config_to_yaml(config: MigrationConfig, output_path: str | Path) -> None:
+    """Save configuration to YAML file, stripping sensitive fields."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Convert to dict and remove sensitive values
-    config_dict = config.model_dump()
+    config_dict = config.model_dump(exclude=_SENSITIVE_FIELDS)
 
-    with open(output_path, "w") as f:
+    fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)

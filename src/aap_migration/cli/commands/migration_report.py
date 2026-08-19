@@ -240,7 +240,7 @@ def _identify_missing_resources(
 
     # Find resources that were transformed but not completed
     for resource in transformed_data:
-        source_id = resource.get("id")
+        source_id = resource.get("_source_id") or resource.get("id")
         if source_id and source_id not in completed_ids:
             missing.append({
                 "source_id": source_id,
@@ -249,6 +249,35 @@ def _identify_missing_resources(
             })
 
     return missing
+
+
+def _determine_transform_drop_reason(
+    export_resource: dict,
+    db_transform_records: dict[int, str],
+) -> str:
+    """Determine why a resource was dropped during the export→transform phase.
+
+    Checks DB phase='transform' records first (authoritative for transformer-specific
+    skips), then falls back to export data field checks for filter-based drops.
+    """
+    source_id = export_resource.get("_source_id") or export_resource.get("id")
+
+    if source_id in db_transform_records and db_transform_records[source_id]:
+        return db_transform_records[source_id]
+
+    if export_resource.get("pending_deletion"):
+        return "Pending deletion in source AAP"
+
+    if export_resource.get("managed"):
+        summary_fields = export_resource.get("summary_fields", {})
+        related = export_resource.get("related", {})
+        if "created_by" in summary_fields or "created_by" in related:
+            return "Custom managed credential type (not built-in)"
+
+    if export_resource.get("has_inventory_sources"):
+        return "Dynamic host (managed by inventory source)"
+
+    return "Filtered during transform (check transform logs)"
 
 
 def _format_workflow_nodes_failures(failed_resources: list[dict], migration_state) -> list[str]:
@@ -369,6 +398,7 @@ def _analyze_resource_type(
         "failed_count": 0,
         "in_progress_count": 0,
         "pending_count": 0,
+        "pending_resources": [],
         "skipped_count": 0,
         "failed_resources": [],
         "skipped_resources": [],
@@ -460,6 +490,7 @@ def _analyze_resource_type(
             stats["password_placeholder_schedules"] = pwd_placeholders
 
     # Query database for migration progress
+    db_source_ids: set[int] = set()
     try:
         with get_session(database_url) as session:
             # Count by status
@@ -470,6 +501,7 @@ def _analyze_resource_type(
             )
 
             for record in progress_records:
+                db_source_ids.add(record.source_id)
                 # FIX: Count "imported" only if status="completed" AND phase="import"
                 # This prevents counting resources from previous runs or transform phase
                 # Database structure:
@@ -499,6 +531,12 @@ def _analyze_resource_type(
                     stats["in_progress_count"] += 1
                 elif record.status == "pending":
                     stats["pending_count"] += 1
+                    stats["pending_resources"].append({
+                        "source_id": record.source_id,
+                        "source_name": record.source_name,
+                        "phase": record.phase,
+                        "error": record.error_message,
+                    })
                 elif record.status == "skipped":
                     stats["skipped_count"] += 1
                     skip_info = {
@@ -509,10 +547,9 @@ def _analyze_resource_type(
                     }
                     stats["skipped_resources"].append(skip_info)
 
-                    # Separate by phase for detailed reporting
-                    if record.phase == "transform":
-                        stats["transform_skipped"].append(skip_info)
-                    elif record.phase == "import":
+                    # Route import-phase skips for detailed reporting.
+                    # Transform-phase skips are handled by the file diff above.
+                    if record.phase == "import":
                         stats["import_skipped"].append(skip_info)
                         stats["import_skipped_count"] += 1
 
@@ -530,13 +567,37 @@ def _analyze_resource_type(
         + stats["in_progress_count"]
     )
 
-    # Identify specific missing resources if there's a discrepancy
+    # Identify specific missing resources and explain discrepancy
     if stats["discrepancy"] > 0:
         stats["missing_resources"] = _identify_missing_resources(
             resource_type,
             transform_dir,
             database_url,
         )
+
+        xform_ids = [r.get("_source_id") or r.get("id") for r in transformed_data]
+        unique_xform_ids = set(xform_ids)
+        duplicate_count = len(xform_ids) - len(unique_xform_ids)
+        not_in_db_count = len(unique_xform_ids - db_source_ids)
+        remaining = stats["discrepancy"] - duplicate_count - not_in_db_count
+
+        reasons = []
+        if duplicate_count > 0:
+            reasons.append(
+                f"{duplicate_count} duplicate source IDs in transformed files "
+                f"— all unique resources were processed, no resources are missing"
+            )
+        if not_in_db_count > 0:
+            reasons.append(
+                f"{not_in_db_count} resources exist in transformed files "
+                f"but have no record in the migration database"
+            )
+        if remaining > 0:
+            reasons.append(
+                f"{remaining} resources are tracked in the database "
+                f"but have not completed the import phase"
+            )
+        stats["discrepancy_reasons"] = reasons
 
     return stats
 
@@ -728,7 +789,7 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
 
     # Detailed sections for failures, skipped, and discrepancies
     for stats in report_data:
-        if stats["failed_count"] > 0 or stats["skipped_count"] > 0 or stats["discrepancy"] != 0:
+        if stats["failed_count"] > 0 or stats["skipped_count"] > 0 or stats["pending_count"] > 0 or stats["discrepancy"] != 0:
             lines.append(f"## {stats['resource_type']} - Issues")
             lines.append("")
 
@@ -878,6 +939,30 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
                     lines.append("- Fix: Query by composite key (name, organization, credential_type)")
                     lines.append("")
 
+            if stats["pending_count"] > 0:
+                lines.append(f"### Pending Resources ({stats['pending_count']})")
+                lines.append("")
+                lines.append("These resources have database records but have not completed processing:")
+                lines.append("")
+                lines.append("| Source ID | Name | Phase |")
+                lines.append("|-----------|------|-------|")
+
+                display_limit = 20
+                for pending in stats["pending_resources"][:display_limit]:
+                    source_id = pending["source_id"]
+                    name = pending["source_name"] or "N/A"
+                    phase = pending["phase"] or "N/A"
+                    lines.append(f"| {source_id} | {name} | {phase} |")
+
+                if stats["pending_count"] > display_limit:
+                    lines.append(f"| ... | *({stats['pending_count'] - display_limit} more)* | |")
+
+                lines.append("")
+                lines.append("**Note:**")
+                lines.append("- Pending resources may be from a previous migration run or require re-processing")
+                lines.append("- Re-run import for the affected resource type to process these resources")
+                lines.append("")
+
             if stats["discrepancy"] > 0:
                 lines.append(f"### Missing Resources (Discrepancy: {stats['discrepancy']})")
                 lines.append("")
@@ -887,6 +972,12 @@ def _generate_markdown_report(report_data: list[dict], migration_state) -> str:
                 lines.append(f"- **Imported:** {stats['completed_count']}")
                 lines.append(f"- **Discrepancy:** {stats['discrepancy']}")
                 lines.append("")
+
+                if stats.get("discrepancy_reasons"):
+                    lines.append("**Discrepancy Explanation:**")
+                    for reason in stats["discrepancy_reasons"]:
+                        lines.append(f"- {reason}")
+                    lines.append("")
 
                 # Calculate gaps at each phase
                 export_transform_gap = stats['exported_count'] - stats['transformed_count']

@@ -1,0 +1,106 @@
+name: Container Build, Scan & Push
+
+on:
+  push:
+    branches:
+      - 'release/v1.x'
+  workflow_dispatch:
+    inputs:
+      tag_override:
+        description: 'Custom image tag (default: branch name or sha)'
+        required: false
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  REGISTRY: quay.io
+  IMAGE_NAME: arbhati/aap-migration-toolkit
+
+jobs:
+  build-scan-push:
+    name: Build, Scan & Push Container
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag_override }}" ]; then
+            echo "version=${{ github.event.inputs.tag_override }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=sha-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build container image
+        run: |
+          docker build \
+            --build-arg AAP_BRIDGE_ZIP="${{ github.server_url }}/${{ github.repository }}/archive/refs/heads/release/v1.x.zip" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=${{ steps.tag.outputs.version }}" \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.version }} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            -f container/Containerfile .
+
+      - name: Run Trivy scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: 'image'
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.version }}'
+          format: 'sarif'
+          output: 'trivy-container-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload scan to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-container-results.sarif'
+          category: 'container-release'
+
+      - name: Run Trivy scan (table)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: 'image'
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.version }}'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Run Trivy scan (JSON)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: 'image'
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.version }}'
+          format: 'json'
+          output: 'trivy-container-results.json'
+
+      - name: Upload Trivy results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-container-report
+          path: trivy-container-results.json
+          retention-days: 90
+
+      - name: Login to Quay.io
+        if: always()
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Push to Quay.io
+        if: always()
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.version }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          echo "### Container pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Latest:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> "$GITHUB_STEP_SUMMARY"

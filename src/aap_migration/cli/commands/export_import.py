@@ -1887,6 +1887,17 @@ def import_cmd(
 
                         transformed_resources.append(resource)
 
+                    # Snapshot auditor source IDs BEFORE import — _import_parallel
+                    # pops _source_id from each dict, so post-import reads get None.
+                    auditor_source_snapshot = [
+                        {
+                            "username": r.get("username", "unknown"),
+                            "source_id": r.get("_source_id", r.get("id", 0)),
+                        }
+                        for r in transformed_resources
+                        if r.get("is_system_auditor") is True
+                    ] if rtype == "users" else []
+
                     if not dry_run:
                         # Create appropriate importer using factory
                         try:
@@ -2013,6 +2024,83 @@ def import_cmd(
                                     resource_type=rtype,
                                     total=len(transformed_resources),
                                 )
+
+                            # --- Post-phase: Gateway auditor role assignments (AAP 2.6+) ---
+                            # Runs for BOTH fresh imports and re-runs (all users pre-existing)
+                            if rtype == "users":
+                                # Use pre-captured snapshot — _source_id is popped by
+                                # _import_parallel during fresh import, so reading it
+                                # from transformed_resources post-import yields None.
+                                auditor_failed_count = 0
+                                if auditor_source_snapshot:
+                                    echo_info(
+                                        f"🔑 {len(auditor_source_snapshot)} system auditor(s) detected — "
+                                        f"assigning Gateway Platform Auditor roles..."
+                                    )
+                                    try:
+                                        role_def_id = await preflight_gateway_access(ctx.target_client)
+                                    except RuntimeError as gw_err:
+                                        logger.error(
+                                            "gateway_preflight_failed",
+                                            error=str(gw_err),
+                                            affected_count=len(auditor_source_snapshot),
+                                        )
+                                        role_def_id = None
+                                        preflight_error = str(gw_err)
+
+                                    if role_def_id is not None:
+                                        auditor_users = []
+                                        for snap in auditor_source_snapshot:
+                                            mapping = ctx.migration_state.get_id_mapping("users", snap["source_id"])
+                                            if mapping:
+                                                auditor_users.append({
+                                                    "username": snap["username"],
+                                                    "source_id": snap["source_id"],
+                                                    "target_id": mapping["target_id"],
+                                                })
+
+                                        if auditor_users:
+                                            auditor_summary = await assign_auditor_roles(
+                                                ctx.target_client, auditor_users, role_def_id
+                                            )
+                                            echo_info(
+                                                f"🔑 Auditor roles: {auditor_summary.verified_count}/{auditor_summary.auditor_count} "
+                                                f"assigned+verified (max sync {auditor_summary.sync_latency_ms_max:.0f}ms)"
+                                            )
+                                            if auditor_summary.failed:
+                                                auditor_failed_count = len(auditor_summary.failed)
+                                                for f in auditor_summary.failed:
+                                                    echo_warning(
+                                                        f"   ⚠ auditor_assignment_failed: {f.username} — {f.error}"
+                                                    )
+                                    else:
+                                        auditor_summary = create_preflight_failure_summary(
+                                            auditor_source_snapshot, preflight_error
+                                        )
+                                        auditor_failed_count = auditor_summary.auditor_count
+                                        echo_error(
+                                            f"\n{'='*60}\n"
+                                            f"❌ AUDITOR ROLE ASSIGNMENT BLOCKED\n"
+                                            f"{'='*60}\n"
+                                            f"Gateway preflight failed: {preflight_error}\n\n"
+                                            f"{auditor_summary.auditor_count} system auditor(s) will NOT\n"
+                                            f"have functional auditor access on AAP 2.6.\n\n"
+                                            f"Affected users:"
+                                        )
+                                        for f in auditor_summary.failed:
+                                            echo_error(f"   • {f.username}")
+                                        echo_error(
+                                            f"\nAction required: use a Gateway-capable token\n"
+                                            f"(length 32, from AAP 2.6 UI) and re-run, or:\n"
+                                            f"   python tools/remediate_auditor_roles.py --data-dir <path>\n"
+                                            f"{'='*60}"
+                                        )
+                                        for f in auditor_summary.failed:
+                                            echo_warning(
+                                                f"   ⚠ auditor_assignment_failed: {f.username} — {f.error}"
+                                            )
+                                if auditor_failed_count > 0:
+                                    total_failed += auditor_failed_count
 
                             # NOTE: SCM sync waiting has been removed from automatic flow.
                             # With two-phase import, users run phase1 (up to projects),

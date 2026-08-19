@@ -214,7 +214,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -229,7 +229,7 @@ jobs:
           sarif_file: 'trivy-results.sarif'
 
       - name: Run Trivy for JSON output
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -244,10 +244,62 @@ jobs:
           path: trivy-results.json
           retention-days: 30
 
+  container-image-scan:
+    name: Container Image Security Scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build container image
+        run: docker build -t aap-migration-tool:scan -f container/Containerfile .
+
+      - name: Run Trivy image scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: 'image'
+          image-ref: 'aap-migration-tool:scan'
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload image scan to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+          category: 'container-image'
+
+      - name: Run Trivy image scan (table)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: 'image'
+          image-ref: 'aap-migration-tool:scan'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Run Trivy image scan (JSON)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: 'image'
+          image-ref: 'aap-migration-tool:scan'
+          format: 'json'
+          output: 'trivy-image-results.json'
+
+      - name: Upload Trivy image results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-report
+          path: trivy-image-results.json
+          retention-days: 30
+
   summary:
     name: Security Scan Summary
     runs-on: ubuntu-latest
-    needs: [dependency-scan, secret-scan, sast-bandit, sast-semgrep, code-quality, license-compliance, sbom-generation, filesystem-scan]
+    needs: [dependency-scan, secret-scan, sast-bandit, sast-semgrep, code-quality, license-compliance, sbom-generation, filesystem-scan, container-image-scan]
     if: always()
     steps:
       - name: Check job results
@@ -262,3 +314,4 @@ jobs:
           echo "License Compliance: ${{ needs.license-compliance.result }}"
           echo "SBOM Generation: ${{ needs.sbom-generation.result }}"
           echo "Filesystem Scan: ${{ needs.filesystem-scan.result }}"
+          echo "Container Image Scan: ${{ needs.container-image-scan.result }}"

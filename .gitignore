@@ -300,3 +300,7 @@ test_creds_export/
 test_prep/
 
 container/diagnose_migration.sh
+
+# Customer migration datasets and validation evidence (NEVER track)
+container/CTOi-test/
+investigation/validate-dry-run/
