@@ -23,6 +23,12 @@ from aap_migration.cli.utils import (
     format_count,
     step_progress,
 )
+from aap_migration.migration.auditor_roles import (
+    AuditorRolesSummary,
+    assign_auditor_roles,
+    create_preflight_failure_summary,
+    preflight_gateway_access,
+)
 from aap_migration.migration.exporter import create_exporter
 from aap_migration.migration.importer import create_importer
 from aap_migration.migration.parallel_exporter import ParallelExportCoordinator
