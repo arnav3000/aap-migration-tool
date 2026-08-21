@@ -70,6 +70,9 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
     )
     total_field_mm = sum(t.t3_field_parity.mismatching for t in result.per_type)
     total_sync_failed = sum(1 for s in result.sync_entries if s.failed)
+    workflow_mismatch_count = sum(
+        1 for w in result.workflow_comparisons if w.verdict == "mismatch"
+    )
     types_failed = count_failed_resource_types(result.per_type)
     n_types = len(result.per_type)
     n_orgs = len(result.per_org)
@@ -500,9 +503,10 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
   <button class="tab-btn" data-tab="missing">Missing <span style="opacity:.55;font-weight:600">T2</span> <span class="ct{' ok' if total_missing == 0 else ''}">{_fmt(total_missing)}</span></button>
   <button class="tab-btn" data-tab="extra">Extra <span style="opacity:.55;font-weight:600">T2</span>{f' <span class="ct{" ok" if total_extra_listed == 0 else " warn"}" title="Target objects not matched to export (hosts omitted from list)">{_fmt(total_extra_listed)}</span>' if is_live_validate else ''}</button>
   <button class="tab-btn" data-tab="syncs">Syncs <span style="opacity:.55;font-weight:600">T2</span>{f' <span class="ct{" ok" if total_sync_failed == 0 else ""}" title="Failed project or inventory source syncs">{_fmt(total_sync_failed)}</span>' if is_live_validate else ''}</button>
-  <button class="tab-btn" data-tab="fields">Field Changes <span style="opacity:.55;font-weight:600">T3</span>{f' <span class="ct{" ok" if total_field_mm == 0 else " warn"}" title="Objects with ≥1 field mismatch">{_fmt(total_field_mm)}</span>' if is_live_validate else ''}</button>
-  <button class="tab-btn" data-tab="hosts">Hosts <span style="opacity:.55;font-weight:600">T4</span>{f' <span class="ct{" ok" if host_issues == 0 else ""}">{_fmt(host_issues)}</span>' if host_tab_ran else ""}</button>
-  <button class="tab-btn" data-tab="auditor">Auditor{auditor_tab_badge}</button>
+  <button class="tab-btn" data-tab="workflows">Workflows <span style="opacity:.55;font-weight:600">T3</span>{f' <span class="ct{" ok" if workflow_mismatch_count == 0 else ""}" title="Workflow structure mismatches">{_fmt(workflow_mismatch_count)}</span>' if is_live_validate else ''}</button>
+  <button class="tab-btn" data-tab="fields">Field Changes <span style="opacity:.55;font-weight:600">T4</span>{f' <span class="ct{" ok" if total_field_mm == 0 else " warn"}" title="Objects with ≥1 field mismatch">{_fmt(total_field_mm)}</span>' if is_live_validate else ''}</button>
+  <button class="tab-btn" data-tab="hosts">Hosts <span style="opacity:.55;font-weight:600">T5</span>{f' <span class="ct{" ok" if host_issues == 0 else ""}">{_fmt(host_issues)}</span>' if host_tab_ran else ""}</button>
+  <button class="tab-btn" data-tab="auditor">Auditor <span style="opacity:.55;font-weight:600">T5</span>{auditor_tab_badge}</button>
   <button class="tab-btn" data-tab="method">Methodology</button>
   </div>
 </nav>
@@ -516,13 +520,14 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 <div class="content hidden" id="missingContent"></div>
 <div class="content hidden" id="extraContent"></div>
 <div class="content hidden" id="syncsContent"></div>
+<div class="content hidden" id="workflowsContent"></div>
 <div class="content hidden" id="fieldsContent"></div>
 
 <!-- Hosts tab: client-rendered (mismatch default + inventory search) -->
 <div class="content hidden" id="hostsContent"></div>
 
 <div class="content hidden" id="auditorContent">
-<h2>Auditor Verification &mdash; Gateway Platform Auditor</h2>
+<h2>Auditor Verification &mdash; T5</h2>
 <div class="callout callout-info"><strong>Why:</strong> On AAP 2.6, <code>is_system_auditor</code> is Gateway-synced. This verifies the Gateway role directly.</div>
 <div class="cards" style="grid-template-columns:repeat(4,1fr);">
   <div class="card"><div class="v">{_fmt(ac.source_system_auditors)}</div><div class="l">Source auditors</div></div>
@@ -542,8 +547,9 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
   <tr><th>Tier</th><th>Scope</th><th>Coverage</th></tr>
   <tr><td><strong>T1</strong></td><td>Counts</td><td>{t1_coverage}</td></tr>
   <tr><td><strong>T2</strong></td><td>Existence</td><td>{t2_coverage}</td></tr>
-  <tr><td><strong>T3</strong></td><td>Field parity</td><td>{t3_coverage}</td></tr>
-  <tr><td><strong>T4</strong></td><td>Host sampling</td><td>{t4_coverage}</td></tr>
+  <tr><td><strong>T3</strong></td><td>Workflow structure parity</td><td>Matched workflow templates: nodes, edges, and node field overrides</td></tr>
+  <tr><td><strong>T4</strong></td><td>Field parity</td><td>{t3_coverage}</td></tr>
+  <tr><td><strong>T5</strong></td><td>Host sampling + auditor</td><td>{t4_coverage}; auditor role assignment cross-check</td></tr>
 </table>
 <div class="callout callout-info" style="margin-top:.6rem"><strong>Extra on target:</strong> Objects present on AAP 2.6 with no identity match to an exported source object for this run. Often objects created or changed on the target outside the migration set. Hosts are counted in T1/T2 but listed under Hosts (T4), not the Extra tab. With <code>--orgs</code>, the list is limited to the scoped organization(s).</div>
 <div class="callout callout-info" style="margin-top:.6rem"><strong>T4 confidence:</strong> {confidence_note}</div>
@@ -958,7 +964,7 @@ function init(){{
 function switchTab(tab){{
   curTab=tab;
   document.querySelectorAll('.tab-btn').forEach(function(b){{b.classList.toggle('active',b.dataset.tab===tab)}});
-  var lazy=['dashboardContent','orgsContent','typesContent','missingContent','extraContent','syncsContent','fieldsContent','hostsContent'];
+  var lazy=['dashboardContent','orgsContent','typesContent','missingContent','extraContent','syncsContent','workflowsContent','fieldsContent','hostsContent'];
   document.querySelectorAll('.content').forEach(function(c){{
     var on=c.id===tab+'Content';
     c.classList.toggle('hidden',!on);
@@ -971,6 +977,7 @@ function switchTab(tab){{
   else if(tab==='missing')renderMissing();
   else if(tab==='extra')renderExtra();
   else if(tab==='syncs')renderSyncs();
+  else if(tab==='workflows')renderWorkflows();
   else if(tab==='fields')renderFields();
   else if(tab==='hosts')renderHosts();
 }}
@@ -989,6 +996,10 @@ function jumpToFields(typeFilter,orgFilter){{
 function jumpToSyncs(){{
   syncShow='failed';syncType='all';syncOrg='';syncSearch='';syncPage=1;
   switchTab('syncs');
+}}
+function jumpToWorkflows(){{
+  wfShow='mismatch';wfOrg='';wfSearch='';wfPage=1;wfDrill='';wfNodeExpanded='';
+  switchTab('workflows');
 }}
 function jumpToFailedTypes(){{
   allObjView=null;typeDrill=null;typesBucketFilter='f';switchTab('types');
@@ -1074,6 +1085,8 @@ function renderDashboard(){{
   if(D.metadata&&D.metadata.mode==='validate-live'){{
     var syncFailed=(D.executive_summary&&D.executive_summary.total_sync_failed)||0;
     h+='<div class="card" style="cursor:pointer" onclick="jumpToSyncs()" title="Failed project or inventory source syncs on the live target"><div class="v'+(syncFailed===0?' ok':' bad')+'">'+fmt(syncFailed)+'</div><div class="l">Failed syncs &#8594;</div></div>';
+    var wfIssues=((D.workflow_comparisons||[]).filter(function(w){{return w.verdict==='mismatch'}})).length;
+    h+='<div class="card" style="cursor:pointer" onclick="jumpToWorkflows()" title="Workflow structure mismatches"><div class="v'+(wfIssues===0?' ok':' bad')+'">'+fmt(wfIssues)+'</div><div class="l">Workflow issues &#8594;</div></div>';
   }}
   h+='<div class="card" style="cursor:pointer" onclick="jumpToUnexplained()" title="Missing objects with no DB explanation"><div class="v'+(unex===0?' ok':' bad')+'">'+fmt(unex)+'</div><div class="l">Unexplained &#8594;</div></div>';
   h+='</div>';
@@ -2085,7 +2098,213 @@ function renderSyncs(){{
   restoreKeptFocus();
 }}
 
-/* ── Tab 5: Field Mismatches (grouped by object) ── */
+/* ── Tab: Workflows (T3) ── */
+var wfPage=1,wfShow='mismatch',wfOrg='',wfSearch='',wfSort='severity',wfDrill='',wfNodeExpanded='';
+var _wfOrgInit=false;
+function wfVerdictRank(v){{
+  if(v==='mismatch')return 0;
+  if(v==='changed')return 1;
+  return 2;
+}}
+function wfVerdictBadge(v){{
+  if(v==='mismatch')return '<span class="st st-f">Mismatch</span>';
+  if(v==='changed')return '<span class="st st-fc">Changed</span>';
+  return '<span class="st st-c">Match</span>';
+}}
+function wfSrcTgtPair(src, tgt){{
+  return esc((src||'—')+' → '+(tgt||'—'));
+}}
+function wfNodeFieldRows(r){{
+  if(r.field_rows&&r.field_rows.length)return r.field_rows;
+  var rows=[];
+  if((r.src_kind||'—')!==(r.tgt_kind||'—'))rows.push({{field:'kind',expected:r.src_kind||'—',actual:r.tgt_kind||'—',status:r.status||'mismatch'}});
+  if((r.src_ref||'—')!==(r.tgt_ref||'—'))rows.push({{field:'unified_job_template',expected:r.src_ref||'—',actual:r.tgt_ref||'—',status:r.status||'mismatch'}});
+  (r.overrides_changed||[]).forEach(function(f){{rows.push({{field:f,expected:'—',actual:'—',status:r.status||'changed'}});}});
+  return rows;
+}}
+function wfNodeFieldDetailHtml(r){{
+  var fields=wfNodeFieldRows(r);
+  if(!fields.length)return '<div class="empty-msg" style="padding:.5rem 0">No field differences recorded.</div>';
+  var h='<table class="fd-tbl"><thead><tr><th>Field</th><th>Expected (2.4)</th><th>Actual (2.6)</th><th>Status</th></tr></thead><tbody>';
+  fields.forEach(function(f){{
+    var exp=f.expected!=null?String(f.expected):'—';
+    var act=f.actual!=null?String(f.actual):'—';
+    var match=exp===act;
+    h+='<tr class="'+(match?'fd-ok':'fd-diff')+'">';
+    h+='<td class="fd-fn"><code>'+esc(f.field||'')+'</code></td>';
+    h+='<td class="fd-v src-val">'+esc(truncVal(exp))+'</td>';
+    h+='<td class="fd-v tgt-val">'+esc(truncVal(act))+'</td>';
+    h+='<td>'+wfVerdictBadge(f.status||(match?'match':'mismatch'))+'</td>';
+    h+='</tr>';
+  }});
+  h+='</tbody></table>';
+  return h;
+}}
+function toggleWfNodeDetail(ident){{
+  wfNodeExpanded=(wfNodeExpanded===ident?'':ident);
+  renderWorkflows();
+}}
+function wfTotalDiffs(w){{
+  return (w.node_diffs||0)+(w.edge_diffs||0)+(w.field_diffs||w.ref_diffs||0);
+}}
+function wfFieldDiffs(w){{
+  return w.field_diffs!=null?w.field_diffs:(w.ref_diffs||0);
+}}
+function wfCardClass(n, severity){{
+  n=n||0;
+  if(n===0)return ' ok';
+  return severity==='warn'?' warn':' bad';
+}}
+function wfDiffNumStyle(n, severity){{
+  n=n||0;
+  if(n===0)return '';
+  if(severity==='warn')return ' style="color:var(--warn);font-weight:700"';
+  return ' style="color:var(--fail);font-weight:700"';
+}}
+function wfPairNumStyle(a,b){{
+  if((a||0)===(b||0))return '';
+  return ' style="color:var(--fail);font-weight:700"';
+}}
+function renderWorkflows(){{
+  seedScopedOrgOnce('_wfOrgInit',function(){{return wfOrg}},function(v){{wfOrg=v}});
+  var all=(D.workflow_comparisons||[]);
+  var isLive=D.metadata&&D.metadata.mode==='validate-live';
+  var h='<h2>Workflows &mdash; T3</h2>';
+  h+='<div class="callout callout-info"><strong>Workflow structure parity:</strong> Compares workflow nodes, edge routing (success/failure/always), and node-level field differences (kind, template ref, overrides) between source export and live target.</div>';
+  if(!isLive){{
+    h+='<div class="callout callout-warn"><strong>Not run:</strong> Workflow structure checks require <code>--live</code>.</div>';
+    document.getElementById('workflowsContent').innerHTML=h;return;
+  }}
+  if(!all.length){{
+    h+='<div class="callout callout-pass">No workflow comparisons available for this run.</div>';
+    document.getElementById('workflowsContent').innerHTML=h;return;
+  }}
+  if(wfDrill){{
+    var target=all.find(function(w){{return (w.workflow_key||'')===wfDrill}});
+    if(target){{
+      h+='<div class="drill">';
+      h+='<button class="back-btn" onclick="wfNodeExpanded=\\'\\';wfDrill=\\'\\';renderWorkflows()">&#9664; Back to workflows</button>';
+      h+='<h2>'+esc(target.workflow||'')+' &mdash; Structure Diff</h2>';
+      var nodeCountMismatch=(target.src_nodes||0)!==(target.tgt_nodes||0);
+      var edgeCountMismatch=(target.src_edges||0)!==(target.tgt_edges||0);
+      h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">';
+      h+='<div class="card"><div class="v'+(nodeCountMismatch?' bad':'')+'">'+fmt(target.src_nodes||0)+'</div><div class="l">Src nodes</div></div>';
+      h+='<div class="card"><div class="v'+(nodeCountMismatch?' bad':'')+'">'+fmt(target.tgt_nodes||0)+'</div><div class="l">Tgt nodes</div></div>';
+      h+='<div class="card"><div class="v'+(edgeCountMismatch?' bad':'')+'">'+fmt(target.src_edges||0)+'</div><div class="l">Src edges</div></div>';
+      h+='<div class="card"><div class="v'+(edgeCountMismatch?' bad':'')+'">'+fmt(target.tgt_edges||0)+'</div><div class="l">Tgt edges</div></div>';
+      h+='<div class="card"><div class="v'+wfCardClass(target.node_diffs)+'">'+fmt(target.node_diffs||0)+'</div><div class="l">Node diffs</div></div>';
+      h+='<div class="card"><div class="v'+wfCardClass(target.edge_diffs)+'">'+fmt(target.edge_diffs||0)+'</div><div class="l">Edge diffs</div></div>';
+      h+='<div class="card"><div class="v'+wfCardClass(wfFieldDiffs(target))+'">'+fmt(wfFieldDiffs(target))+'</div><div class="l">Field diffs</div></div>';
+      h+='</div>';
+      h+='<h3>Node Mapping</h3>';
+      h+='<div class="callout callout-info" style="margin-bottom:.6rem">Click a node row to expand field-level differences.</div>';
+      h+='<table><thead><tr><th></th><th>Node</th><th>Kind (src&rarr;tgt)</th><th>Ref (src&rarr;tgt)</th><th>Overrides</th><th>Status</th></tr></thead><tbody>';
+      if(!(target.node_rows||[]).length){{
+        h+='<tr><td colspan="6" class="empty-msg">No node-level differences.</td></tr>';
+      }}
+      (target.node_rows||[]).forEach(function(r){{
+        var ident=r.identifier||'';
+        var identSafe=ident.replace(/'/g,"\\\\'");
+        var open=wfNodeExpanded===ident;
+        var fieldCount=wfNodeFieldRows(r).length;
+        h+='<tr class="clickable'+(open?' open':'')+'" onclick="toggleWfNodeDetail(\\''+identSafe+'\\')">';
+        h+='<td style="width:1.5rem;color:var(--fg2)">'+(open?'&#9660;':'&#9654;')+'</td>';
+        h+='<td><strong>'+esc(ident)+'</strong></td>';
+        h+='<td>'+wfSrcTgtPair(r.src_kind, r.tgt_kind)+'</td>';
+        h+='<td style="font-size:.82rem">'+wfSrcTgtPair(r.src_ref, r.tgt_ref)+'</td>';
+        h+='<td>'+esc(((r.overrides_changed||[]).join(', '))||'none')+(fieldCount?' ('+fieldCount+' fields)':'')+'</td>';
+        h+='<td>'+wfVerdictBadge(r.status||'match')+'</td></tr>';
+        if(open){{
+          h+='<tr class="wf-node-detail"><td></td><td colspan="5"><div class="fd-panel">'+wfNodeFieldDetailHtml(r)+'</div></td></tr>';
+        }}
+      }});
+      h+='</tbody></table>';
+      h+='<h3>Edge Comparison</h3>';
+      h+='<table><thead><tr><th>From</th><th>To</th><th>Expected</th><th>Actual</th><th>Status</th></tr></thead><tbody>';
+      if(!(target.edge_rows||[]).length){{
+        h+='<tr><td colspan="5" class="empty-msg">No edge differences.</td></tr>';
+      }}
+      (target.edge_rows||[]).forEach(function(r){{
+        h+='<tr><td>'+esc(r.from||'')+'</td><td>'+esc(r.to||'')+'</td>';
+        h+='<td><code>'+esc(r.expected_type||'—')+'</code></td>';
+        h+='<td><code>'+esc(r.actual_type||'—')+'</code></td>';
+        h+='<td>'+wfVerdictBadge(r.status||'match')+'</td></tr>';
+      }});
+      h+='</tbody></table></div>';
+      document.getElementById('workflowsContent').innerHTML=h;restoreKeptFocus();return;
+    }}
+    wfDrill='';
+  }}
+  var mismatch=0,changed=0,match=0,nodeDiffs=0,edgeDiffs=0,fieldDiffs=0;
+  all.forEach(function(w){{
+    if(w.verdict==='mismatch')mismatch++;
+    else if(w.verdict==='changed')changed++;
+    else match++;
+    nodeDiffs+=(w.node_diffs||0);edgeDiffs+=(w.edge_diffs||0);fieldDiffs+=wfFieldDiffs(w);
+  }});
+  h+='<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">';
+  h+='<div class="card"><div class="v">'+fmt(all.length)+'</div><div class="l">Compared</div></div>';
+  h+='<div class="card"><div class="v ok">'+fmt(match)+'</div><div class="l">Match</div></div>';
+  h+='<div class="card"><div class="v'+wfCardClass(mismatch)+'">'+fmt(mismatch)+'</div><div class="l">Mismatches</div></div>';
+  h+='<div class="card"><div class="v'+wfCardClass(nodeDiffs)+'">'+fmt(nodeDiffs)+'</div><div class="l">Node diffs</div></div>';
+  h+='<div class="card"><div class="v'+wfCardClass(edgeDiffs)+'">'+fmt(edgeDiffs)+'</div><div class="l">Edge diffs</div></div>';
+  h+='<div class="card"><div class="v'+wfCardClass(fieldDiffs)+'">'+fmt(fieldDiffs)+'</div><div class="l">Field diffs</div></div>';
+  h+='</div>';
+  h+='<div class="filter-bar">';
+  h+='<select onchange="wfShow=this.value;wfPage=1;renderWorkflows()">';
+  h+='<option value="mismatch"'+(wfShow==='mismatch'?' selected':'')+'>Mismatches only ('+fmt(mismatch)+')</option>';
+  h+='<option value="all"'+(wfShow==='all'?' selected':'')+'>All workflows ('+fmt(all.length)+')</option>';
+  h+='</select>';
+  h+=orgFilterHtml('flt-org-wf',wfOrg,'wfOrg','wfPage=1;renderWorkflows()');
+  h+='<select onchange="wfSort=this.value;wfPage=1;renderWorkflows()">';
+  h+='<option value="severity"'+(wfSort==='severity'?' selected':'')+'>Sort: severity</option>';
+  h+='<option value="name"'+(wfSort==='name'?' selected':'')+'>Sort: workflow</option>';
+  h+='<option value="org"'+(wfSort==='org'?' selected':'')+'>Sort: org</option>';
+  h+='<option value="diffs"'+(wfSort==='diffs'?' selected':'')+'>Sort: total diffs</option>';
+  h+='</select>';
+  h+=searchFilterHtml('flt-name-wf',wfSearch,'Search workflow name...','wfSearch=this.value;wfPage=1;renderWorkflows()','wfSearch=\\'\\';wfPage=1;renderWorkflows()');
+  if(wfShow!=='mismatch'||wfOrg||wfSearch)h+='<button onclick="wfShow=\\'mismatch\\';wfOrg=\\'\\';wfSearch=\\'\\';wfPage=1;renderWorkflows()">Clear</button>';
+  h+='</div>';
+  var pool=all.filter(function(w){{
+    if(wfShow==='mismatch'&&w.verdict!=='mismatch')return false;
+    if(wfOrg&&(w.org||'')!==wfOrg)return false;
+    return true;
+  }});
+  var filtered=pool.filter(function(w){{
+    if(wfSearch&&(w.workflow||'').toLowerCase().indexOf(wfSearch.toLowerCase())<0)return false;
+    return true;
+  }});
+  filtered.sort(function(a,b){{
+    if(wfSort==='name')return cmpLocale(a.workflow,b.workflow);
+    if(wfSort==='org')return cmpLocale(a.org,b.org)||cmpLocale(a.workflow,b.workflow);
+    if(wfSort==='diffs')return wfTotalDiffs(b)-wfTotalDiffs(a)||cmpLocale(a.workflow,b.workflow);
+    var vr=wfVerdictRank(a.verdict)-wfVerdictRank(b.verdict);if(vr)return vr;
+    var td=wfTotalDiffs(b)-wfTotalDiffs(a);if(td)return td;
+    return cmpLocale(a.workflow,b.workflow);
+  }});
+  var pg=paginateSlice(wfPage,PAGE_FIELDS,filtered.length);
+  wfPage=pg.page;
+  var slice=filtered.slice(pg.sliceStart,pg.sliceEnd);
+  h+=showingLine(filtered.length,pool.length,'workflows',all.length);
+  h+='<table><thead><tr><th>Workflow</th><th>Org</th><th class="num">Src nodes</th><th class="num">Tgt nodes</th><th class="num">Src edges</th><th class="num">Tgt edges</th><th class="num">Node</th><th class="num">Edge</th><th class="num">Field</th><th>Verdict</th></tr></thead><tbody>';
+  if(!slice.length)h+='<tr><td colspan="10" class="empty-msg">No workflows match your filters.</td></tr>';
+  slice.forEach(function(w){{
+    var key=(w.workflow_key||'').replace(/'/g,"\\\\'");
+    h+='<tr class="clickable" onclick="wfNodeExpanded=\\'\\';wfDrill=\\''+key+'\\';renderWorkflows()">';
+    h+='<td><strong>'+esc(w.workflow||'')+'</strong></td>';
+    h+='<td>'+esc(w.org||'Global / Unscoped')+'</td>';
+    h+='<td class="num"'+wfPairNumStyle(w.src_nodes,w.tgt_nodes)+'>'+fmt(w.src_nodes||0)+'</td><td class="num"'+wfPairNumStyle(w.src_nodes,w.tgt_nodes)+'>'+fmt(w.tgt_nodes||0)+'</td>';
+    h+='<td class="num"'+wfPairNumStyle(w.src_edges,w.tgt_edges)+'>'+fmt(w.src_edges||0)+'</td><td class="num"'+wfPairNumStyle(w.src_edges,w.tgt_edges)+'>'+fmt(w.tgt_edges||0)+'</td>';
+    h+='<td class="num"'+wfDiffNumStyle(w.node_diffs)+'>'+fmt(w.node_diffs||0)+'</td><td class="num"'+wfDiffNumStyle(w.edge_diffs)+'>'+fmt(w.edge_diffs||0)+'</td><td class="num"'+wfDiffNumStyle(wfFieldDiffs(w))+'>'+fmt(wfFieldDiffs(w))+'</td>';
+    h+='<td>'+wfVerdictBadge(w.verdict||'match')+'</td></tr>';
+  }});
+  h+='</tbody></table>';
+  if(pg.pages>1)h+=renderPager(pg.page,pg.pages,filtered.length,'wfPage--;renderWorkflows()','wfPage++;renderWorkflows()','workflows');
+  document.getElementById('workflowsContent').innerHTML=h;
+  restoreKeptFocus();
+}}
+
+/* ── Tab 4: Field Mismatches (grouped by object) ── */
 var fldPage=1,fldType='all',fldOrg='',fldSearch='',fldField='all',fldSort='type_name';
 var _fldOrgInit=false;
 function renderFields(){{
@@ -2103,7 +2322,7 @@ function renderFields(){{
   }});
   var isLive = D.metadata && D.metadata.mode === 'validate-live';
   var t3NotRun = !isLive;
-  var h='<h2>Field Parity &mdash; T3</h2>';
+  var h='<h2>Field Parity &mdash; T4</h2>';
   if(isLive){{
     h+='<div class="cards" style="grid-template-columns:repeat(2,minmax(140px,1fr));max-width:420px">';
     h+='<div class="card"><div class="v'+(all.length===0?' ok':' warn')+'">'+fmt(all.length)+'</div><div class="l">Mismatched fields</div></div>';
@@ -2235,12 +2454,12 @@ function renderFields(){{
   restoreKeptFocus();
 }}
 
-/* ── Tab 6: Hosts (T4) ── */
+/* ── Tab 6: Hosts (T5) ── */
 var hostInvMode='mismatch',hostInvName='',hostSort='delta';
 function renderHosts(){{
   var H=HOST_T4||{{}};
   var invs=H.inventories||[];
-  var h='<h2>Host Validation &mdash; T4</h2>';
+  var h='<h2>Host Validation &mdash; T5</h2>';
   if(!H.ran){{
     h+='<div class="callout callout-info">Host sampling not run for this validation.</div>';
     document.getElementById('hostsContent').innerHTML=h;return;
