@@ -30,6 +30,30 @@ services:
       timeout: 10s
       retries: 3
 
+  # AAP Bridge REST API (Task 1 - separate container)
+  aap-bridge-api:
+    build:
+      context: ..
+      dockerfile: container/Containerfile
+    image: aap-bridge:latest
+    container_name: aap-bridge-api
+    env_file:
+      - .env
+    volumes:
+      - ./volumes/database:/app/aap-bridge/database:Z
+      - ./volumes/logs:/app/aap-bridge/logs:Z
+    ports:
+      - "8000:8000"
+    command: /app/aap-bridge/.venv/bin/aap-bridge serve --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    profiles:
+      - api
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   # PostgreSQL (Optional - only if using PostgreSQL instead of SQLite)
   postgres:
     image: postgres:15-alpine

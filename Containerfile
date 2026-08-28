@@ -55,4 +55,8 @@ RUN ~/.local/bin/uv sync
 # Create an alias for aap-bridge when someone enters a shell
 RUN echo "alias aap-bridge=/app/aap-bridge/.venv/bin/aap-bridge" >> ~/.bashrc
 
+# Expose API port (Task 1 scaffold)
+EXPOSE 8000
+
 # Note: .env will be mounted at runtime - do not copy .env.example here
+# Run API with: podman run -p 8000:8000 ... aap-bridge aap-bridge serve --host 0.0.0.0 --port 8000

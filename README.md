@@ -17,6 +17,8 @@ migrations
 
 The tool automatically detects AAP versions and validates compatibility before migration.
 
+> **REST API:** version-agnostic — works with any AAP version via `SOURCE__URL` / `TARGET__URL` (e.g., `/api/v2` vs `/api/controller/v2`). No version check on `/api/*`.
+
 ## Before You Begin
 
 ### Prerequisites: Running AAP Instances
@@ -1111,6 +1113,48 @@ make typecheck
 make check
 
 ```
+
+## REST API (Alternative Interface)
+
+Additive FastAPI alternative to CLI/TUI — no core `migration/*` edits, isolated `api_state.db` (`ApiBase`), Bearer auth (`AAP_API_TOKEN`), background `JobService` + WebSocket logs at `/ws/jobs/{id}/logs`.
+
+**Run API:**
+
+```bash
+# Install
+pip install -e ".[api]"
+# Serve (also inside container)
+aap-bridge serve --host 0.0.0.0 --port 8000
+# or: podman run -p 8000:8000 aap-bridge aap-bridge serve --host 0.0.0.0 --port 8000
+# Docker Compose (api profile)
+podman-compose --profile api up -d aap-bridge-api
+# Docs
+open http://localhost:8000/docs          # Swagger
+open http://localhost:8000/api/openapi.json
+```
+
+**Auth:** `Authorization: Bearer $AAP_API_TOKEN` if `AAP_API_TOKEN` set, else open (dev).
+
+**Endpoints (45):**
+
+| Group | Endpoints |
+|-------|-----------|
+| Health | `GET /api/health`, `GET /api/health/protected`, `GET /api/version` |
+| Resources | `GET /api/resources`, `GET /api/resources/{type}` |
+| Connections | `POST /api/connections`, `GET /api/connections`, `GET /api/connections/{id}`, `PUT /api/connections/{id}`, `DELETE /api/connections/{id}`, `POST /api/connections/{id}/test`, `GET /api/connections/{id}/token-hint` |
+| Jobs/WS | `GET /api/jobs`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`, `POST /api/jobs/{id}/resume`, `WS /ws/jobs/{id}/logs` |
+| Migration | `POST /api/migrate/preview`, `GET /api/migrate/preview/{job_id}`, `POST /api/migrate/run`, `POST /api/migrate/clear-state`, `GET /api/exclusions` |
+| Operations | `POST /api/operations/export`, `GET /api/operations/export/{job_id}`, `POST /api/operations/cleanup` |
+| Planner | `GET /api/planner/resource-types`, `POST /api/planner/plans`, `GET /api/planner/plans`, `GET /api/planner/plans/{id}`, `PUT /api/planner/plans/{id}`, `DELETE /api/planner/plans/{id}`, `POST /api/planner/plans/{id}/populate`, `POST /api/planner/plans/{id}/execute` |
+| Analysis | `POST /api/analysis/run`, `GET /api/analysis/{job_id}`, `GET /api/analysis/{job_id}/export/json`, `GET /api/analysis/{job_id}/export/html` |
+| IAM | `POST /api/iam/audit`, `POST /api/iam/migrate`, `GET /api/iam/{job_id}`, `GET /api/iam/{job_id}/export/json`, `GET /api/iam/{job_id}/export/html`, `GET /api/iam/benchmark`, `GET /api/iam/report` |
+| Validate | `POST /api/validate/run`, `GET /api/validate/{job_id}`, `GET /api/validate/{job_id}/export/json`, `GET /api/validate/{job_id}/export/html` |
+| Sizing | `POST /api/sizing/calculate`, `POST /api/sizing/dynamic` |
+| Settings | `GET /api/settings/concurrency`, `PUT /api/settings/concurrency`, `GET /api/settings` |
+
+**Env:** `AAP_API_TOKEN`, `AAP_TOKEN_ENCRYPTION_KEY` (SHA256-derived for `/api/connections` storage), `API_STATE_DB_PATH` / `AAP_API_DB_URL` (`sqlite:///./api_state.db` default), `AAP_CORS_ORIGINS`.
+
+Isolated DB — survives container restart, separate from `migration_state.db`.
 
 ## What Gets Migrated
 

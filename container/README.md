@@ -70,6 +70,11 @@ podman-compose up -d aap-bridge
 # OR: Start with PostgreSQL
 podman-compose --profile postgres up -d
 
+# OR: Start REST API alongside (api profile)
+podman-compose --profile api up -d aap-bridge-api
+# API at http://localhost:8000/docs  health: http://localhost:8000/api/health
+# Requires AAP_API_TOKEN + AAP_TOKEN_ENCRYPTION_KEY in .env (see .env.example)
+
 # 5. Run migration
 podman exec -it aap-bridge bash
 aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y
