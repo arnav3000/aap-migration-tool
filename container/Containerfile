@@ -58,4 +58,7 @@ RUN echo "alias aap-bridge=/app/aap-bridge/.venv/bin/aap-bridge" >> ~/.bashrc
 # Show MOTD banner on container shell login
 RUN echo 'python3 -c "import sys; sys.path.insert(0, \"/app/aap-bridge/src\"); from aap_migration.banner import get_container_motd; print(get_container_motd())" 2>/dev/null || true' >> ~/.bashrc
 
+EXPOSE 8000
+
 # Note: .env will be mounted at runtime - do not copy .env.example here
+# Run API with: podman run -p 8000:8000 ... aap-bridge aap-bridge serve --host 0.0.0.0 --port 8000

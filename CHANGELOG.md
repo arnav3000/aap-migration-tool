@@ -8,6 +8,25 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **REST API (Additive, no core edits)**
+  - FastAPI + Uvicorn, Bearer auth (`AAP_API_TOKEN`), isolated `api_state.db` (`ApiBase` `api_connections`/`api_jobs`/`api_plans`/`api_settings`), `create_app(db_url)`, `/api` prefix, `/docs` + `/api/openapi.json`, CORS `AAP_CORS_ORIGINS`, lifespan `recover_stale_jobs` + env seed, container `aap-bridge-api:8000` (`profiles: [api]`)
+  - **Task 1 Foundation:** `api` extras, `JobService`/`JobStatus`, health/resources/jobs, WS `/ws/jobs/{id}/logs`, CLI `aap-bridge serve`
+  - **Task 2 Connections:** CRUD + `POST /test` + token-hint, encrypted via `AAP_TOKEN_ENCRYPTION_KEY` (SHA256), 422/404/204 handling
+  - **Task 3 Migration:** `POST /migrate/preview` (org/name_prefix + exporter `get_count`→`export` fallback), `GET /preview/{id}`, `POST /migrate/run` (via `MigrationCoordinator` + `map_managed_credential_types` + `bootstrap_mappings`), `POST /migrate/clear-state`, `GET /exclusions`
+  - **Task 4 Operations/Planner/Analysis (clean):** `operations/export|/cleanup`, `planner/resource-types|/plans CRUD|/populate|/execute`, `analysis/run|/{id}|/export/{json|html}` (wraps `CrossOrgDependencyAnalyzer` + `generate_html_report`), `PlatformAdapter`/`OperationService`/`AnalysisService`
+  - **Task 5 IAM/Validate/Sizing/Settings (clean):** `iam/audit|/migrate|/{id}|/export/{json|html}|/benchmark|/report` (wraps `IAMAnalyser` via `to_thread` fallback), `validate/run|/{id}|/export`, `sizing/calculate|/dynamic` (export counts → batch/duration), `settings/concurrency` GET/PUT (persisted `api_settings`)
+  - Total 45 paths, background jobs everywhere, 401 when `AAP_API_TOKEN` set
+
+### Changed
+
+- `Containerfile`/`container/Containerfile` `EXPOSE 8000`, `docker-compose.yml` `aap-bridge-api`, `.env.example` `AAP_API_TOKEN`/`AAP_TOKEN_ENCRYPTION_KEY`/`API_STATE_DB_PATH`/`AAP_CORS_ORIGINS`, `pyproject.toml` `[api]` optional deps, `README` REST API section, `container/README` api profile
+
+### Fixed
+
+- `migration/*` not modified (thin adapters via `engine_adapter`), `.gitignore` `api_state.db*`
+
 ## [0.4.0] - 2026-04-14
 
 ### Added
