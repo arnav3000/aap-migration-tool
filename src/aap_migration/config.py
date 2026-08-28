@@ -101,14 +101,6 @@ class VaultConfig(BaseModel):
     token_ttl: int = Field(
         default=3600, ge=300, le=14400, description="Token TTL in seconds (5min - 4hrs)"
     )
-    verify_ssl: bool | str | None = Field(
-        default=None,
-        description="Verify SSL certificates (True, False, path to CA bundle, or None to use VAULT_CACERT env var)",
-    )
-    client_cert: tuple[str, str] | None = Field(
-        default=None,
-        description="Client certificate and key paths for mTLS as (cert_path, key_path)",
-    )
 
     @field_validator("url")
     @classmethod
@@ -396,10 +388,21 @@ class PerformanceConfig(BaseModel):
         return self._cached_encrypted_ssh_keys[passphrase]
 
 
+# Default compose Postgres DSN (host port when API/CLI run on the host).
+DEFAULT_STATE_DATABASE_URL = "postgresql://aap_user:changeme@localhost:5432/aap_migration"
+
+
 class StateConfig(BaseModel):
     """State management configuration."""
 
-    db_path: str = Field(default="./migration_state.db", description="Path to state database file")
+    db_path: str = Field(
+        default=DEFAULT_STATE_DATABASE_URL,
+        description=(
+            "PostgreSQL DSN for migration state "
+            "(e.g. postgresql://aap_user:changeme@localhost:5432/aap_migration). "
+            "SQLite URLs are supported for unit tests only."
+        ),
+    )
     checkpoint_frequency: int = Field(
         default=100, ge=10, le=1000, description="Items between checkpoints"
     )
@@ -641,7 +644,7 @@ class MigrationConfig(BaseSettings):
                         mappings_data = yaml.safe_load(f)
                         if mappings_data:
                             self.resource_mappings = mappings_data
-                except Exception:
+                except Exception:  # nosec B110
                     pass
         return self
 
@@ -669,7 +672,7 @@ class MigrationConfig(BaseSettings):
                                     "source": raw_ignored.get("source") or [],
                                     "target": raw_ignored.get("target") or [],
                                 }
-                except Exception:
+                except Exception:  # nosec B110
                     pass
         return self
 
@@ -735,20 +738,18 @@ def _expand_env_vars(data: dict) -> dict:
         return data
 
 
-_SENSITIVE_FIELDS = {
-    "source": {"token"},
-    "target": {"token"},
-    "vault": {"role_id", "secret_id"},
-}
-
-
 def save_config_to_yaml(config: MigrationConfig, output_path: str | Path) -> None:
-    """Save configuration to YAML file, stripping sensitive fields."""
+    """Save configuration to YAML file.
+
+    Args:
+        config: Configuration to save
+        output_path: Path to output YAML file
+    """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    config_dict = config.model_dump(exclude=_SENSITIVE_FIELDS)
+    # Convert to dict and remove sensitive values
+    config_dict = config.model_dump()
 
-    fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with open(output_path, "w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)

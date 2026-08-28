@@ -10,7 +10,10 @@ import logging
 from pathlib import Path
 
 import click
+from rich.console import Console
 from rich.logging import RichHandler
+
+console = Console()
 
 from aap_migration.cli.context import MigrationContext
 from aap_migration.cli.decorators import (

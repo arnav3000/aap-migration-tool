@@ -4,7 +4,7 @@ This client provides methods to create resources in AAP 2.5+ with
 Platform Gateway support (required for AAP 2.6+) and bulk operations.
 """
 
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.client.base_client import BaseAPIClient
 from aap_migration.client.exceptions import ConflictError
@@ -34,6 +34,7 @@ class AAPTargetClient(BaseAPIClient):
         max_payload_size: int = 10000,
         max_connections: int | None = None,
         max_keepalive_connections: int | None = None,
+        auth_scheme: str = "Bearer",
     ):
         """Initialize AAP target client.
 
@@ -44,6 +45,7 @@ class AAPTargetClient(BaseAPIClient):
             max_payload_size: Maximum payload size to log before truncation
             max_connections: Maximum number of connections in pool
             max_keepalive_connections: Maximum keep-alive connections
+            auth_scheme: Authorization header scheme (Bearer or Token)
         """
         # Ensure URL includes Platform Gateway path
         base_url = config.url
@@ -65,6 +67,7 @@ class AAPTargetClient(BaseAPIClient):
             max_payload_size=max_payload_size,
             max_connections=max_connections,
             max_keepalive_connections=max_keepalive_connections,
+            auth_scheme=auth_scheme,
         )
         logger.info("aap_target_client_initialized", url=base_url)
         self._version_cache: str | None = None
@@ -89,20 +92,20 @@ class AAPTargetClient(BaseAPIClient):
             if not version:
                 logger.warning(
                     "version_not_found_in_config",
-                    message="Version field not found in /config/ response, using fallback"
+                    message="Version field not found in /config/ response, using fallback",
                 )
                 # Try to extract from ansible_version or default to 2.6.0
                 version = config_data.get("ansible_version", "2.6.0")
 
             self._version_cache = version
             logger.info("aap_version_detected", version=version, url=self.base_url)
-            return version
+            return str(version)
 
         except Exception as e:
             logger.error(
                 "version_detection_failed",
                 error=str(e),
-                message="Failed to detect AAP version, defaulting to 2.6.0"
+                message="Failed to detect AAP version, defaulting to 2.6.0",
             )
             # Default to 2.6.0 if detection fails
             self._version_cache = "2.6.0"
@@ -170,7 +173,8 @@ class AAPTargetClient(BaseAPIClient):
         Returns:
             Updated resource data
         """
-        endpoint = f"{resource_type}/{resource_id}/"
+        base = get_endpoint(resource_type).rstrip("/")
+        endpoint = f"{base}/{resource_id}/"
         result = await self.patch(endpoint, json_data=data)
         logger.info(
             "resource_updated",
@@ -194,7 +198,8 @@ class AAPTargetClient(BaseAPIClient):
         Returns:
             Empty dict or deletion confirmation
         """
-        endpoint = f"{resource_type}/{resource_id}/"
+        base = get_endpoint(resource_type).rstrip("/")
+        endpoint = f"{base}/{resource_id}/"
         result = await self.delete(endpoint)
         logger.info(
             "resource_deleted",
@@ -531,7 +536,7 @@ class AAPTargetClient(BaseAPIClient):
         """
         endpoint = f"{resource_type}/"
         response = await self.get(endpoint, params={"page_size": 1})
-        return response.get("count", 0)
+        return int(response.get("count", 0))
 
     @retry_api_call
     async def list_resources(
@@ -541,10 +546,6 @@ class AAPTargetClient(BaseAPIClient):
         page_size: int = 100,
     ) -> list[dict[str, Any]]:
         """List resources with optional filters and automatic pagination.
-
-        Uses manual page increment instead of parsing the ``next`` URL to
-        avoid the infinite-loop bug where query parameters were stripped
-        during pagination.
 
         Args:
             resource_type: Resource type (e.g., 'users', 'organizations')
@@ -563,47 +564,45 @@ class AAPTargetClient(BaseAPIClient):
         """
         # Use get_endpoint to map resource_type to correct API endpoint
         # (e.g., "inventory_groups" -> "groups/")
-        endpoint = get_endpoint(resource_type)
+        endpoint: str | None = get_endpoint(resource_type)
         params: dict[str, Any] = {"page_size": page_size}
 
         if filters:
             params.update(filters)
 
         all_results: list[dict[str, Any]] = []
-        page = 1
-        MAX_PAGES = 500  # Safety limit to prevent infinite loops
+        max_pages = 500
 
-        # Use manual page increment instead of parsing the next URL.
-        # The previous implementation extracted only the path from the next URL
-        # and set params = {}, discarding all query parameters (page number,
-        # page_size, filters).  This caused an infinite loop: every subsequent
-        # request fetched page 1 of ALL resources without any filters.
-        while page <= MAX_PAGES:
-            params["page"] = page
+        page = 0
+        while endpoint and page < max_pages:
+            page += 1
             response = await self.get(endpoint, params=params)
             results = response.get("results", [])
             all_results.extend(results)
 
-            # Check if there are more pages
-            if not response.get("next"):
-                break
+            next_url = response.get("next")
+            if next_url:
+                from urllib.parse import parse_qs, urlparse
 
-            page += 1
+                parsed = urlparse(next_url)
+                raw_path = parsed.path.replace("/api/controller/v2/", "").replace("/api/v2/", "")
+                endpoint = raw_path
+                params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            else:
+                endpoint = None
 
-        if page > MAX_PAGES:
-            logger.error(
-                "list_resources_pagination_limit_exceeded",
+        if page >= max_pages:
+            logger.warning(
+                "list_resources_page_limit",
                 resource_type=resource_type,
-                max_pages=MAX_PAGES,
-                results_collected=len(all_results),
-                filters=filters,
+                pages=page,
+                results=len(all_results),
             )
 
         logger.debug(
             "list_resources_completed",
             resource_type=resource_type,
             total_results=len(all_results),
-            total_pages=page,
             filters=filters,
         )
 
@@ -695,7 +694,7 @@ class AAPTargetClient(BaseAPIClient):
                 plugin_type=plugin_type,
                 authenticator_id=result.get("id"),
             )
-            return result
+            return cast(dict[str, Any], result)
 
         except Exception as e:
             logger.error(
@@ -723,7 +722,7 @@ class AAPTargetClient(BaseAPIClient):
             )
             response.raise_for_status()
             data = response.json()
-            return data.get("results", [])
+            return list(data.get("results", []))
 
         except Exception as e:
             logger.error("gateway_authenticators_list_failed", error=str(e))
@@ -805,7 +804,7 @@ class AAPTargetClient(BaseAPIClient):
                 map_type=map_type,
                 authenticator_id=authenticator_id,
             )
-            return result
+            return cast(dict[str, Any], result)
 
         except Exception as e:
             logger.error(

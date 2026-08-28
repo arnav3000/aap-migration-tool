@@ -19,6 +19,7 @@ to the hardcoded RESOURCE_REGISTRY below.
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="organizations",
         endpoint="organizations/",
         description="Organizations",
-        migration_order=20,  # CHANGED: Was 10, now after instance_groups
+        migration_order=40,
         cleanup_order=140,
         has_exporter=True,
         has_importer=True,
@@ -56,7 +57,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="labels",
         endpoint="labels/",
         description="Labels",
-        migration_order=30,  # CHANGED: Was 20, now after organizations
+        migration_order=50,
         cleanup_order=130,  # Delete after users but before organizations
         has_exporter=True,
         has_importer=True,
@@ -71,7 +72,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="users",
         endpoint="users/",
         description="Users",
-        migration_order=40,  # CHANGED: Was 30, now after labels
+        migration_order=60,
         cleanup_order=120,  # Delete AFTER resources that reference users (credentials=90, etc.)
         has_exporter=True,
         has_importer=True,
@@ -81,7 +82,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="teams",
         endpoint="teams/",
         description="Teams",
-        migration_order=50,  # CHANGED: Was 40, now after users
+        migration_order=70,
         cleanup_order=110,  # Delete after most resources but before users
         has_exporter=True,
         has_importer=True,
@@ -92,7 +93,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="credential_types",
         endpoint="credential_types/",
         description="Credential Types",
-        migration_order=60,  # CHANGED: Was 50, now after teams
+        migration_order=80,
         cleanup_order=100,
         has_exporter=True,
         has_importer=True,
@@ -103,7 +104,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="credentials",
         endpoint="credentials/",
         description="Credentials",
-        migration_order=70,  # CHANGED: Was 60, now after credential_types
+        migration_order=90,
         cleanup_order=90,
         has_exporter=True,
         has_importer=True,
@@ -114,7 +115,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="credential_input_sources",
         endpoint="credential_input_sources/",
         description="Credential Input Sources",
-        migration_order=80,  # CHANGED: Was 65, now after credentials
+        migration_order=100,
         cleanup_order=85,
         has_exporter=True,
         has_importer=True,
@@ -126,7 +127,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="execution_environments",
         endpoint="execution_environments/",
         description="Execution Environments",
-        migration_order=90,  # CHANGED: Was 65, now after credential_input_sources
+        migration_order=110,
         cleanup_order=135,  # Delete AFTER projects (before orgs)
         has_exporter=True,
         has_importer=True,
@@ -136,7 +137,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="instance_groups",
         endpoint="instance_groups/",
         description="Instance Groups",
-        migration_order=125,  # After instances (121), before job_templates (150)
+        migration_order=30,
         cleanup_order=87,  # Delete before EEs
         has_exporter=True,
         has_importer=True,
@@ -148,7 +149,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="projects",
         endpoint="projects/",
         description="Projects",
-        migration_order=100,  # CHANGED: Was 120, now after EE (90), before inventories (110)
+        migration_order=130,
         cleanup_order=80,  # Delete before EEs
         has_exporter=True,
         has_importer=True,
@@ -159,7 +160,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="inventories",
         endpoint="inventories/",
         description="Inventories",
-        migration_order=110,  # CHANGED: Was 100, now after projects (100)
+        migration_order=140,
         cleanup_order=60,
         has_exporter=True,
         has_importer=True,
@@ -169,7 +170,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="inventory_sources",
         endpoint="inventory_sources/",
         description="Inventory Sources",
-        migration_order=112,  # After inventories (110), before inventory_groups (115)
+        migration_order=150,
         cleanup_order=70,
         has_exporter=True,
         has_importer=True,
@@ -179,7 +180,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="inventory_groups",
         endpoint="groups/",
         description="Inventory Groups",
-        migration_order=115,  # After inventory_sources (112), before hosts (120)
+        migration_order=190,
         cleanup_order=50,
         has_exporter=True,  # InventoryGroupExporter
         has_importer=True,
@@ -189,7 +190,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="hosts",
         endpoint="hosts/",
         description="Hosts",
-        migration_order=120,  # After inventory_groups (115), before host_inventory_memberships (121)
+        migration_order=170,
         cleanup_order=40,
         has_exporter=True,
         has_importer=True,
@@ -201,7 +202,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="host_inventory_memberships",
         endpoint="",  # No single endpoint - constructed from multiple inventory queries
         description="Host-Inventory Memberships (for hosts in multiple inventories)",
-        migration_order=121,  # After hosts (120), before instances (122)
+        migration_order=180,
         cleanup_order=39,  # Before hosts (40)
         has_exporter=True,  # HostInventoryMembershipExporter
         has_importer=True,  # HostInventoryMembershipImporter
@@ -212,7 +213,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="instances",
         endpoint="instances/",
         description="Instances (AAP Controller Nodes)",
-        migration_order=122,  # After host_inventory_memberships (121), before instance_groups (125)
+        migration_order=20,
         cleanup_order=88,  # After instance_groups (87) - delete dependents first
         has_exporter=True,
         has_importer=True,
@@ -224,7 +225,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="job_templates",
         endpoint="job_templates/",
         description="Job Templates",
-        migration_order=150,  # CHANGED: Was 115, now after inventory_groups
+        migration_order=200,
         cleanup_order=20,
         has_exporter=True,
         has_importer=True,
@@ -234,7 +235,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="workflow_job_templates",
         endpoint="workflow_job_templates/",
         description="Workflow Job Templates",
-        migration_order=160,  # CHANGED: Was 125, now after job_templates
+        migration_order=210,
         cleanup_order=10,
         has_exporter=True,
         has_importer=True,
@@ -245,7 +246,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="system_job_templates",
         endpoint="system_job_templates/",
         description="System Job Templates",
-        migration_order=165,  # Before schedules (170)
+        migration_order=215,
         cleanup_order=15,  # Not deleted, but order needed
         has_exporter=True,
         has_importer=True,  # Mapping only
@@ -256,7 +257,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="schedules",
         endpoint="schedules/",
         description="Schedules",
-        migration_order=170,  # CHANGED: Was 135, now after workflow_job_templates
+        migration_order=220,
         cleanup_order=30,
         has_exporter=True,
         has_importer=True,
@@ -266,7 +267,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="notification_templates",
         endpoint="notification_templates/",
         description="Notification Templates",
-        migration_order=140,  # Before job_templates (150)
+        migration_order=120,
         cleanup_order=25,  # Delete before schedules
         has_exporter=True,
         has_importer=True,
@@ -277,7 +278,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="applications",
         endpoint="applications/",
         description="OAuth Applications",
-        migration_order=175,  # After schedules (170)
+        migration_order=160,
         cleanup_order=8,  # Delete before most resources
         has_exporter=True,
         has_importer=True,
@@ -288,7 +289,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="settings",
         endpoint="settings/all/",
         description="Global System Settings",
-        migration_order=180,  # Very late (after everything)
+        migration_order=10,
         cleanup_order=1,  # Never cleanup settings
         has_exporter=True,
         has_importer=True,
@@ -300,7 +301,7 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         name="jobs",
         endpoint="jobs/",
         description="Job Execution Records",
-        migration_order=175,  # After schedules (170), jobs reference templates
+        migration_order=175,
         cleanup_order=5,  # Early cleanup (historical data)
         has_exporter=False,  # Historical data - not for migration
         has_importer=False,  # Export-only - historical data
@@ -426,9 +427,6 @@ ORGANIZATION_SCOPED_RESOURCES = {
     "job_templates",
     "workflow_job_templates",
     "teams",
-    "notification_templates",
-    "execution_environments",
-    "labels",
 }
 
 # Parent-scoped resources: unique within parent resource
@@ -547,7 +545,8 @@ def get_exportable_types(use_discovered: bool = False) -> list[str]:
             # Filter by has_exporter=True
             # This ensures types like "jobs" (has_exporter=False) are excluded
             return [
-                name for name in normalized
+                name
+                for name in normalized
                 if name in RESOURCE_REGISTRY and RESOURCE_REGISTRY[name].has_exporter
             ]
 
@@ -574,7 +573,7 @@ def get_importable_types(use_discovered: bool = False) -> list[str]:
                 with open(target_file) as f:
                     data = json.load(f)
                 return list(data.get("endpoints", {}).keys())
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     # Fall back to hardcoded registry
@@ -603,6 +602,97 @@ def get_fully_supported_types() -> list[str]:
     ]
     # Return in migration order
     return sorted(types, key=lambda x: RESOURCE_REGISTRY[x].migration_order)
+
+
+def cascade_skip_phases_for_hosts(skip_phases: list[str]) -> list[str]:
+    """If hosts are skipped, also skip host-inventory memberships.
+
+    Memberships only attach already-migrated hosts to additional inventories.
+    Migrating them without hosts is wasted work.
+    """
+    expanded = list(skip_phases)
+    if "hosts" in expanded and "host_inventory_memberships" not in expanded:
+        expanded.append("host_inventory_memberships")
+    return expanded
+
+
+def apply_host_membership_resource_cascade(
+    resource_order: list[str],
+    *,
+    exclusions: dict[str, list[Any]] | None = None,
+    preview_resources: dict[str, list[dict[str, Any]]] | None = None,
+) -> list[str]:
+    """Drop host_inventory_memberships when hosts are not being migrated.
+
+    Cascades when:
+    - ``hosts`` is absent from ``resource_order`` (phase filter), or
+    - every previewed host id is present in ``exclusions["hosts"]``.
+    """
+    order = list(resource_order)
+    if "host_inventory_memberships" not in order:
+        return order
+
+    if "hosts" not in order:
+        return [rtype for rtype in order if rtype != "host_inventory_memberships"]
+
+    excluded_hosts = {str(x) for x in (exclusions or {}).get("hosts") or []}
+    if not excluded_hosts or preview_resources is None:
+        return order
+
+    host_items = preview_resources.get("hosts") or []
+    all_host_ids = {
+        str(item.get("source_id")) for item in host_items if item.get("source_id") is not None
+    }
+    if all_host_ids and all_host_ids <= excluded_hosts:
+        return [rtype for rtype in order if rtype != "host_inventory_memberships"]
+    return order
+
+
+def is_host_inventory_membership_excluded(
+    resource: dict[str, Any],
+    excluded_ids: dict[str, list[Any]] | None,
+) -> bool:
+    """Return True when a membership's host was excluded from migration."""
+    if not excluded_ids:
+        return False
+    excluded_hosts = {str(x) for x in excluded_ids.get("hosts") or []}
+    if not excluded_hosts:
+        return False
+    host_id = resource.get("host_id")
+    return host_id is not None and str(host_id) in excluded_hosts
+
+
+def is_resource_type_fully_excluded(
+    resource_type: str,
+    exclusions: dict[str, list[Any]] | None,
+    preview_resources: dict[str, list[dict[str, Any]]] | None,
+) -> bool:
+    """Return True when every previewed id for ``resource_type`` is excluded."""
+    if not exclusions or not preview_resources:
+        return False
+    excluded = {str(x) for x in exclusions.get(resource_type) or []}
+    if not excluded:
+        return False
+    items = preview_resources.get(resource_type) or []
+    all_ids = {str(item.get("source_id")) for item in items if item.get("source_id") is not None}
+    return bool(all_ids) and all_ids <= excluded
+
+
+def excluded_preview_count(
+    resource_type: str,
+    exclusions: dict[str, list[Any]] | None,
+    preview_resources: dict[str, list[dict[str, Any]]] | None,
+) -> int:
+    """Count of previewed resources excluded for ``resource_type``."""
+    if not exclusions:
+        return 0
+    excluded = {str(x) for x in exclusions.get(resource_type) or []}
+    if not excluded:
+        return 0
+    items = (preview_resources or {}).get(resource_type) or []
+    if not items:
+        return len(excluded)
+    return sum(1 for item in items if str(item.get("source_id")) in excluded)
 
 
 def get_endpoint(resource_type: str) -> str:

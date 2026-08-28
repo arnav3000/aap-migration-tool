@@ -13,8 +13,9 @@ explicitly in `MigrationPlan.cycles` for the caller to handle.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
 
 @dataclass
@@ -148,9 +149,7 @@ def compute_migration_plan(graph: dict[str, list[str]]) -> MigrationPlan:
         return MigrationPlan()
 
     # Map each org to the index of its SCC in `sccs`.
-    node_to_scc: dict[str, int] = {
-        node: i for i, scc in enumerate(sccs) for node in scc
-    }
+    node_to_scc: dict[str, int] = {node: i for i, scc in enumerate(sccs) for node in scc}
 
     # Build the condensation DAG. scc_deps[i] = SCC indices that SCC i
     # depends on; reverse_deps[i] = SCC indices that depend on SCC i.
@@ -216,19 +215,19 @@ def compute_migration_plan(graph: dict[str, list[str]]) -> MigrationPlan:
         if level == 1:
             description = "Independent organizations (no dependencies)"
         else:
-            description = (
-                f"Organizations dependent on Phase {level - 1} migrations"
-            )
+            description = f"Organizations dependent on Phase {level - 1} migrations"
         if phase_cycles:
             description += " [contains cyclic dependencies]"
 
-        phases.append({
-            "phase": level,
-            "orgs": sorted(orgs),
-            "description": description,
-            "has_cycle": bool(phase_cycles),
-            "cycles": phase_cycles,
-        })
+        phases.append(
+            {
+                "phase": level,
+                "orgs": sorted(orgs),
+                "description": description,
+                "has_cycle": bool(phase_cycles),
+                "cycles": phase_cycles,
+            }
+        )
 
     return MigrationPlan(order=order, phases=phases, cycles=cycles, sccs=sccs)
 
@@ -285,3 +284,24 @@ def find_cycles(graph: dict[str, list[str]]) -> list[list[str]]:
         List of cycles, each a list of org names (alphabetically sorted).
     """
     return compute_migration_plan(graph).cycles
+
+
+def group_into_phases_with_cycles(
+    graph: dict[str, list[str]],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Return migration order and phases, tolerating cyclic dependencies.
+
+    Backward-compatible wrapper around `compute_migration_plan`.
+
+    Args:
+        graph: Mapping of org_name -> list of dependency org_names.
+
+    Returns:
+        Tuple of (migration order, phase list).
+    """
+    plan = compute_migration_plan(graph)
+    return plan.order, plan.phases
+
+
+# Alias retained for callers predating the find_cycles rename.
+detect_cycles = find_cycles

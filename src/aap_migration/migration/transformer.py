@@ -46,7 +46,7 @@ def generate_temp_ssh_key() -> str:
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    return pem.decode("utf-8")
+    return str(pem.decode("utf-8"))
 
 
 def generate_temp_encrypted_ssh_key(passphrase: str) -> str:
@@ -71,7 +71,7 @@ def generate_temp_encrypted_ssh_key(passphrase: str) -> str:
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.BestAvailableEncryption(passphrase.encode("utf-8")),
     )
-    return pem.decode("utf-8")
+    return str(pem.decode("utf-8"))
 
 
 # =============================================================================
@@ -103,6 +103,14 @@ class SkipResourceError(Exception):
         self.resource_type = resource_type
         self.source_id = source_id
         self.missing_dependency = missing_dependency
+
+
+def coerce_source_id(data: dict[str, Any]) -> int:
+    """Best-effort integer source id from export/transform payloads."""
+    raw = data.get("_source_id") or data.get("id")
+    if raw is None:
+        return -1
+    return int(raw)
 
 
 class DataTransformer:
@@ -228,6 +236,16 @@ class DataTransformer:
             "skipped_count": 0,
         }
 
+    async def populate_target_id_from_target(
+        self,
+        data: dict[str, Any],
+        target_client: Any,
+        state: MigrationState,
+        source_id: int,
+    ) -> dict[str, Any]:
+        """Optional hook for transformers that resolve target IDs before import."""
+        return data
+
     def transform_resource(
         self,
         resource_type: str,
@@ -269,6 +287,10 @@ class DataTransformer:
         # Raises SkipResourceError if a required dependency is missing
         self._validate_dependencies(transformed, resource_type)
 
+        # Preserve related object names for import-time FK recovery (ID map miss /
+        # name_prefix). Must run before summary_fields is stripped as read-only.
+        self._stash_dependency_names(transformed)
+
         # Step 2: Apply transformations in order
         # NOTE: specific transformations run BEFORE read-only and deprecated field removal
         # so they can inspect all fields for migration logic (e.g., extracting IDs from summary_fields)
@@ -301,6 +323,60 @@ class DataTransformer:
     # Dependency Validation Methods (NEW)
     # ==========================================================================
 
+    def _extract_dependency_ids_from_summary(self, data: dict[str, Any]) -> None:
+        """Copy FK IDs from summary_fields onto top-level fields before dep checks.
+
+        Many AAP list/detail payloads omit top-level FK IDs while still exposing
+        them under summary_fields. Validation must see those IDs or required
+        deps are silently skipped.
+        """
+        summary = data.get("summary_fields")
+        if not isinstance(summary, dict):
+            return
+        for field in self.DEPENDENCIES:
+            if data.get(field):
+                continue
+            info = summary.get(field)
+            if isinstance(info, dict) and info.get("id") is not None:
+                data[field] = info["id"]
+
+    def _stash_dependency_names(self, data: dict[str, Any]) -> None:
+        """Keep related object names after summary_fields is stripped.
+
+        Import resolves FKs by source ID first. When that mapping is missing
+        (common after clear-state / partial runs, and with name_prefix), import
+        can recover by looking up the related resource by name — including the
+        prefixed name when the source uses name_prefix.
+        """
+        summary = data.get("summary_fields")
+        if not isinstance(summary, dict):
+            return
+
+        names: dict[str, str] = {}
+        for field in self.DEPENDENCIES:
+            info = summary.get(field)
+            if isinstance(info, dict):
+                name = info.get("name") or info.get("username")
+                if name:
+                    names[field] = str(name)
+
+        # Job templates / similar: M2M credentials live under summary_fields.credentials
+        creds = summary.get("credentials")
+        if isinstance(creds, list):
+            cred_names: dict[str, str] = {}
+            for cred in creds:
+                if isinstance(cred, dict) and cred.get("id") is not None and cred.get("name"):
+                    cred_names[str(cred["id"])] = str(cred["name"])
+            if cred_names:
+                data.setdefault("_credential_names", {}).update(cred_names)
+
+        if names:
+            existing = data.get("_dependency_names")
+            if isinstance(existing, dict):
+                existing.update(names)
+            else:
+                data["_dependency_names"] = names
+
     def _validate_dependencies(
         self,
         data: dict[str, Any],
@@ -327,19 +403,33 @@ class DataTransformer:
             # No dependencies defined for this resource type
             return
 
-        source_id = data.get("_source_id") or data.get("id")
+        self._extract_dependency_ids_from_summary(data)
+
+        source_id = coerce_source_id(data)
 
         for field, dep_resource_type in self.DEPENDENCIES.items():
             dep_source_id = data.get(field)
+            is_required = field in self.REQUIRED_DEPENDENCIES
 
-            # Skip if field is not set or is None/0
+            # Required FK absent entirely → skip (cannot import correctly)
             if not dep_source_id:
+                if is_required:
+                    source_name = data.get("name") or data.get("username") or source_id
+                    self.stats["skipped_count"] += 1
+                    raise SkipResourceError(
+                        f"Skipping '{source_name}': required field '{field}' "
+                        f"({dep_resource_type}) is missing from the source record",
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        missing_dependency=f"{dep_resource_type}:missing",
+                    )
                 continue
 
             # Check if the dependency exists in id_mappings
             if not self.state.has_source_mapping(dep_resource_type, dep_source_id):
-                if field in self.REQUIRED_DEPENDENCIES:
+                if is_required:
                     # Required dependency is missing - skip this resource
+                    source_name = data.get("name") or data.get("username") or source_id
                     logger.warning(
                         "required_dependency_missing",
                         resource_type=resource_type,
@@ -352,8 +442,9 @@ class DataTransformer:
                     )
                     self.stats["skipped_count"] += 1
                     raise SkipResourceError(
-                        f"{resource_type} {source_id} references non-exported "
-                        f"{dep_resource_type} {dep_source_id}",
+                        f"Skipping '{source_name}': required {dep_resource_type} "
+                        f"(source id {dep_source_id}) was not migrated — include that "
+                        f"dependency in the plan or migrate it first",
                         resource_type=resource_type,
                         source_id=source_id,
                         missing_dependency=f"{dep_resource_type}:{dep_source_id}",
@@ -1016,12 +1107,67 @@ class CredentialTransformer(DataTransformer):
         "user": "users",
         "team": "teams",
     }
-    # Organization and credential_type are required; user/team ownership is optional
-    REQUIRED_DEPENDENCIES = {"organization", "credential_type"}
+    # credential_type is always required. organization/user/team are optional ownership —
+    # AAP allows user/team-owned credentials with organization=null; import falls back to admin.
+    REQUIRED_DEPENDENCIES = {"credential_type"}
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.external_credential_type_ids: set[int] | None = None
+
+    def _extract_credential_fks(self, data: dict[str, Any]) -> None:
+        """Ensure organization/credential_type IDs exist before dependency checks."""
+        summary = data.get("summary_fields") or {}
+        if not data.get("organization"):
+            org_info = summary.get("organization")
+            if isinstance(org_info, dict) and org_info.get("id") is not None:
+                data["organization"] = org_info["id"]
+        if not data.get("credential_type"):
+            cred_type_info = summary.get("credential_type")
+            if isinstance(cred_type_info, dict) and cred_type_info.get("id") is not None:
+                data["credential_type"] = cred_type_info["id"]
+            elif "related" in data and data["related"].get("credential_type"):
+                import re
+
+                match = re.search(
+                    r"/credential_types/(\d+)/", str(data["related"]["credential_type"])
+                )
+                if match:
+                    data["credential_type"] = int(match.group(1))
+
+    def _validate_dependencies(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> None:
+        self._extract_credential_fks(data)
+        # Built-in credential types are managed by AAP and are often never
+        # written to id_mappings (they aren't "migrated"). Allow them through
+        # so import can resolve via name mapping or the builtin ID fallback.
+        from aap_migration.migration.credential_type_utils import is_builtin_credential_type_id
+
+        cred_type_id = data.get("credential_type")
+        original_deps = self.DEPENDENCIES
+        original_required = self.REQUIRED_DEPENDENCIES
+        if (
+            cred_type_id is not None
+            and is_builtin_credential_type_id(cred_type_id)
+            and self.state
+            and not self.state.has_source_mapping("credential_types", int(cred_type_id))
+        ):
+            self.DEPENDENCIES = {k: v for k, v in original_deps.items() if k != "credential_type"}
+            self.REQUIRED_DEPENDENCIES = original_required - {"credential_type"}
+            logger.debug(
+                "builtin_credential_type_dependency_allowed",
+                credential_name=data.get("name"),
+                credential_type_id=cred_type_id,
+                message="Built-in credential type has no source mapping; allowing transform",
+            )
+        try:
+            super()._validate_dependencies(data, resource_type)
+        finally:
+            self.DEPENDENCIES = original_deps
+            self.REQUIRED_DEPENDENCIES = original_required
 
     def _load_external_credential_types(self) -> None:
         """Load IDs of external credential types from export files.
@@ -1057,9 +1203,7 @@ class CredentialTransformer(DataTransformer):
                     error=str(e),
                 )
 
-    def _apply_credential_type_field_mappings(
-        self, data: dict[str, Any], source_id: int
-    ) -> None:
+    def _apply_credential_type_field_mappings(self, data: dict[str, Any], source_id: int) -> None:
         """Apply credential type-specific field mappings for AAP version compatibility.
 
         Handles schema differences between AAP versions for specific credential types.
@@ -1085,7 +1229,7 @@ class CredentialTransformer(DataTransformer):
             mapping_info = self.state.get_id_mapping("credential_types", cred_type_id)
             if mapping_info:
                 cred_type_name = mapping_info.get("source_name")
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
         # If we couldn't get the name from state, try summary_fields
@@ -1104,14 +1248,14 @@ class CredentialTransformer(DataTransformer):
 
             # AAP 2.6 doesn't accept these fields - remove them
             fields_to_remove = [
-                "api_version",      # API version selection removed in 2.6
-                "namespace",        # Namespace handling changed
-                "role_id",          # AppRole auth changed
-                "secret_id",        # AppRole auth changed
-                "default_auth_path", # Auth path handling changed
+                "api_version",  # API version selection removed in 2.6
+                "namespace",  # Namespace handling changed
+                "role_id",  # AppRole auth changed
+                "secret_id",  # AppRole auth changed
+                "default_auth_path",  # Auth path handling changed
                 "kubernetes_role",  # Kubernetes auth changed
-                "username",         # User auth changed
-                "password",         # User auth changed
+                "username",  # User auth changed
+                "password",  # User auth changed
             ]
 
             for field in fields_to_remove:
@@ -1127,9 +1271,25 @@ class CredentialTransformer(DataTransformer):
                     source_name=data.get("name"),
                     removed_fields=removed_fields,
                     message="Removed incompatible HashiCorp Vault fields for AAP 2.6 - "
-                            "credential will be created with basic auth (url, token, cacert). "
-                            "Advanced auth methods (AppRole, Kubernetes, namespace) must be reconfigured manually.",
+                    "credential will be created with basic auth (url, token, cacert). "
+                    "Advanced auth methods (AppRole, Kubernetes, namespace) must be reconfigured manually.",
                 )
+
+        # vault_id is only valid on Ansible Vault (and similar vault) types.
+        # Leaving it on SCM/Machine/etc. credentials causes target 400s like:
+        #   'vault_id' is not one of ['ssh_private_key', 'url']
+        cred_type_lower = str(cred_type_name).lower()
+        is_vault_type = "vault" in cred_type_lower
+        if not is_vault_type and "vault_id" in data["inputs"]:
+            del data["inputs"]["vault_id"]
+            logger.info(
+                "credential_vault_id_removed",
+                resource_type="credentials",
+                source_id=source_id,
+                source_name=data.get("name"),
+                credential_type=cred_type_name,
+                message="Removed vault_id from non-vault credential type inputs",
+            )
 
     def _apply_specific_transformations(
         self, data: dict[str, Any], resource_type: str
@@ -1147,7 +1307,7 @@ class CredentialTransformer(DataTransformer):
         if self.external_credential_type_ids is None:
             self._load_external_credential_types()
 
-        source_id = data.get("_source_id") or data.get("id")
+        source_id = coerce_source_id(data)
 
         # Check if credential depends on an external credential type that is NOT mapped
         cred_type_id = data.get("credential_type")
@@ -1158,6 +1318,7 @@ class CredentialTransformer(DataTransformer):
         ):
             # Check if mapped
             if self.state and not self.state.get_mapped_id("credential_types", cred_type_id):
+                cred_name = data.get("name") or source_id
                 logger.info(
                     "skipping_credential_external_type_unmapped",
                     resource_type="credentials",
@@ -1168,7 +1329,8 @@ class CredentialTransformer(DataTransformer):
                 )
                 self.stats["skipped_count"] += 1
                 raise SkipResourceError(
-                    f"Credential {source_id} depends on unmapped external credential type {cred_type_id}",
+                    f"Skipping '{cred_name}': external credential type "
+                    f"(source id {cred_type_id}) is not mapped on the target",
                     resource_type=resource_type,
                     source_id=source_id,
                     missing_dependency=f"credential_types:{cred_type_id}",
@@ -1246,6 +1408,28 @@ class CredentialTransformer(DataTransformer):
             encrypted_fields = []
 
             ssh_key_fields = {"ssh_key_data", "private_key", "ssh_private_key"}
+            # Boolean inputs must never receive string secrets — AAP rejects that with
+            # "secret not allowed for boolean type (verify_ssl)".
+            boolean_input_fields = {
+                "verify_ssl",
+                "verify_certificate",
+                "verify_certificates",
+                "update_on_launch",
+                "overwrite",
+                "overwrite_vars",
+            }
+
+            # Coerce string/bool-ish values for known boolean fields up front
+            for bool_key in list(data["inputs"].keys()):
+                if bool_key not in boolean_input_fields:
+                    continue
+                raw = data["inputs"][bool_key]
+                if raw == "$encrypted$":
+                    # Secrets cannot represent booleans — default to True (verify on)
+                    data["inputs"][bool_key] = True
+                    encrypted_fields.append(bool_key)
+                elif isinstance(raw, str):
+                    data["inputs"][bool_key] = raw.strip().lower() in {"1", "true", "yes", "on"}
 
             # First pass: Check if we need an encrypted key (ssh_key_unlock is present/encrypted)
             ssh_key_unlock_value = None
@@ -1262,63 +1446,56 @@ class CredentialTransformer(DataTransformer):
                 temp_values["ssh_key_unlock"] = ssh_key_unlock_value
                 encrypted_fields.append("ssh_key_unlock")
 
-            for key, value in data["inputs"].items():
-                if value == "$encrypted$":
-                    # Skip if already handled (e.g. ssh_key_unlock)
-                    if key == "ssh_key_unlock":
-                        continue
+            for key, value in list(data["inputs"].items()):
+                if value != "$encrypted$":
+                    continue
+                # Skip if already handled (e.g. ssh_key_unlock / booleans)
+                if key == "ssh_key_unlock" or key in boolean_input_fields:
+                    continue
 
-                    if key in ssh_key_fields or ("private" in key.lower() and "key" in key.lower()):
-                        # Generate valid PEM format for SSH key fields (cached if config available)
-                        if ssh_key_unlock_value:
-                            # Use encrypted key generator with the passphrase we generated
-                            if self.config and self.config.performance:
-                                temp_value = self.config.performance.get_dummy_encrypted_ssh_key(
-                                    ssh_key_unlock_value
-                                )
-                            else:
-                                temp_value = generate_temp_encrypted_ssh_key(ssh_key_unlock_value)
-                        else:
-                            # Use unencrypted key generator
-                            if self.config and self.config.performance:
-                                temp_value = self.config.performance.get_dummy_ssh_key()
-                            else:
-                                temp_value = generate_temp_ssh_key()
-                    else:
-                        # Generate temp value for other secrets (cached if config available)
+                if key in ssh_key_fields or ("private" in key.lower() and "key" in key.lower()):
+                    # Generate valid PEM format for SSH key fields (cached if config available)
+                    if ssh_key_unlock_value:
+                        # Use encrypted key generator with the passphrase we generated
                         if self.config and self.config.performance:
-                            temp_value = self.config.performance.get_dummy_password()
+                            temp_value = self.config.performance.get_dummy_encrypted_ssh_key(
+                                ssh_key_unlock_value
+                            )
                         else:
-                            temp_value = secrets.token_urlsafe(16)
+                            temp_value = generate_temp_encrypted_ssh_key(ssh_key_unlock_value)
+                    else:
+                        # Use unencrypted key generator
+                        if self.config and self.config.performance:
+                            temp_value = self.config.performance.get_dummy_ssh_key()
+                        else:
+                            temp_value = generate_temp_ssh_key()
+                else:
+                    # Generate temp value for other secrets (cached if config available)
+                    if self.config and self.config.performance:
+                        temp_value = self.config.performance.get_dummy_password()
+                    else:
+                        temp_value = secrets.token_urlsafe(16)
 
-                    data["inputs"][key] = temp_value
-                    temp_values[key] = temp_value
-                    encrypted_fields.append(key)
+                data["inputs"][key] = temp_value
+                temp_values[key] = temp_value
+                encrypted_fields.append(key)
 
-            if temp_values:
-                data["_needs_vault_lookup"] = True
+            if temp_values or encrypted_fields:
+                if temp_values:
+                    data["_needs_vault_lookup"] = True
                 data["_encrypted_fields"] = encrypted_fields
                 logger.info(
                     "credential_temp_values_generated",
                     resource_type="credentials",
                     source_id=source_id,
                     source_name=data.get("name"),
-                    fields=list(temp_values.keys()),
+                    fields=list(temp_values.keys()) or encrypted_fields,
                     message="Temporary values generated for encrypted fields - update after migration",
                 )
 
-        # Set null organization to Default (ID=1) for API compatibility
-        # Testing if organization is required by the API
-        if "organization" in data and data["organization"] is None:
-            data["organization"] = 1  # Default organization
-            logger.info(
-                "defaulted_null_organization",
-                resource_type="credentials",
-                source_id=source_id,
-                source_name=data.get("name"),
-                organization_id=1,
-                message="Set null organization to Default (ID=1)",
-            )
+        # Leave organization=None when unset. Import assigns the target admin user
+        # when no organization/user/team ownership remains after dependency resolve.
+        # Do not invent source org ID 1 here — that org may not be in the migration plan.
 
         return data
 
@@ -1415,8 +1592,16 @@ class JobTemplateTransformer(DataTransformer):
                             source="summary_fields",
                         )
 
-        # Remove _credentials field as it's replaced by credentials with full details
+        # Exporter may only set _credentials as a list of source IDs — promote
+        # those into credentials before the helper field is dropped.
         if "_credentials" in data:
+            if "credentials" not in data:
+                raw_creds = data["_credentials"]
+                if isinstance(raw_creds, list) and raw_creds:
+                    if all(isinstance(c, int) for c in raw_creds):
+                        data["credentials"] = [{"id": c} for c in raw_creds]
+                    elif all(isinstance(c, dict) and "id" in c for c in raw_creds):
+                        data["credentials"] = list(raw_creds)
             del data["_credentials"]
 
         # Ensure boolean fields are proper booleans
@@ -1502,6 +1687,7 @@ class ProjectTransformer(DataTransformer):
     DEPENDENCIES = {
         "organization": "organizations",
         "credential": "credentials",
+        "default_environment": "execution_environments",
         "signature_validation_credential": "credentials",  # CRITICAL FIX (Customer B - content signing)
     }
     # Organization is required; credential (for SCM auth) and signature_validation_credential are optional
@@ -1530,6 +1716,11 @@ class ProjectTransformer(DataTransformer):
         Returns:
             Transformed project data
         """
+        # Extract org / credential / EE IDs from summary_fields before they are
+        # stripped as read-only. ProjectTransformer overrides the base router, so
+        # call the shared extractor explicitly.
+        data = self._transform_projects(data)
+
         source_id = data.get("_source_id") or data.get("id")
 
         # Clear SCM options for manual projects
@@ -1822,8 +2013,40 @@ class TeamTransformer(DataTransformer):
     DEPENDENCIES = {
         "organization": "organizations",
     }
-    # Organization is optional for teams (some teams may be global)
-    REQUIRED_DEPENDENCIES = set()
+    # AAP requires every team to belong to an organization
+    REQUIRED_DEPENDENCIES = {"organization"}
+
+    def _extract_organization_from_summary(self, data: dict[str, Any]) -> None:
+        """Copy organization from summary_fields when the top-level field is missing."""
+        org = data.get("organization")
+        if org:
+            return
+        org_info = data.get("summary_fields", {}).get("organization")
+        if isinstance(org_info, dict) and org_info.get("id") is not None:
+            data["organization"] = org_info["id"]
+            logger.debug(
+                "extracted_organization_from_summary",
+                resource_type="teams",
+                source_id=coerce_source_id(data),
+                source_name=data.get("name"),
+                organization_id=org_info["id"],
+            )
+
+    def _validate_dependencies(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> None:
+        # Extract before required-dependency checks so summary-only org is not lost.
+        self._extract_organization_from_summary(data)
+        super()._validate_dependencies(data, resource_type)
+
+    def _apply_specific_transformations(
+        self, data: dict[str, Any], resource_type: str
+    ) -> dict[str, Any]:
+        """Ensure organization is present before read-only fields are stripped."""
+        self._extract_organization_from_summary(data)
+        return data
 
 
 class CredentialTypeTransformer(DataTransformer):
@@ -1861,7 +2084,7 @@ class CredentialTypeTransformer(DataTransformer):
 
             # Map legacy names to new names (e.g. CyberArk)
             name = data.get("name")
-            new_name = self._get_name_mapping(name)
+            new_name = self._get_name_mapping(str(name or ""))
 
             if name != new_name:
                 logger.info(
@@ -1880,6 +2103,19 @@ class CredentialTypeTransformer(DataTransformer):
                 message="Built-in credential type (managed=True)",
             )
 
+        # Custom credential types with kind=galaxy are rejected by newer AAP
+        # (Must be 'cloud' or 'net', not galaxy). Skip rather than fail import.
+        if data.get("kind") == "galaxy" and not data.get("managed"):
+            source_id = coerce_source_id(data)
+            self.stats["skipped_count"] += 1
+            raise SkipResourceError(
+                f"Skipping credential type '{data.get('name')}': kind 'galaxy' "
+                f"is not supported on the target (must be 'cloud' or 'net')",
+                resource_type=resource_type,
+                source_id=source_id,
+                missing_dependency="credential_types:kind=galaxy",
+            )
+
         # Clean up inputs schema - remove 'metadata' if present (causes validation errors in 2.6)
         # Error: Additional properties are not allowed ('metadata' was unexpected)
         inputs = data.get("inputs")
@@ -1891,6 +2127,25 @@ class CredentialTypeTransformer(DataTransformer):
                 source_name=data.get("name"),
             )
             del inputs["metadata"]
+
+        # AAP 2.5+ rejects 'dependencies' on custom credential type injectors/inputs
+        injectors = data.get("injectors")
+        if isinstance(injectors, dict) and "dependencies" in injectors:
+            logger.info(
+                "removing_dependencies_from_credential_type_injectors",
+                resource_type="credential_types",
+                source_id=data.get("_source_id") or data.get("id"),
+                source_name=data.get("name"),
+            )
+            del injectors["dependencies"]
+        if isinstance(inputs, dict) and "dependencies" in inputs:
+            logger.info(
+                "removing_dependencies_from_credential_type_inputs",
+                resource_type="credential_types",
+                source_id=data.get("_source_id") or data.get("id"),
+                source_name=data.get("name"),
+            )
+            del inputs["dependencies"]
 
         return data
 
@@ -1998,8 +2253,8 @@ class ExecutionEnvironmentTransformer(DataTransformer):
         "organization": "organizations",
         "credential": "credentials",
     }
-    # Organization is required; credential (for private registries) is optional
-    REQUIRED_DEPENDENCIES = {"organization"}
+    # Organization is optional (global/managed EEs have none); credential is optional
+    REQUIRED_DEPENDENCIES = set()
 
 
 class InventoryGroupTransformer(DataTransformer):
@@ -2480,7 +2735,7 @@ class ScheduleTransformer(DataTransformer):
         if not self.state:
             return
 
-        source_id = data.get("_source_id") or data.get("id")
+        source_id = coerce_source_id(data)
         ujt_id = data.get("unified_job_template")
 
         if not ujt_id:
@@ -2529,7 +2784,8 @@ class ScheduleTransformer(DataTransformer):
             # Example: /api/v2/job_templates/14/ → "job_templates"
             # Example: /api/v2/projects/8/ → "projects"
             import re
-            match = re.search(r'/api/v2/([^/]+)/\d+/', ujt_url)
+
+            match = re.search(r"/api/v2/([^/]+)/\d+/", ujt_url)
             if match:
                 # Extract resource type from URL (already plural in URL)
                 url_resource_type = match.group(1)
@@ -2903,14 +3159,36 @@ class CredentialInputSourceTransformer(DataTransformer):
     """Transformer for credential input source resources.
 
     These resources link one credential's input field to another credential.
-    They depend on both the "parent" credential and the "source" credential.
+    They depend on both the target credential and the source credential.
+    AAP API field names are ``target_credential`` and ``source_credential``.
     """
 
     DEPENDENCIES = {
-        "credential": "credentials",  # The credential being modified
-        "source_credential": "credentials",  # The credential providing the input
+        "target_credential": "credentials",
+        "source_credential": "credentials",
     }
-    REQUIRED_DEPENDENCIES = {"credential", "source_credential"}
+    REQUIRED_DEPENDENCIES = {"target_credential", "source_credential"}
+
+    def _normalize_target_credential_field(self, data: dict[str, Any]) -> None:
+        """Normalize legacy ``credential`` alias to ``target_credential``."""
+        if not data.get("target_credential") and data.get("credential"):
+            data["target_credential"] = data.pop("credential")
+        elif "credential" in data and data.get("target_credential"):
+            data.pop("credential", None)
+
+    def _validate_dependencies(
+        self,
+        data: dict[str, Any],
+        resource_type: str,
+    ) -> None:
+        self._normalize_target_credential_field(data)
+        super()._validate_dependencies(data, resource_type)
+
+    def _apply_specific_transformations(
+        self, data: dict[str, Any], resource_type: str
+    ) -> dict[str, Any]:
+        self._normalize_target_credential_field(data)
+        return data
 
 
 class JobsTransformer(DataTransformer):
@@ -3021,17 +3299,19 @@ class ApplicationTransformer(DataTransformer):
         # Handle client secret
         # AAP masks secrets with "************" when exporting, but we need to detect
         # if a secret exists and mark it for regeneration
-        if 'client_secret' in data and data['client_secret']:
+        if "client_secret" in data and data["client_secret"]:
             # Redact the actual secret value (even if already masked)
-            data['client_secret'] = "***REDACTED_WILL_BE_REGENERATED***"
+            data["client_secret"] = "***REDACTED_WILL_BE_REGENERATED***"  # nosec B105
             # Mark for secret regeneration during import
-            data['_requires_new_secret'] = True
+            data["_requires_new_secret"] = True
 
         # Add migration notes
-        data['_migration_notes'] = {
-            'client_secret_action': 'will_be_auto_generated' if data.get('_requires_new_secret') else 'none',
-            'redirect_uris_action': 'review_for_environment',
-            'external_systems_action': 'update_with_new_client_id_secret'
+        data["_migration_notes"] = {
+            "client_secret_action": (
+                "will_be_auto_generated" if data.get("_requires_new_secret") else "none"
+            ),
+            "redirect_uris_action": "review_for_environment",
+            "external_systems_action": "update_with_new_client_id_secret",
         }
 
         return data
@@ -3050,14 +3330,27 @@ class SettingsTransformer(DataTransformer):
 
     # Patterns for identifying sensitive settings
     SENSITIVE_PATTERNS = [
-        'PASSWORD', 'SECRET', 'KEY', 'TOKEN', 'PRIVATE',
-        'CLIENT_SECRET', 'BIND_PASSWORD', 'SOCIAL_AUTH'
+        "PASSWORD",
+        "SECRET",
+        "KEY",
+        "TOKEN",
+        "PRIVATE",
+        "CLIENT_SECRET",
+        "BIND_PASSWORD",
+        "SOCIAL_AUTH",
     ]
 
     # Patterns for environment-specific settings
     ENVIRONMENT_PATTERNS = [
-        'URL', 'URI', 'HOST', 'PATH', 'DOMAIN', 'SERVER',
-        'EMAIL_HOST', 'LDAP', 'SMTP'  # LDAP catches all LDAP settings (schema can differ between AAP versions)
+        "URL",
+        "URI",
+        "HOST",
+        "PATH",
+        "DOMAIN",
+        "SERVER",
+        "EMAIL_HOST",
+        "LDAP",
+        "SMTP",  # LDAP catches all LDAP settings (schema can differ between AAP versions)
     ]
 
     def _apply_specific_transformations(
@@ -3078,47 +3371,47 @@ class SettingsTransformer(DataTransformer):
             Categorized settings data
         """
         # Extract metadata
-        metadata = data.pop('_migration_metadata', {})
+        metadata = data.pop("_migration_metadata", {})
 
         # Categorize settings
         categorized = {
-            'safe_to_copy': {},
-            'review_required': {},
-            'sensitive': {},
-            '_migration_metadata': metadata
+            "safe_to_copy": {},
+            "review_required": {},
+            "sensitive": {},
+            "_migration_metadata": metadata,
         }
 
         for key, value in data.items():
             # Skip internal fields
-            if key.startswith('_'):
+            if key.startswith("_"):
                 continue
 
             # Check if sensitive
             if any(pattern in key for pattern in self.SENSITIVE_PATTERNS):
-                categorized['sensitive'][key] = {
-                    '_original_value_redacted': True,
-                    '_action': 'provide_new_value_manually',
-                    '_placeholder': f'***PROVIDE_{key}***'
+                categorized["sensitive"][key] = {
+                    "_original_value_redacted": True,
+                    "_action": "provide_new_value_manually",
+                    "_placeholder": f"***PROVIDE_{key}***",
                 }
             # Check if environment-specific
             elif any(pattern in key for pattern in self.ENVIRONMENT_PATTERNS):
-                categorized['review_required'][key] = {
-                    'source_value': value,
-                    '_action': 'review_and_adapt_for_target_environment'
+                categorized["review_required"][key] = {
+                    "source_value": value,
+                    "_action": "review_and_adapt_for_target_environment",
                 }
             # Safe to copy
             else:
-                categorized['safe_to_copy'][key] = value
+                categorized["safe_to_copy"][key] = value
 
         # Add summary
-        categorized['_summary'] = {
-            'total_settings': len(data),
-            'safe_to_copy_count': len(categorized['safe_to_copy']),
-            'review_required_count': len(categorized['review_required']),
-            'sensitive_count': len(categorized['sensitive']),
-            'auto_import_percentage': round(
-                len(categorized['safe_to_copy']) / len(data) * 100, 1
-            ) if len(data) > 0 else 0
+        categorized["_summary"] = {
+            "total_settings": len(data),
+            "safe_to_copy_count": len(categorized["safe_to_copy"]),
+            "review_required_count": len(categorized["review_required"]),
+            "sensitive_count": len(categorized["sensitive"]),
+            "auto_import_percentage": (
+                round(len(categorized["safe_to_copy"]) / len(data) * 100, 1) if len(data) > 0 else 0
+            ),
         }
 
         return categorized

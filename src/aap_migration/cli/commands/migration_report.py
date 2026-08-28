@@ -547,11 +547,12 @@ def _analyze_resource_type(
                     }
                     stats["skipped_resources"].append(skip_info)
 
-                    # Route import-phase skips for detailed reporting.
-                    # Transform-phase skips are handled by the file diff above.
+                    # Route by phase for detailed reporting.
                     if record.phase == "import":
                         stats["import_skipped"].append(skip_info)
                         stats["import_skipped_count"] += 1
+                    elif record.phase == "transform":
+                        stats["transform_skipped"].append(skip_info)
 
     except Exception as e:
         logger.warning(f"Failed to query database for {resource_type}: {e}")
@@ -2159,10 +2160,10 @@ def _print_summary(report_data: list[dict]) -> None:
 
     for stats in report_data:
         rtype = stats["resource_type"]
-        discrepancy = stats["discrepancy"]
-        failed = stats["failed_count"]
-        skipped = stats["skipped_count"]
-        in_progress = stats["in_progress_count"]
+        discrepancy = stats.get("discrepancy", 0)
+        failed = stats.get("failed_count", 0)
+        skipped = stats.get("skipped_count", 0)
+        in_progress = stats.get("in_progress_count", 0)
 
         # Color code based on status
         if failed > 0:
@@ -2177,8 +2178,8 @@ def _print_summary(report_data: list[dict]) -> None:
             status = click.style("OK", fg="green")
 
         click.echo(
-            f"{rtype:30s} | Exported: {stats['exported_count']:5d} | "
-            f"Imported: {stats['completed_count']:5d} | "
+            f"{rtype:30s} | Exported: {stats.get('exported_count', 0):5d} | "
+            f"Imported: {stats.get('completed_count', 0):5d} | "
             f"Failed: {failed:4d} | Skipped: {skipped:4d} | In Progress: {in_progress:4d} | Discrepancy: {discrepancy:4d} | {status}"
         )
 

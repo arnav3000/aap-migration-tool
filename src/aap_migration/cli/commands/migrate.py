@@ -7,6 +7,7 @@ This module provides commands for executing migrations from source AAP to target
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -27,6 +28,8 @@ from aap_migration.cli.utils import (
     print_table,
 )
 from aap_migration.migration.coordinator import MigrationCoordinator
+from aap_migration.migration.credential_type_utils import map_managed_credential_types
+from aap_migration.migration.state import MigrationState
 from aap_migration.resources import (
     ALL_RESOURCE_TYPES,
     FULLY_SUPPORTED_TYPES,
@@ -60,7 +63,7 @@ PHASE1_RESOURCE_TYPES = [
 
 # Phase 2: Project SCM Patching + Automation Definitions
 # (Logic phase, no resources to import - handled by import --phase phase2)
-PHASE2_RESOURCE_TYPES = []
+PHASE2_RESOURCE_TYPES: list[str] = []
 
 # Phase 3 resources (now part of Phase 2 logic, but kept for reference/imports)
 PHASE3_RESOURCE_TYPES = [
@@ -72,66 +75,16 @@ PHASE3_RESOURCE_TYPES = [
     "settings",  # Global system settings
 ]
 
-async def _map_managed_credential_types(source_client, target_client, state) -> int:
+
+async def _map_managed_credential_types(
+    source_client: Any, target_client: Any, state: MigrationState
+) -> int:
     """Create ID mappings for managed (built-in) credential types.
 
-    Managed credential types (Machine, Source Control, Vault, etc.) exist on both
-    source and target systems but may have different IDs. This function fetches
-    them from both systems and creates mappings based on name matching.
-
-    Args:
-        source_client: AAP 2.3 source client
-        target_client: AAP 2.6 target client
-        state: Migration state manager
-
-    Returns:
-        Number of credential types successfully mapped
+    Thin wrapper kept for CLI callers / tests; implementation lives in
+    ``migration.credential_type_utils``.
     """
-    try:
-        # Fetch managed types from source (AAP 2.3)
-        source_types_response = await source_client.get(
-            "credential_types/", params={"managed": "true", "page_size": 200}
-        )
-        source_types = source_types_response.get("results", [])
-
-        # Fetch managed types from target (AAP 2.6)
-        target_types_response = await target_client.get(
-            "credential_types/", params={"managed": "true", "page_size": 200}
-        )
-        target_types = target_types_response.get("results", [])
-
-        # Create name -> id mapping for target
-        target_by_name = {t["name"]: t["id"] for t in target_types}
-
-        # Map source IDs to target IDs by name
-        mapped_count = 0
-        for source_type in source_types:
-            source_name = source_type["name"]
-            source_id = source_type["id"]
-            target_id = target_by_name.get(source_name)
-
-            if target_id:
-                state.create_or_update_mapping(
-                    resource_type="credential_types",
-                    source_id=source_id,
-                    target_id=target_id,
-                    source_name=source_name,
-                )
-                mapped_count += 1
-                logger.debug(
-                    f"Mapped managed credential type '{source_name}': {source_id} -> {target_id}"
-                )
-            else:
-                logger.warning(
-                    f"Managed credential type '{source_name}' (ID {source_id}) "
-                    f"not found on target system"
-                )
-
-        return mapped_count
-
-    except Exception as e:
-        logger.error(f"Failed to map managed credential types: {e}")
-        return 0
+    return await map_managed_credential_types(source_client, target_client, state)
 
 
 def _scan_scm_inventory_source_projects(xformed_dir: Path) -> set[int]:
@@ -146,7 +99,7 @@ def _scan_scm_inventory_source_projects(xformed_dir: Path) -> set[int]:
     Returns:
         Set of project source IDs referenced by SCM inventory sources
     """
-    referenced_projects = set()
+    referenced_projects: set[int] = set()
     inv_sources_dir = xformed_dir / "inventory_sources"
 
     if not inv_sources_dir.exists():
@@ -321,7 +274,7 @@ def _run_migration_workflow(
     import_ctx.obj = ctx
 
     # Helper to run import for specific types
-    def run_import(types, phase_label, import_phase=None):
+    def run_import(types: list[str], phase_label: str, import_phase: str | None = None) -> None:
         if not types:
             return
         echo_info(f"Phase 3 ({phase_label}): Importing resources...")
@@ -348,12 +301,15 @@ def _run_migration_workflow(
 
     elif phase == "phase2":
         # Patch Projects + Import Phase 3 resources
-        echo_info("Phase 2 (Patching + Automation Import): Patching Projects and Importing Automation Definitions...")
+        echo_info(
+            "Phase 2 (Patching + Automation Import): Patching Projects and Importing Automation Definitions..."
+        )
 
         # CRITICAL: Reinitialize HTTP clients before phase2
         # If phase1 was run previously, its event loop closed and clients are invalid
-        from aap_migration.client.aap_target_client import AAPTargetClient
         from aap_migration.client.aap_source_client import AAPSourceClient
+        from aap_migration.client.aap_target_client import AAPTargetClient
+
         ctx._target_client = AAPTargetClient(
             config=ctx.config.target,
             rate_limit=ctx.config.performance.rate_limit,
@@ -414,7 +370,7 @@ def _run_migration_workflow(
                 echo_info("Phase 2 (Patching): Patching all migrated projects...")
             else:
                 echo_info(
-                    f"Phase 2 (Patching): Patching {len(scm_project_ids)} "
+                    f"Phase 2 (Patching): Patching {len(scm_project_ids or set())} "
                     f"projects referenced by SCM inventory sources..."
                 )
 
@@ -423,6 +379,7 @@ def _run_migration_workflow(
             # client's connection pool invalid. We need a fresh client for this new
             # asyncio.run() context.
             from aap_migration.client.aap_target_client import AAPTargetClient
+
             ctx._target_client = AAPTargetClient(
                 config=ctx.config.target,
                 rate_limit=ctx.config.performance.rate_limit,
@@ -432,7 +389,7 @@ def _run_migration_workflow(
                 max_keepalive_connections=ctx.config.performance.http_max_keepalive_connections,
             )
 
-            async def run_patch():
+            async def run_patch() -> None:
                 await patch_project_scm_details(
                     ctx,
                     xformed_dir,
@@ -459,6 +416,7 @@ def _run_migration_workflow(
         # The patch phase closed its event loop, making clients invalid
         from aap_migration.client.aap_source_client import AAPSourceClient
         from aap_migration.client.aap_target_client import AAPTargetClient
+
         ctx._target_client = AAPTargetClient(
             config=ctx.config.target,
             rate_limit=ctx.config.performance.rate_limit,
@@ -511,7 +469,7 @@ def _run_migration_workflow(
                 session.query(MigrationProgress)
                 .filter(
                     MigrationProgress.status == "failed",
-                    MigrationProgress.resource_type.in_(resource_types)
+                    MigrationProgress.resource_type.in_(resource_types),
                 )
                 .count()
             )
@@ -522,7 +480,7 @@ def _run_migration_workflow(
                     session.query(MigrationProgress.resource_type)
                     .filter(
                         MigrationProgress.status == "failed",
-                        MigrationProgress.resource_type.in_(resource_types)
+                        MigrationProgress.resource_type.in_(resource_types),
                     )
                     .distinct()
                     .all()
@@ -537,9 +495,17 @@ def _run_migration_workflow(
                 click.echo()
 
                 if len(failed_rtypes) == 1:
-                    click.echo(click.style(f"   aap-bridge migration-report --resource-type {failed_rtypes[0]}", fg="yellow", bold=True))
+                    click.echo(
+                        click.style(
+                            f"   aap-bridge migration-report --resource-type {failed_rtypes[0]}",
+                            fg="yellow",
+                            bold=True,
+                        )
+                    )
                 else:
-                    click.echo(click.style("   aap-bridge migration-report", fg="yellow", bold=True))
+                    click.echo(
+                        click.style("   aap-bridge migration-report", fg="yellow", bold=True)
+                    )
 
                 click.echo()
                 click.echo("=" * 80)
@@ -581,7 +547,14 @@ def _run_migration_workflow(
     help="Import phase: phase1 (up to projects), phase2 (patch projects and automation definitions), all (complete)",
 )
 @click.pass_context
-def migrate(ctx, resource_type, force, resume, skip_prep, phase) -> None:
+def migrate(
+    ctx: click.Context,
+    resource_type: tuple[str, ...],
+    force: bool,
+    resume: bool,
+    skip_prep: bool,
+    phase: str,
+) -> None:
     """Execute migration from AAP 2.3 to 2.6.
 
     Runs the complete four-phase workflow:
@@ -665,7 +638,7 @@ def status(ctx: MigrationContext) -> None:
         state = ctx.migration_state
 
         # Overall progress
-        completed_phases = []
+        completed_phases: list[str] = []
         pending_phases = MIGRATION_PHASES.copy()
 
         rows = []
@@ -754,7 +727,7 @@ def resume(
 
         click.echo()
 
-    async def resume_migration():
+    async def resume_migration() -> None:
         _coordinator = MigrationCoordinator(
             config=ctx.config,
             source_client=ctx.source_client,

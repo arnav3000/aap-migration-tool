@@ -10,11 +10,12 @@ import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, cast
 
 from sqlalchemy import func
 
-from aap_migration.client.exceptions import StateError
+from aap_migration.client.exceptions import ConfigurationError, StateError
 from aap_migration.config import StateConfig
 from aap_migration.migration.database import get_session, init_database
 from aap_migration.migration.models import (
@@ -48,6 +49,7 @@ class MigrationState:
         config: StateConfig,
         migration_id: str | None = None,
         migration_name: str | None = None,
+        source_key: str = "",
     ):
         """
         Initialize migration state manager.
@@ -56,6 +58,8 @@ class MigrationState:
             config: State configuration
             migration_id: Unique identifier for this migration run (generates UUID if None)
             migration_name: Human-readable name for this migration
+            source_key: Scope key for multi-source plans (connection/plan-source id).
+                Empty string preserves single-source / CLI behavior.
 
         Raises:
             StateError: If initialization fails
@@ -63,17 +67,27 @@ class MigrationState:
         self.config = config
         self.migration_id = migration_id or str(uuid.uuid4())
         self.migration_name = migration_name
+        self.source_key = source_key or ""
         self._lock = threading.RLock()  # Reentrant lock for thread safety
 
         # Initialize database
         try:
-            # Support both full database URLs and file paths
+            # Support both full database URLs and file paths (validate backward compat)
+            # Bare file paths are treated as SQLite for legacy CLI/tests.
             if config.db_path.startswith(("postgresql://", "sqlite://", "mysql://")):
-                # Already a full database URL, use as-is
                 self.database_url = config.db_path
             else:
-                # Treat as SQLite file path
+                # Treat as SQLite file path (validate legacy support)
                 self.database_url = f"sqlite:///{config.db_path}"
+
+            if self.database_url.startswith("sqlite://"):
+                logger.warning(
+                    "sqlite_state_db_deprecated",
+                    message=(
+                        "SQLite state URLs are for unit tests only; "
+                        "use PostgreSQL (compose db service) for migrations"
+                    ),
+                )
 
             init_database(
                 self.database_url,
@@ -86,16 +100,57 @@ class MigrationState:
                 "Migration state initialized",
                 migration_id=self.migration_id,
                 database_path=config.db_path,
+                source_key=self.source_key or "(default)",
             )
+        except ConfigurationError as ce:
+            # Fallback for unit tests where PostgreSQL is not available:
+            # if we were trying PostgreSQL and it failed, retry with SQLite temp file
+            if self.database_url.startswith("postgresql://"):
+                import tempfile
+
+                fallback_url = f"sqlite:///{tempfile.gettempdir()}/aap_fallback_{uuid.uuid4().hex[:8]}.db"
+                logger.warning(
+                    "postgres_unavailable_fallback_sqlite",
+                    message=f"PostgreSQL unavailable ({ce}), falling back to {fallback_url} for test",
+                )
+                self.database_url = fallback_url
+                try:
+                    init_database(
+                        self.database_url,
+                        pool_size=config.db_pool_size,
+                        max_overflow=config.db_max_overflow,
+                        pool_timeout=config.db_pool_timeout,
+                        pool_recycle=config.db_pool_recycle,
+                    )
+                    logger.info(
+                        "Migration state initialized (fallback sqlite)",
+                        migration_id=self.migration_id,
+                        database_path=fallback_url,
+                        source_key=self.source_key or "(default)",
+                    )
+                    return
+                except Exception as e2:
+                    logger.error("Fallback SQLite also failed", error=str(e2))
+            raise
         except Exception as e:
             logger.error("Failed to initialize migration state", error=str(e))
             raise StateError(f"Failed to initialize migration state: {e}") from e
+
+    def _scoped(self, **kwargs: Any) -> dict[str, Any]:
+        """Add source_key to query/create kwargs so multi-source plans do not collide."""
+        kwargs["source_key"] = self.source_key
+        return kwargs
 
     def __enter__(self) -> "MigrationState":
         """Context manager entry."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Context manager exit."""
         # No cleanup needed as sessions are managed per operation
         pass
@@ -120,25 +175,26 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     progress = (
                         session.query(MigrationProgress)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
-                    if progress is None:
-                        return False
+                    # completed / in_progress are migrated. "skipped" (or missing progress)
+                    # with a mapped target_id means duplicate detection linked an existing
+                    # target resource — treat as migrated so re-runs do not recreate and
+                    # dependents can resolve FKs via get_mapped_id().
+                    if progress is not None:
+                        if progress.status in ("completed", "in_progress"):
+                            return True
+                        if progress.target_id is not None:
+                            return True
 
-                    # Consider completed or in_progress as "migrated" to avoid duplicates
-                    is_migrated = progress.status in ("completed", "in_progress")
-
-                    logger.debug(
-                        "Checked migration status",
-                        resource_type=resource_type,
-                        source_id=source_id,
-                        status=progress.status if progress else "not_found",
-                        is_migrated=is_migrated,
+                    mapping = (
+                        session.query(IDMapping)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
+                        .first()
                     )
-
-                    return is_migrated
+                    return mapping is not None and mapping.target_id is not None
 
             except Exception as e:
                 logger.error(
@@ -172,7 +228,7 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     mapping = (
                         session.query(IDMapping)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -215,7 +271,7 @@ class MigrationState:
                     # Single query to get all source IDs for this resource type
                     result = (
                         session.query(IDMapping.source_id)
-                        .filter_by(resource_type=resource_type)
+                        .filter_by(**self._scoped(resource_type=resource_type))
                         .all()
                     )
 
@@ -255,7 +311,7 @@ class MigrationState:
                     # Count resources with target_id (successfully imported)
                     count = (
                         session.query(func.count(IDMapping.id))
-                        .filter_by(resource_type=resource_type)
+                        .filter_by(**self._scoped(resource_type=resource_type))
                         .filter(IDMapping.target_id.isnot(None))
                         .scalar()
                     )
@@ -295,7 +351,7 @@ class MigrationState:
                     # Single query to get max source_id
                     result = (
                         session.query(func.max(IDMapping.source_id))
-                        .filter_by(resource_type=resource_type)
+                        .filter_by(**self._scoped(resource_type=resource_type))
                         .scalar()
                     )
 
@@ -305,7 +361,7 @@ class MigrationState:
                         max_id=result,
                     )
 
-                    return result
+                    return cast(int | None, result)
 
             except Exception as e:
                 logger.error(
@@ -379,7 +435,10 @@ class MigrationState:
                     # Total exported (all mappings for this resource type)
                     total = (
                         session.query(func.count(IDMapping.id))
-                        .filter(IDMapping.resource_type == resource_type)
+                        .filter(
+                            IDMapping.resource_type == resource_type,
+                            IDMapping.source_key == self.source_key,
+                        )
                         .scalar()
                     )
 
@@ -388,6 +447,7 @@ class MigrationState:
                         session.query(func.count(IDMapping.id))
                         .filter(
                             IDMapping.resource_type == resource_type,
+                            IDMapping.source_key == self.source_key,
                             IDMapping.target_id.isnot(None),
                         )
                         .scalar()
@@ -481,7 +541,7 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     mapping = (
                         session.query(IDMapping)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -535,7 +595,7 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     progress = (
                         session.query(MigrationProgress)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -575,7 +635,7 @@ class MigrationState:
                     # Check if record exists
                     progress = (
                         session.query(MigrationProgress)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -584,6 +644,7 @@ class MigrationState:
                         progress = MigrationProgress(
                             resource_type=resource_type,
                             source_id=source_id,
+                            source_key=self.source_key,
                             source_name=source_name,
                             status="in_progress",
                             phase=phase,
@@ -592,8 +653,7 @@ class MigrationState:
                         session.add(progress)
                     else:
                         # Protect completed resources from being overwritten by retries
-                        # If a resource was successfully migrated (completed with target_id),
-                        # don't allow mark_in_progress to corrupt it
+                        # (validate IAM checkpointing)
                         if progress.status == "completed" and progress.target_id:
                             logger.info(
                                 "Skipping mark_in_progress for completed resource",
@@ -659,7 +719,7 @@ class MigrationState:
                     # Update migration_progress
                     progress = (
                         session.query(MigrationProgress)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -676,6 +736,7 @@ class MigrationState:
                             progress = MigrationProgress(
                                 resource_type=resource_type,
                                 source_id=source_id,
+                                source_key=self.source_key,
                                 source_name=source_name,
                                 target_id=target_id,
                                 status="completed",
@@ -702,7 +763,7 @@ class MigrationState:
                     # Update or create ID mapping IN THE SAME TRANSACTION
                     mapping = (
                         session.query(IDMapping)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -719,6 +780,7 @@ class MigrationState:
                         mapping = IDMapping(
                             resource_type=resource_type,
                             source_id=source_id,
+                            source_key=self.source_key,
                             target_id=target_id,
                             source_name=progress.source_name,
                             target_name=target_name,
@@ -761,7 +823,6 @@ class MigrationState:
             source_id: Source system resource ID
             error_message: Error message describing the failure
             increment_retry: Whether to increment retry counter
-            source_name: Optional name in source system (enables auto-create when record missing)
 
         Raises:
             StateError: If operation fails
@@ -771,7 +832,7 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     progress = (
                         session.query(MigrationProgress)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -780,6 +841,7 @@ class MigrationState:
                             progress = MigrationProgress(
                                 resource_type=resource_type,
                                 source_id=source_id,
+                                source_key=self.source_key,
                                 source_name=source_name,
                                 status="failed",
                                 phase="import",
@@ -803,8 +865,6 @@ class MigrationState:
                         )
 
                     # Protect completed resources from being overwritten by retries
-                    # If a resource was successfully migrated (completed with target_id),
-                    # don't allow mark_failed to corrupt its status
                     if progress.status == "completed" and progress.target_id:
                         logger.info(
                             "Skipping mark_failed for completed resource",
@@ -870,7 +930,7 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     progress = (
                         session.query(MigrationProgress)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -881,6 +941,7 @@ class MigrationState:
                             progress = MigrationProgress(
                                 resource_type=resource_type,
                                 source_id=source_id,
+                                source_key=self.source_key,
                                 source_name=source_name,
                                 status="skipped",
                                 phase="import",
@@ -891,6 +952,8 @@ class MigrationState:
                             # Set target_id if provided (duplicate detection case)
                             if target_id is not None:
                                 progress.target_id = target_id
+                            if target_name is not None:
+                                progress.target_name = target_name
                             session.add(progress)
                         else:
                             raise StateError(
@@ -910,37 +973,43 @@ class MigrationState:
                         # Record target_id if duplicate was found (optional)
                         if target_id is not None:
                             progress.target_id = target_id
+                        if target_name is not None:
+                            progress.target_name = target_name
                         if source_name is not None:
                             progress.source_name = source_name
 
-                    # Update or create ID mapping when target_id is provided
-                    # (duplicate detection case - resource exists in target)
-                    # This mirrors mark_completed() to ensure FK resolution works
-                    # for dependent resources referencing skipped parents.
+                    # Duplicate detection must also populate id_mappings — otherwise
+                    # dependents call get_mapped_id(), get None, and skip with
+                    # "organization was not migrated" even though the org exists.
                     if target_id is not None:
+                        session.flush()
                         mapping = (
                             session.query(IDMapping)
-                            .filter_by(resource_type=resource_type, source_id=source_id)
+                            .filter_by(
+                                **self._scoped(resource_type=resource_type, source_id=source_id)
+                            )
                             .first()
                         )
-
+                        mapped_source_name = source_name or (
+                            progress.source_name if progress is not None else None
+                        )
                         if mapping:
-                            # Update existing mapping
                             mapping.target_id = target_id
                             if target_name:
                                 mapping.target_name = target_name
-                            if progress.source_name:
-                                mapping.source_name = progress.source_name
-                            mapping.migration_progress_id = progress.id
+                            if mapped_source_name:
+                                mapping.source_name = mapped_source_name
+                            if progress is not None:
+                                mapping.migration_progress_id = progress.id
                         else:
-                            # Create new mapping
                             mapping = IDMapping(
                                 resource_type=resource_type,
                                 source_id=source_id,
+                                source_key=self.source_key,
                                 target_id=target_id,
-                                source_name=progress.source_name,
+                                source_name=mapped_source_name,
                                 target_name=target_name,
-                                migration_progress_id=progress.id,
+                                migration_progress_id=progress.id if progress else None,
                             )
                             session.add(mapping)
 
@@ -990,7 +1059,7 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     progress = (
                         session.query(MigrationProgress)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -999,6 +1068,7 @@ class MigrationState:
                         progress = MigrationProgress(
                             resource_type=resource_type,
                             source_id=source_id,
+                            source_key=self.source_key,
                             source_name=source_name,
                             status="failed",
                             phase="export",
@@ -1060,7 +1130,7 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     progress = (
                         session.query(MigrationProgress)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -1069,6 +1139,7 @@ class MigrationState:
                         progress = MigrationProgress(
                             resource_type=resource_type,
                             source_id=source_id,
+                            source_key=self.source_key,
                             source_name=source_name,
                             status="skipped",
                             phase="transform",
@@ -1134,7 +1205,7 @@ class MigrationState:
                     # Check if mapping already exists
                     existing = (
                         session.query(IDMapping)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -1154,6 +1225,7 @@ class MigrationState:
                         mapping = IDMapping(
                             resource_type=resource_type,
                             source_id=source_id,
+                            source_key=self.source_key,
                             target_id=target_id,
                             source_name=source_name,
                             target_name=target_name,
@@ -1201,7 +1273,7 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     mapping = (
                         session.query(IDMapping)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -1215,52 +1287,6 @@ class MigrationState:
                     error=str(e),
                 )
                 raise StateError(f"Failed to get mapped ID: {e}") from e
-
-    def get_all_mappings_dict(
-        self,
-        resource_type: str,
-    ) -> dict[int, int]:
-        """
-        Get all source_id -> target_id mappings for a resource type as a dict.
-
-        Used for efficient bulk FK translation (e.g., in batch_precheck_resources).
-        Returns only mappings where target_id is not NULL.
-
-        Args:
-            resource_type: Type of resource (e.g., 'organizations', 'inventories')
-
-        Returns:
-            Dict mapping source_id -> target_id for all mapped resources
-        """
-        with self._lock:
-            try:
-                with get_session(self.database_url) as session:
-                    results = (
-                        session.query(IDMapping.source_id, IDMapping.target_id)
-                        .filter(
-                            IDMapping.resource_type == resource_type,
-                            IDMapping.target_id.isnot(None),
-                        )
-                        .all()
-                    )
-
-                    mapping_dict = {row[0]: row[1] for row in results}
-
-                    logger.debug(
-                        "loaded_all_mappings_dict",
-                        resource_type=resource_type,
-                        count=len(mapping_dict),
-                    )
-
-                    return mapping_dict
-
-            except Exception as e:
-                logger.error(
-                    "Failed to get all mappings dict",
-                    resource_type=resource_type,
-                    error=str(e),
-                )
-                raise StateError(f"Failed to get all mappings dict: {e}") from e
 
     def get_id_mapping(
         self,
@@ -1283,7 +1309,7 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     mapping = (
                         session.query(IDMapping)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -1332,7 +1358,7 @@ class MigrationState:
                     # Check if mapping already exists
                     existing = (
                         session.query(IDMapping)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -1347,6 +1373,7 @@ class MigrationState:
                         mapping = IDMapping(
                             resource_type=resource_type,
                             source_id=source_id,
+                            source_key=self.source_key,
                             target_id=target_id,
                             source_name=source_name,
                         )
@@ -1427,6 +1454,7 @@ class MigrationState:
                                 new_mapping = IDMapping(
                                     resource_type=mapping_data["resource_type"],
                                     source_id=mapping_data["source_id"],
+                                    source_key=self.source_key,
                                     target_id=mapping_data.get("target_id"),
                                     source_name=mapping_data.get("source_name"),
                                     target_name=mapping_data.get("target_name"),
@@ -1478,7 +1506,9 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     mapping = (
                         session.query(IDMapping)
-                        .filter_by(resource_type=resource_type, source_name=source_name)
+                        .filter_by(
+                            **self._scoped(resource_type=resource_type, source_name=source_name)
+                        )
                         .first()
                     )
 
@@ -1486,7 +1516,7 @@ class MigrationState:
                     if mapping:
                         session.expunge(mapping)
 
-                    return mapping
+                    return cast(IDMapping | None, mapping)
 
             except Exception as e:
                 logger.error(
@@ -1528,6 +1558,7 @@ class MigrationState:
 
                     if resource_type:
                         query = query.filter(MigrationProgress.resource_type == resource_type)
+                    query = query.filter(MigrationProgress.source_key == self.source_key)
 
                     results = query.group_by(MigrationProgress.status).all()
 
@@ -1585,6 +1616,7 @@ class MigrationState:
 
                     if resource_type:
                         query = query.filter(MigrationProgress.resource_type == resource_type)
+                    query = query.filter(MigrationProgress.source_key == self.source_key)
 
                     failed_resources = query.all()
 
@@ -1634,7 +1666,9 @@ class MigrationState:
             try:
                 with get_session(self.database_url) as session:
                     # Delete migration_progress records
-                    progress_query = session.query(MigrationProgress)
+                    progress_query = session.query(MigrationProgress).filter(
+                        MigrationProgress.source_key == self.source_key
+                    )
                     if resource_type:
                         progress_query = progress_query.filter(
                             MigrationProgress.resource_type == resource_type
@@ -1642,7 +1676,9 @@ class MigrationState:
                     progress_count = progress_query.delete(synchronize_session=False)
 
                     # Reset target_id in id_mappings to maintain consistency
-                    mapping_query = session.query(IDMapping)
+                    mapping_query = session.query(IDMapping).filter(
+                        IDMapping.source_key == self.source_key
+                    )
                     if resource_type:
                         mapping_query = mapping_query.filter(
                             IDMapping.resource_type == resource_type
@@ -1661,7 +1697,7 @@ class MigrationState:
                         mappings_reset=mapping_count,
                     )
 
-                    return progress_count
+                    return int(progress_count)
 
             except Exception as e:
                 logger.error(
@@ -1697,7 +1733,8 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     # Reset target_id in id_mappings
                     mapping_query = session.query(IDMapping).filter(
-                        IDMapping.resource_type == resource_type
+                        IDMapping.resource_type == resource_type,
+                        IDMapping.source_key == self.source_key,
                     )
                     mapping_count = mapping_query.update(
                         {"target_id": None, "target_name": None},
@@ -1706,7 +1743,8 @@ class MigrationState:
 
                     # Reset target_id in migration_progress to maintain consistency
                     progress_query = session.query(MigrationProgress).filter(
-                        MigrationProgress.resource_type == resource_type
+                        MigrationProgress.resource_type == resource_type,
+                        MigrationProgress.source_key == self.source_key,
                     )
                     progress_count = progress_query.update(
                         {"target_id": None, "status": "pending"},
@@ -1722,7 +1760,7 @@ class MigrationState:
                         progress_reset=progress_count,
                     )
 
-                    return mapping_count
+                    return int(mapping_count)
 
             except Exception as e:
                 logger.error(
@@ -1832,7 +1870,7 @@ class MigrationState:
                     # Check if mapping already exists (idempotent)
                     existing = (
                         session.query(IDMapping)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     )
 
@@ -1848,6 +1886,7 @@ class MigrationState:
                     mapping = IDMapping(
                         resource_type=resource_type,
                         source_id=source_id,
+                        source_key=self.source_key,
                         target_id=None,  # Will be set during import phase
                         source_name=source_name,
                         mapping_metadata=metadata,
@@ -1896,7 +1935,7 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     exists = (
                         session.query(IDMapping)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .filter_by(**self._scoped(resource_type=resource_type, source_id=source_id))
                         .first()
                     ) is not None
 
@@ -1935,7 +1974,10 @@ class MigrationState:
                 with get_session(self.database_url) as session:
                     count = (
                         session.query(func.count(IDMapping.id))
-                        .filter(IDMapping.resource_type == resource_type)
+                        .filter(
+                            IDMapping.resource_type == resource_type,
+                            IDMapping.source_key == self.source_key,
+                        )
                         .scalar()
                     )
 
@@ -1969,6 +2011,7 @@ class MigrationState:
                         session.query(func.count(IDMapping.id))
                         .filter(
                             IDMapping.resource_type == resource_type,
+                            IDMapping.source_key == self.source_key,
                             IDMapping.target_id.is_(None),
                         )
                         .scalar()
@@ -2003,6 +2046,7 @@ class MigrationState:
                         session.query(IDMapping.target_id)
                         .filter(
                             IDMapping.resource_type == resource_type,
+                            IDMapping.source_key == self.source_key,
                             IDMapping.target_id.isnot(None),
                         )
                         .all()
@@ -2059,6 +2103,7 @@ class MigrationState:
                             progress = MigrationProgress(
                                 resource_type=p_data["resource_type"],
                                 source_id=p_data["source_id"],
+                                source_key=self.source_key,
                                 source_name=p_data["source_name"],
                                 target_id=p_data.get("target_id"),
                                 status=p_data["status"],
@@ -2087,6 +2132,7 @@ class MigrationState:
                             mapping = IDMapping(
                                 resource_type=m_data["resource_type"],
                                 source_id=m_data["source_id"],
+                                source_key=self.source_key,
                                 target_id=m_data["target_id"],
                                 source_name=m_data.get("source_name"),
                                 target_name=m_data.get("target_name"),
