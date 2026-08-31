@@ -13,7 +13,7 @@ pytest-timeout==2.4.0
 
 # Code Formatting
 black==26.5.1
-isort==8.0.1
+isort==9.0.1
 
 # Linting
 ruff==0.16.4
