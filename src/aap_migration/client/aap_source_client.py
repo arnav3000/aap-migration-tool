@@ -223,6 +223,24 @@ class AAPSourceClient(BaseAPIClient):
         # Semaphore to limit concurrent requests
         semaphore = asyncio.Semaphore(max_concurrent)
 
+        # Ensure deterministic sort for stable concurrent pagination.
+        # Without order_by=id, the API may use a non-deterministic sort
+        # (e.g. by name). When multiple records share the same sort key,
+        # PostgreSQL's unstable sort causes records to shift across page
+        # boundaries between concurrent requests — some appear on multiple
+        # pages (duplicates) while others appear on no page (gaps).
+        # Sorting by id (unique primary key) eliminates tie-breaking
+        # ambiguity, making page boundaries stable across all concurrent
+        # requests. Only applied when the caller hasn't specified an
+        # explicit order_by (e.g. resume checkpoint already sets this).
+        if "order_by" not in filters:
+            filters = {**filters, "order_by": "id"}
+            logger.debug(
+                "parallel_fetch_deterministic_sort",
+                endpoint=endpoint,
+                message="Added order_by=id for stable concurrent pagination",
+            )
+
         async def fetch_page(page_num: int) -> tuple[int, list[dict[str, Any]]]:
             """Fetch a single page with semaphore control.
 

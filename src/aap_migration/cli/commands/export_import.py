@@ -583,6 +583,7 @@ def export(
                         current_batch = []
                         pending_mappings = []  # Batch mappings for DB writes
                         mapping_batch_size = ctx.config.performance.mapping_batch_size
+                        seen_source_ids: set[int] = set()  # Dedup parallel page overlaps
 
                         # Start phase (we already know the total count from pre-fetch)
                         phase_id = progress.start_phase(rtype, description, total_count)
@@ -604,6 +605,18 @@ def export(
                                 # Store ID mapping in database BEFORE transformation
                                 source_id = resource.get("id")
                                 source_name = resource.get("name", "")
+
+                                # Skip duplicate resources from parallel page overlap
+                                if source_id is not None:
+                                    if source_id in seen_source_ids:
+                                        logger.debug(
+                                            "duplicate_source_id_skipped",
+                                            resource_type=rtype,
+                                            source_id=source_id,
+                                            source_name=source_name,
+                                        )
+                                        continue
+                                    seen_source_ids.add(source_id)
 
                                 # Queue mapping for batch insert (instead of individual write)
                                 # Settings don't have IDs, skip mapping for settings

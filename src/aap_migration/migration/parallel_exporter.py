@@ -181,6 +181,7 @@ class ParallelExportCoordinator:
             file_count = 0
             pending_mappings: list[dict[str, Any]] = []
             mapping_batch_size = self.performance_config.mapping_batch_size
+            seen_source_ids: set[int] = set()  # Dedup parallel page overlaps
 
             iteration_count = 0
             async for resource in exporter.export_parallel(
@@ -199,6 +200,18 @@ class ParallelExportCoordinator:
                     # Store ID mapping
                     source_id = resource.get("id")
                     source_name = resource.get("name", "")
+
+                    # Skip duplicate resources from parallel page overlap
+                    if source_id is not None:
+                        if source_id in seen_source_ids:
+                            logger.debug(
+                                "duplicate_source_id_skipped",
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=source_name,
+                            )
+                            continue
+                        seen_source_ids.add(source_id)
 
                     # Settings don't have IDs, skip mapping for settings
                     if source_id is not None:

@@ -599,17 +599,30 @@ class MigrationCoordinator:
 
             # Standard ETL pipeline
             resources_to_import = []
+            seen_source_ids: set[int] = set()  # Dedup parallel page overlaps
 
             # Export phase
             async for resource in exporter.export():
+                # Store source ID before transformation
+                source_id = resource["id"]
+
+                # Skip duplicate resources from page overlap
+                if source_id in seen_source_ids:
+                    logger.debug(
+                        "duplicate_source_id_skipped",
+                        resource_type=resource_type,
+                        source_id=source_id,
+                        source_name=resource.get("name", "unknown"),
+                    )
+                    continue
+                seen_source_ids.add(source_id)
+
                 stats["exported"] += 1
 
                 # Update progress
                 if self.progress_tracker:
                     self.progress_tracker.update_resource(exported=1)
 
-                # Store source ID before transformation
-                source_id = resource["id"]
                 resource["_source_id"] = source_id
 
                 # Transform phase
@@ -809,8 +822,23 @@ class MigrationCoordinator:
 
         # Group hosts by inventory for bulk import
         hosts_by_inventory = {}
+        seen_source_ids: set[int] = set()  # Dedup parallel page overlaps
 
         async for host in exporter.export():
+            # Store source ID
+            source_id = host["id"]
+
+            # Skip duplicate resources from page overlap
+            if source_id in seen_source_ids:
+                logger.debug(
+                    "duplicate_source_id_skipped",
+                    resource_type="hosts",
+                    source_id=source_id,
+                    source_name=host.get("name", "unknown"),
+                )
+                continue
+            seen_source_ids.add(source_id)
+
             stats["exported"] += 1
 
             # Update progress for export
@@ -825,8 +853,6 @@ class MigrationCoordinator:
                     self.progress_tracker.update_resource(failed=1)
                 continue
 
-            # Store source ID
-            source_id = host["id"]
             host["_source_id"] = source_id
 
             # Transform (handles dependency validation for inventory)
