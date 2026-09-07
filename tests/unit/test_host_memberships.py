@@ -111,3 +111,73 @@ class TestHostInventoryMembershipWiring:
             if p["name"] == "host_memberships"
         )
         assert "host_inventory_memberships" in phase["resource_types"]
+
+
+class TestHostGroupMembershipExporter:
+    @pytest.mark.anyio
+    async def test_export_yields_group_host_pairs(self):
+        with patch("requests.Session"):
+            from aap_migration.migration.exporter import HostGroupMembershipExporter
+
+            mock_client = MagicMock()
+            mock_state = MagicMock()
+            mock_perf = MagicMock()
+
+            exporter = HostGroupMembershipExporter(mock_client, mock_state, mock_perf)
+
+            fake_groups = [
+                {"id": 1, "name": "webservers", "inventory": 10},
+                {"id": 2, "name": "dbservers", "inventory": 10},
+            ]
+            fake_hosts_by_group = {
+                1: [{"id": 101, "name": "web1"}, {"id": 102, "name": "web2"}],
+                2: [{"id": 201, "name": "db1"}],
+            }
+
+            async def fake_export_resources(resource_type, endpoint, page_size=200):
+                if endpoint == "groups/":
+                    for g in fake_groups:
+                        yield g
+                elif endpoint.startswith("groups/") and endpoint.endswith("/hosts/"):
+                    group_id = int(endpoint.split("/")[1])
+                    for h in fake_hosts_by_group.get(group_id, []):
+                        yield h
+
+            exporter.export_resources = fake_export_resources
+
+            results = await _collect(exporter.export(filters=None))
+
+        assert len(results) == 3
+        group_ids = {r["group_id"] for r in results}
+        host_ids = {r["host_id"] for r in results}
+        assert group_ids == {1, 2}
+        assert host_ids == {101, 102, 201}
+        assert all("inventory_id" in r for r in results)
+
+    @pytest.mark.anyio
+    async def test_export_parallel_delegates_to_export(self):
+        with patch("requests.Session"):
+            from aap_migration.migration.exporter import HostGroupMembershipExporter
+
+            exporter = HostGroupMembershipExporter(MagicMock(), MagicMock(), MagicMock())
+
+            fake_records = [{"group_id": 1, "host_id": 101}]
+
+            async def fake_export(filters=None):
+                for r in fake_records:
+                    yield r
+
+            exporter.export = fake_export
+
+            results = await _collect(exporter.export_parallel(
+                resource_type="host_group_memberships",
+                endpoint="",
+                page_size=200,
+                max_concurrent_pages=5,
+            ))
+
+        assert len(results) == 1
+
+    def test_host_group_memberships_in_resource_registry(self):
+        from aap_migration.resources import RESOURCE_REGISTRY
+        assert "host_group_memberships" in RESOURCE_REGISTRY

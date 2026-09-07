@@ -1186,6 +1186,84 @@ class HostInventoryMembershipExporter(ResourceExporter):
             yield record
 
 
+class HostGroupMembershipExporter(ResourceExporter):
+    """Exporter for host-group membership relationships.
+
+    For each group, fetches groups/{id}/hosts/ and yields one record per
+    host-group pair. Allows group membership to be reconstructed on target.
+    """
+
+    async def get_count(self, endpoint: str, filters: dict | None = None) -> int:
+        logger.debug(
+            "host_group_memberships_count_deferred",
+            message="Count deferred to export phase (no single endpoint)",
+        )
+        return 1
+
+    async def export(
+        self,
+        filters: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Export host-group memberships.
+
+        For each group, exports all (group_id, host_id) pairs so that
+        group membership can be reconstructed during import.
+
+        Args:
+            filters: Optional query parameters for filtering (currently unused)
+
+        Yields:
+            Membership dictionaries with 'group_id', 'host_id', 'group_name',
+            'inventory_id', and 'host_name'.
+        """
+        logger.info(
+            "exporting_host_group_memberships",
+            message="Starting export of host-group relationships",
+        )
+
+        async for group in self.export_resources(
+            resource_type="groups",
+            endpoint="groups/",
+            page_size=200,
+        ):
+            group_id = group.get("id")
+            group_name = group.get("name", f"group_{group_id}")
+            inventory_id = group.get("inventory")
+
+            if not group_id:
+                continue
+
+            async for host in self.export_resources(
+                resource_type="hosts",
+                endpoint=f"groups/{group_id}/hosts/",
+                page_size=200,
+            ):
+                host_id = host.get("id")
+                if not host_id:
+                    continue
+                yield {
+                    "group_id": group_id,
+                    "host_id": host_id,
+                    "group_name": group_name,
+                    "inventory_id": inventory_id,
+                    "host_name": host.get("name", f"host_{host_id}"),
+                }
+
+        logger.info("host_group_memberships_export_complete")
+
+    async def export_parallel(
+        self,
+        resource_type: str,
+        endpoint: str,
+        page_size: int = 200,
+        max_concurrent_pages: int = 5,
+        filters: dict | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Delegate to export() — no single endpoint exists for group memberships."""
+        async for record in self.export(filters=filters):
+            yield record
+
+
 class CredentialExporter(ResourceExporter):
     """Exporter for credential resources."""
 
@@ -2517,6 +2595,7 @@ def create_exporter(
         "inventory_groups": InventoryGroupExporter,
         "hosts": HostExporter,
         "host_inventory_memberships": HostInventoryMembershipExporter,
+        "host_group_memberships": HostGroupMembershipExporter,
         "credentials": CredentialExporter,
         "credential_input_sources": CredentialInputSourceExporter,
         "projects": ProjectExporter,
