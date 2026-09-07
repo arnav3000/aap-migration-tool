@@ -1173,6 +1173,18 @@ class HostInventoryMembershipExporter(ResourceExporter):
             message=f"Exported {total_memberships} host-inventory membership relationships",
         )
 
+    async def export_parallel(
+        self,
+        resource_type: str,
+        endpoint: str,
+        page_size: int = 200,
+        max_concurrent_pages: int = 5,
+        filters: dict | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Delegate to export() — no single endpoint exists for memberships."""
+        async for record in self.export(filters=filters):
+            yield record
+
 
 class CredentialExporter(ResourceExporter):
     """Exporter for credential resources."""
