@@ -189,7 +189,7 @@ class IAMAnalyser:
         retry = Retry(
             total=3,
             backoff_factor=1,
-            status_forcelist=[502, 503, 504],
+            status_forcelist=[429, 502, 503, 504],
             allowed_methods=["GET", "POST"],
         )
         adapter = HTTPAdapter(max_retries=retry, pool_maxsize=pool_size)
@@ -1451,8 +1451,6 @@ class IAMAnalyser:
                     membership.error += f" | {body_preview}"
                 stats.team_memberships_failed += 1
 
-            time.sleep(self.rate_limit_delay)
-
         self._progress(
             f"  Team memberships — migrated: {stats.team_memberships_migrated}, "
             f"failed: {stats.team_memberships_failed}"
@@ -1600,8 +1598,6 @@ class IAMAnalyser:
                 if body_preview:
                     entry.error += f" | {body_preview}"
                 stats.permissions_failed += 1
-
-            time.sleep(self.rate_limit_delay)
 
             if (idx + 1) % self._EXECUTE_CHECKPOINT_INTERVAL == 0:
                 self._save_checkpoint(permissions, stats)
