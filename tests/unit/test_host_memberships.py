@@ -45,3 +45,49 @@ class TestHostInventoryMembershipExporterParallel:
         assert len(results) == 2
         assert results[0]["host_id"] == 1
         assert results[1]["host_id"] == 2
+
+
+class TestImportHostInventoryMemberships:
+    @pytest.mark.anyio
+    async def test_bulk_method_calls_import_resource_per_membership(self):
+        """import_host_inventory_memberships must call import_resource for each record."""
+        with patch("requests.Session"):
+            from aap_migration.migration.importer import HostInventoryMembershipImporter
+
+            mock_client = MagicMock()
+            mock_state = MagicMock()
+            mock_perf = MagicMock()
+            mock_mappings = MagicMock()
+
+            importer = HostInventoryMembershipImporter(
+                mock_client, mock_state, mock_perf, mock_mappings
+            )
+
+            memberships = [
+                {"host_id": 1, "inventory_id": 10, "host_name": "h1", "inventory_name": "inv1"},
+                {"host_id": 2, "inventory_id": 10, "host_name": "h2", "inventory_name": "inv1"},
+            ]
+
+            call_args = []
+
+            async def fake_import_resource(resource, xformed=None):
+                call_args.append(resource)
+                return {"status": "created"}
+
+            importer.import_resource = fake_import_resource
+
+            results = await importer.import_host_inventory_memberships(memberships)
+
+        assert len(call_args) == 2
+        assert call_args[0]["host_id"] == 1
+        assert call_args[1]["host_id"] == 2
+
+    @pytest.mark.anyio
+    async def test_empty_memberships_returns_empty_list(self):
+        with patch("requests.Session"):
+            from aap_migration.migration.importer import HostInventoryMembershipImporter
+            importer = HostInventoryMembershipImporter(
+                MagicMock(), MagicMock(), MagicMock(), MagicMock()
+            )
+            results = await importer.import_host_inventory_memberships([])
+        assert results == []

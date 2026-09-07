@@ -3725,6 +3725,43 @@ class HostInventoryMembershipImporter(ResourceImporter):
 
             return {"status": "failed", "error": error_msg}
 
+    async def import_host_inventory_memberships(
+        self,
+        memberships: list[dict[str, Any]],
+        progress_callback: Callable[[int, int, int], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Import all host-inventory memberships.
+
+        Args:
+            memberships: List of membership dicts with host_id and inventory_id
+            progress_callback: Optional (success, failed, skipped) callback
+
+        Returns:
+            List of result dicts
+        """
+        if not memberships:
+            return []
+
+        results = []
+        success, failed, skipped = 0, 0, 0
+
+        for membership in memberships:
+            result = await self.import_resource(membership)
+            results.append(result)
+
+            status = result.get("status", "failed")
+            if status in ("created",):
+                success += 1
+            elif status == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+
+            if progress_callback:
+                progress_callback(success, failed, skipped)
+
+        return results
+
 
 class CredentialImporter(ResourceImporter):
     """Importer for credential resources.
