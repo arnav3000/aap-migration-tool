@@ -181,3 +181,139 @@ class TestHostGroupMembershipExporter:
     def test_host_group_memberships_in_resource_registry(self):
         from aap_migration.resources import RESOURCE_REGISTRY
         assert "host_group_memberships" in RESOURCE_REGISTRY
+
+
+class TestHostGroupMembershipImporter:
+    @pytest.mark.anyio
+    async def test_imports_host_into_group(self):
+        with patch("requests.Session"):
+            from aap_migration.migration.importer import HostGroupMembershipImporter
+
+            mock_client = AsyncMock()
+            mock_state = MagicMock()
+            mock_perf = MagicMock()
+            mock_mappings = MagicMock()
+
+            # Host 1 maps to target 101, group 10 maps to target 1010
+            mock_state.is_migrated.return_value = False
+            mock_state.get_mapped_id.side_effect = lambda rtype, sid: {
+                ("inventory_groups", 10): 1010,
+                ("hosts", 1): 101,
+            }.get((rtype, sid))
+
+            # No existing membership
+            mock_client.get.return_value = {"count": 0, "results": []}
+
+            importer = HostGroupMembershipImporter(
+                mock_client, mock_state, mock_perf, mock_mappings
+            )
+
+            membership = {
+                "group_id": 10,
+                "host_id": 1,
+                "group_name": "webservers",
+                "host_name": "web1",
+                "inventory_id": 100,
+            }
+
+            result = await importer.import_resource(membership)
+
+        assert result["status"] == "created"
+        mock_client.post.assert_called_once()
+        call_args = mock_client.post.call_args
+        assert "groups/1010/hosts/" in call_args[0][0]
+        assert call_args[1]["json_data"] == {"id": 101}
+
+    @pytest.mark.anyio
+    async def test_skips_if_already_migrated(self):
+        with patch("requests.Session"):
+            from aap_migration.migration.importer import HostGroupMembershipImporter
+
+            mock_client = AsyncMock()
+            mock_state = MagicMock()
+            mock_state.is_migrated.return_value = True
+
+            importer = HostGroupMembershipImporter(
+                mock_client, mock_state, MagicMock(), MagicMock()
+            )
+
+            result = await importer.import_resource({
+                "group_id": 10, "host_id": 1,
+                "group_name": "webservers", "host_name": "web1", "inventory_id": 100,
+            })
+
+        assert result["status"] == "skipped"
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_skips_if_already_in_group(self):
+        with patch("requests.Session"):
+            from aap_migration.migration.importer import HostGroupMembershipImporter
+
+            mock_client = AsyncMock()
+            mock_state = MagicMock()
+            mock_state.is_migrated.return_value = False
+            mock_state.get_mapped_id.side_effect = lambda rtype, sid: {
+                ("inventory_groups", 10): 1010, ("hosts", 1): 101,
+            }.get((rtype, sid))
+            mock_client.get.return_value = {"count": 1, "results": [{"id": 101}]}
+
+            importer = HostGroupMembershipImporter(
+                mock_client, mock_state, MagicMock(), MagicMock()
+            )
+
+            result = await importer.import_resource({
+                "group_id": 10, "host_id": 1,
+                "group_name": "webservers", "host_name": "web1", "inventory_id": 100,
+            })
+
+        assert result["status"] == "skipped"
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_skips_if_group_not_found_on_target(self):
+        with patch("requests.Session"):
+            from aap_migration.migration.importer import HostGroupMembershipImporter
+
+            mock_state = MagicMock()
+            mock_state.is_migrated.return_value = False
+            mock_state.get_mapped_id.return_value = None  # group not found
+
+            importer = HostGroupMembershipImporter(
+                AsyncMock(), mock_state, MagicMock(), MagicMock()
+            )
+
+            result = await importer.import_resource({
+                "group_id": 10, "host_id": 1,
+                "group_name": "webservers", "host_name": "web1", "inventory_id": 100,
+            })
+
+        assert result["status"] == "skipped"
+        assert "group_not_found" in result["reason"]
+
+    @pytest.mark.anyio
+    async def test_bulk_method_processes_all_memberships(self):
+        with patch("requests.Session"):
+            from aap_migration.migration.importer import HostGroupMembershipImporter
+
+            importer = HostGroupMembershipImporter(
+                AsyncMock(), MagicMock(), MagicMock(), MagicMock()
+            )
+
+            calls = []
+
+            async def fake_import_resource(resource, xformed=None):
+                calls.append(resource)
+                return {"status": "created"}
+
+            importer.import_resource = fake_import_resource
+
+            memberships = [
+                {"group_id": 1, "host_id": 1},
+                {"group_id": 1, "host_id": 2},
+                {"group_id": 2, "host_id": 1},
+            ]
+            results = await importer.import_host_group_memberships(memberships)
+
+        assert len(calls) == 3
+        assert len(results) == 3
