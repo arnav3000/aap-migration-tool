@@ -3879,7 +3879,7 @@ class HostGroupMembershipImporter(ResourceImporter):
 
             return {"status": "created", "target_id": f"{target_group_id}_{target_host_id}"}
 
-        except Exception as e:
+        except APIError as e:
             error_msg = str(e)
             logger.error(
                 "group_membership_import_failed",
