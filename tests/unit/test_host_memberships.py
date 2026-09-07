@@ -317,3 +317,20 @@ class TestHostGroupMembershipImporter:
 
         assert len(calls) == 3
         assert len(results) == 3
+
+
+class TestHostGroupMembershipWiring:
+    def test_coordinator_has_host_group_memberships_phase(self):
+        from aap_migration.migration.coordinator import MigrationCoordinator
+        phase_names = [p["name"] for p in MigrationCoordinator.MIGRATION_PHASES]
+        assert "host_group_memberships" in phase_names
+
+    def test_host_group_memberships_after_inventory_config(self):
+        from aap_migration.migration.coordinator import MigrationCoordinator
+        phase_names = [p["name"] for p in MigrationCoordinator.MIGRATION_PHASES]
+        assert phase_names.index("host_group_memberships") > phase_names.index("inventory_config")
+
+    def test_host_group_memberships_after_hosts(self):
+        from aap_migration.migration.coordinator import MigrationCoordinator
+        phase_names = [p["name"] for p in MigrationCoordinator.MIGRATION_PHASES]
+        assert phase_names.index("host_group_memberships") > phase_names.index("hosts")

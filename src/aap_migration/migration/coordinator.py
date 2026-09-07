@@ -112,6 +112,12 @@ class MigrationCoordinator:
             "batch_size": 100,
         },
         {
+            "name": "host_group_memberships",
+            "description": "Host-Group Memberships (hosts assigned to inventory groups)",
+            "resource_types": ["host_group_memberships"],
+            "batch_size": 100,
+        },
+        {
             "name": "notification_templates",
             "description": "Notification Templates",
             "resource_types": ["notification_templates"],
