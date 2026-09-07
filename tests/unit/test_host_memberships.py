@@ -91,3 +91,23 @@ class TestImportHostInventoryMemberships:
             )
             results = await importer.import_host_inventory_memberships([])
         assert results == []
+
+
+class TestHostInventoryMembershipWiring:
+    def test_coordinator_has_host_memberships_phase(self):
+        from aap_migration.migration.coordinator import MigrationCoordinator
+        phase_names = [p["name"] for p in MigrationCoordinator.MIGRATION_PHASES]
+        assert "host_memberships" in phase_names
+
+    def test_host_memberships_phase_after_hosts(self):
+        from aap_migration.migration.coordinator import MigrationCoordinator
+        phase_names = [p["name"] for p in MigrationCoordinator.MIGRATION_PHASES]
+        assert phase_names.index("host_memberships") > phase_names.index("hosts")
+
+    def test_host_memberships_phase_contains_resource_type(self):
+        from aap_migration.migration.coordinator import MigrationCoordinator
+        phase = next(
+            p for p in MigrationCoordinator.MIGRATION_PHASES
+            if p["name"] == "host_memberships"
+        )
+        assert "host_inventory_memberships" in phase["resource_types"]

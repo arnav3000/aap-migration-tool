@@ -1949,6 +1949,7 @@ def import_cmd(
                             "inventories": "import_inventories",
                             "inventory_sources": "import_inventory_sources",
                             "inventory_groups": "import_inventory_groups",
+                            "host_inventory_memberships": "import_host_inventory_memberships",
                             # Job templates and workflows
                             "job_templates": "import_job_templates",
                             "workflow_job_templates": "import_workflow_job_templates",
