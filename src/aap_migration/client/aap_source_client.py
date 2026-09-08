@@ -394,6 +394,26 @@ class AAPSourceClient(BaseAPIClient):
         return await self.get_paginated("inventories/", params=params)
 
     @retry_api_call
+    async def get_input_inventories(
+        self, inventory_id: int, params: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Get input inventories for a constructed inventory.
+
+        Constructed inventories use input_inventories (a ManyToMany relationship)
+        to reference the source inventories they aggregate. This data is only
+        available via the sub-endpoint, not from the main inventory response.
+
+        Args:
+            inventory_id: Constructed inventory ID
+            params: Optional query parameters
+
+        Returns:
+            List of input inventory resources
+        """
+        endpoint = f"inventories/{inventory_id}/input_inventories/"
+        return await self.get_paginated(endpoint, params=params)
+
+    @retry_api_call
     async def get_inventory_sources(
         self, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:

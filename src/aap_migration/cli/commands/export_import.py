@@ -1258,6 +1258,30 @@ def import_cmd(
         if not resources:
             return []
 
+        # For inventory_sources: separate auto-created sources from regular ones.
+        # Auto-created sources (for constructed inventories) need special import
+        # handling via _handle_auto_created_source() which PATCHes source_vars
+        # and limit onto the existing target source. The precheck would incorrectly
+        # skip them as "Pre-existing in target", preventing the PATCH from running.
+        auto_created_sources = []
+        if resource_type == "inventory_sources":
+            identifier_field_early = getattr(importer, "IDENTIFIER_FIELD", "name")
+            regular_resources = []
+            for resource in resources:
+                name = resource.get(identifier_field_early, "")
+                if isinstance(name, str) and name.startswith("Auto-created source for: "):
+                    auto_created_sources.append(resource)
+                else:
+                    regular_resources.append(resource)
+            resources = regular_resources
+            if auto_created_sources:
+                logger.info(
+                    "auto_created_sources_bypassing_precheck",
+                    resource_type=resource_type,
+                    count=len(auto_created_sources),
+                    message="Auto-created sources bypass precheck for special PATCH handling",
+                )
+
         # Step 1: Clear target_ids to ensure we don't trust stale data
         cleared_count = state.reset_target_ids(resource_type)
         logger.info("cleared_target_ids", resource_type=resource_type, count=cleared_count)
@@ -1721,6 +1745,13 @@ def import_cmd(
                 to_import=len(to_import),
                 total=len(resources),
             )
+
+        # Always include auto-created sources in to_import.
+        # They bypass the precheck and are handled by _handle_auto_created_source()
+        # which finds the existing source on the target and PATCHes it with
+        # source_vars and limit from the exported data.
+        if auto_created_sources:
+            to_import.extend(auto_created_sources)
 
         return to_import
 
