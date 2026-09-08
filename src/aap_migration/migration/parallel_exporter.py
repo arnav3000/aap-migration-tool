@@ -164,16 +164,13 @@ class ParallelExportCoordinator:
                     message="API filter: inventory_sources__isnull=true (exclude dynamic hosts)",
                 )
             if resource_type == "inventories" and self.export_config.skip_smart_inventories:
-                # API-level filtering: only export static inventories
-                # - inventory_sources__isnull=true: exclude dynamic inventories (have sources)
-                # - pending_deletion=false: exclude inventories marked for deletion
-                # - kind=: only normal inventories (empty string), excludes smart inventories
-                export_filters["inventory_sources__isnull"] = "true"
+                # Do NOT use kind="" filter — it excludes constructed inventories
+                # which must be exported for input_inventories migration.
+                # Smart inventories are filtered in InventoryExporter._process_resource() instead.
                 export_filters["pending_deletion"] = "false"
-                export_filters["kind"] = ""
                 logger.info(
                     "parallel_export_applying_smart_inventory_filter",
-                    message="API filter: inventory_sources__isnull=true&pending_deletion=false&kind=",
+                    message="API filter: pending_deletion=false (smart inventories filtered post-fetch)",
                 )
 
             # Export with parallel page fetching
@@ -181,6 +178,7 @@ class ParallelExportCoordinator:
             file_count = 0
             pending_mappings: list[dict[str, Any]] = []
             mapping_batch_size = self.performance_config.mapping_batch_size
+            seen_source_ids: set[int] = set()  # Dedup parallel page overlaps
 
             iteration_count = 0
             async for resource in exporter.export_parallel(
@@ -199,6 +197,18 @@ class ParallelExportCoordinator:
                     # Store ID mapping
                     source_id = resource.get("id")
                     source_name = resource.get("name", "")
+
+                    # Skip duplicate resources from parallel page overlap
+                    if source_id is not None:
+                        if source_id in seen_source_ids:
+                            logger.debug(
+                                "duplicate_source_id_skipped",
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=source_name,
+                            )
+                            continue
+                        seen_source_ids.add(source_id)
 
                     # Settings don't have IDs, skip mapping for settings
                     if source_id is not None:

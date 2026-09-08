@@ -535,12 +535,13 @@ class ResourceExporter:
             and hasattr(self, "skip_smart_inventories")
             and self.skip_smart_inventories
         ):
-            params["inventory_sources__isnull"] = "true"
+            # Do NOT use kind="" filter here — it excludes constructed inventories
+            # which must be exported for input_inventories migration.
+            # Smart inventories are filtered in InventoryExporter._process_resource() instead.
             params["pending_deletion"] = "false"
-            params["kind"] = ""
             logger.info(
                 "export_parallel_applying_smart_inventory_filter",
-                message="API filter: inventory_sources__isnull=true&pending_deletion=false&kind=",
+                message="API filter: pending_deletion=false (smart inventories filtered post-fetch)",
             )
 
         # Apply ID filtering for true checkpoint resume
@@ -758,6 +759,71 @@ class InventoryExporter(ResourceExporter):
                 message="Will skip smart inventories (kind='smart'), only export static inventories",
             )
 
+    async def _process_resource(
+        self, resource: dict[str, Any], resource_type: str
+    ) -> dict[str, Any] | None:
+        """Process inventory resource with constructed inventory and smart filter support.
+
+        Overrides parent to:
+        1. Skip smart inventories when skip_smart_inventories is enabled
+           (done here instead of API-level filter to avoid also excluding constructed)
+        2. Fetch the ManyToMany input_inventories relationship for constructed
+           inventories via the sub-endpoint
+
+        This ensures the data is captured regardless of whether export() or
+        export_parallel() is used.
+
+        Args:
+            resource: Raw inventory data from API
+            resource_type: Type of resource
+
+        Returns:
+            Processed resource with _input_inventory_ids for constructed inventories,
+            or None if the resource should be skipped
+        """
+        # Skip smart inventories at process level (not API level) to preserve
+        # constructed inventories which would be excluded by the kind="" API filter
+        if self.skip_smart_inventories and resource.get("kind") == "smart":
+            logger.debug(
+                "skipping_smart_inventory",
+                inventory_id=resource.get("id"),
+                inventory_name=resource.get("name"),
+            )
+            self.stats["skipped_count"] += 1
+            return None
+
+        processed = await super()._process_resource(resource, resource_type)
+        if processed is None:
+            return None
+
+        # Fetch input_inventories for constructed inventories
+        # This ManyToMany relationship is only available via a sub-endpoint
+        if processed.get("kind") == "constructed":
+            try:
+                input_inventories = await self.client.get_input_inventories(
+                    processed["id"]
+                )
+                processed["_input_inventory_ids"] = [
+                    inv["id"] for inv in input_inventories
+                ]
+                logger.info(
+                    "constructed_inventory_input_inventories_fetched",
+                    inventory_id=processed["id"],
+                    inventory_name=processed.get("name"),
+                    input_inventory_count=len(processed["_input_inventory_ids"]),
+                    input_inventory_ids=processed["_input_inventory_ids"],
+                )
+            except Exception as e:
+                logger.error(
+                    "failed_to_fetch_input_inventories",
+                    inventory_id=processed["id"],
+                    inventory_name=processed.get("name"),
+                    error=str(e),
+                )
+                processed["_input_inventory_ids"] = []
+
+        return processed
+
     async def _load_inventory_sources_cache(self) -> None:
         """Pre-fetch all inventory sources into cache.
 
@@ -832,16 +898,16 @@ class InventoryExporter(ResourceExporter):
         if filters is None:
             filters = {}
         if self.skip_smart_inventories:
-            # API-level filtering: only export static inventories
-            # - inventory_sources__isnull=true: exclude dynamic inventories (have sources)
-            # - pending_deletion=false: exclude inventories marked for deletion
-            # - kind=: only normal inventories (empty string), excludes smart inventories
-            filters["inventory_sources__isnull"] = "true"
+            # Skip smart inventories but NOT constructed inventories.
+            # Constructed inventories (kind="constructed") must still be exported
+            # so their input_inventories relationships can be migrated.
+            # We exclude pending_deletion inventories at the API level.
+            # Smart inventories are filtered in _process_resource() instead of
+            # using kind="" here, because kind="" also excludes constructed inventories.
             filters["pending_deletion"] = "false"
-            filters["kind"] = ""
             logger.info(
                 "applying_smart_inventory_filter",
-                message="API filter: inventory_sources__isnull=true&pending_deletion=false&kind=",
+                message="API filter: pending_deletion=false (smart inventories filtered post-fetch)",
             )
 
         async for inventory in self.export_resources(
