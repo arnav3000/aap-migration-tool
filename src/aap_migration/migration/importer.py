@@ -1687,28 +1687,425 @@ class InstanceGroupImporter(ResourceImporter):
 
 
 class InventoryImporter(ResourceImporter):
-    """Importer for inventory resources."""
+    """Importer for inventory resources.
+
+    Uses a two-pass import strategy:
+    - Pass 1: Import regular and smart inventories (kind != "constructed")
+    - Pass 2: Import constructed inventories with input_inventories resolved
+
+    This ordering ensures all input inventories have target ID mappings
+    before constructed inventories that reference them are created.
+    """
 
     DEPENDENCIES = {
         "organization": "organizations",
     }
+
+    async def import_resource(
+        self,
+        resource_type: str,
+        source_id: int,
+        data: dict[str, Any],
+        resolve_dependencies: bool = True,
+    ) -> dict[str, Any] | None:
+        """Import a single inventory, with special handling for constructed inventories.
+
+        For constructed inventories (kind="constructed"):
+        1. Resolves _input_inventory_ids from source IDs to target IDs
+        2. Creates the inventory via POST /constructed_inventories/ with input_inventories
+        3. Falls back to standard creation + association if dedicated endpoint fails
+
+        Args:
+            resource_type: Type of resource being imported
+            source_id: Source resource ID
+            data: Transformed resource data
+            resolve_dependencies: Whether to resolve FK dependencies
+
+        Returns:
+            Created resource data or None if skipped/failed
+        """
+        is_constructed = data.get("kind") == "constructed"
+        input_inventory_source_ids = data.pop("_input_inventory_ids", [])
+
+        if not is_constructed:
+            return await super().import_resource(
+                resource_type, source_id, data, resolve_dependencies
+            )
+
+        # --- Constructed inventory handling ---
+
+        # Check if already imported
+        if self.state.is_migrated(resource_type, source_id):
+            logger.debug(
+                "resource_already_imported",
+                resource_type=resource_type,
+                source_id=source_id,
+            )
+            self.stats["skipped_count"] += 1
+            return None
+
+        # Mark as in progress
+        self.state.mark_in_progress(
+            resource_type=resource_type,
+            source_id=source_id,
+            source_name=data.get("name", "unknown"),
+            phase="import",
+        )
+
+        try:
+            # Resolve organization dependency
+            if resolve_dependencies:
+                data = await self._resolve_dependencies(resource_type, data)
+
+            # Resolve input_inventory_ids: map source IDs to target IDs
+            target_input_ids = []
+            unresolved_inputs = []
+            for inv_source_id in input_inventory_source_ids:
+                target_id = self.state.get_mapped_id("inventories", inv_source_id)
+                if target_id:
+                    target_input_ids.append(target_id)
+                else:
+                    unresolved_inputs.append(inv_source_id)
+
+            if unresolved_inputs:
+                logger.warning(
+                    "constructed_inventory_unresolved_inputs",
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    source_name=data.get("name"),
+                    unresolved_source_ids=unresolved_inputs,
+                    resolved_count=len(target_input_ids),
+                    message="Some input inventories were not imported; "
+                    "constructed inventory will be created with partial inputs",
+                )
+
+            # Remove None values
+            data = {k: v for k, v in data.items() if v is not None}
+
+            # DUPLICATE DETECTION: Check if already exists in target
+            resource_name = data.get("name")
+            organization_id = data.get("organization")
+            if resource_name and organization_id:
+                try:
+                    existing = await self.client.find_resource_by_name(
+                        resource_type,
+                        resource_name,
+                        organization_id=organization_id,
+                    )
+                    if existing:
+                        logger.info(
+                            "constructed_inventory_exists_updating_inputs",
+                            resource_type=resource_type,
+                            source_id=source_id,
+                            target_id=existing["id"],
+                            name=resource_name,
+                            input_inventory_count=len(target_input_ids),
+                        )
+                        # Associate input inventories with existing constructed inventory
+                        await self._associate_input_inventories(
+                            existing["id"], target_input_ids
+                        )
+                        self.state.mark_completed(
+                            resource_type=resource_type,
+                            source_id=source_id,
+                            target_id=existing["id"],
+                            target_name=existing.get("name"),
+                            source_name=resource_name,
+                        )
+                        self.stats["conflict_count"] += 1
+                        return existing
+                except Exception as e:
+                    logger.debug(
+                        "constructed_inventory_duplicate_check_failed",
+                        error=str(e),
+                        action="continuing_with_create",
+                    )
+
+            # Create the constructed inventory with input_inventories
+            # Include input_inventories in the POST body
+            if target_input_ids:
+                data["input_inventories"] = target_input_ids
+
+            logger.info(
+                "creating_constructed_inventory",
+                source_id=source_id,
+                source_name=data.get("name"),
+                input_inventory_count=len(target_input_ids),
+                target_input_ids=target_input_ids,
+            )
+
+            # Create the constructed inventory.
+            # Try the dedicated constructed_inventories endpoint first, fall
+            # back to the standard inventories endpoint on failure.
+            try:
+                result = await self.client.create_resource(
+                    resource_type="constructed_inventories",
+                    data=data,
+                    check_exists=True,
+                )
+            except Exception:
+                logger.debug(
+                    "constructed_inventories_endpoint_failed_fallback",
+                    source_id=source_id,
+                    message="Falling back to standard inventories/ endpoint",
+                )
+                create_data = {k: v for k, v in data.items() if k != "input_inventories"}
+                result = await self.client.create_resource(
+                    resource_type="inventories",
+                    data=create_data,
+                    check_exists=True,
+                )
+
+            # ALWAYS associate input inventories via the sub-endpoint after
+            # creation, regardless of which endpoint was used. The AAP API
+            # silently ignores the input_inventories field in the POST body
+            # — the only reliable way to link them is via the sub-endpoint.
+            if target_input_ids:
+                await self._associate_input_inventories(
+                    result["id"], target_input_ids
+                )
+
+            # Mark as completed
+            self.state.mark_completed(
+                resource_type=resource_type,
+                source_id=source_id,
+                target_id=result["id"],
+                target_name=result.get("name"),
+            )
+
+            self.stats["imported_count"] += 1
+
+            logger.info(
+                "constructed_inventory_imported",
+                resource_type=resource_type,
+                source_id=source_id,
+                target_id=result["id"],
+                input_inventory_count=len(target_input_ids),
+            )
+
+            return result
+
+        except ConflictError as e:
+            logger.warning(
+                "constructed_inventory_conflict",
+                resource_type=resource_type,
+                source_id=source_id,
+                error=str(e),
+            )
+            existing = await self._handle_conflict(resource_type, source_id, data)
+            if existing:
+                # Also associate input inventories on conflict resolution
+                if target_input_ids:
+                    try:
+                        await self._associate_input_inventories(
+                            existing["id"], target_input_ids
+                        )
+                    except Exception as assoc_err:
+                        logger.warning(
+                            "constructed_inventory_input_association_failed_on_conflict",
+                            target_id=existing["id"],
+                            error=str(assoc_err),
+                        )
+                self.stats["conflict_count"] += 1
+                return existing
+            else:
+                self.stats["error_count"] += 1
+                self.state.mark_failed(
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    error_message=f"Conflict: {str(e)}",
+                )
+                return None
+
+        except Exception as e:
+            logger.error(
+                "constructed_inventory_import_failed",
+                resource_type=resource_type,
+                source_id=source_id,
+                error=str(e),
+            )
+
+            self.stats["error_count"] += 1
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=f"{type(e).__name__}: {str(e)}",
+            )
+
+            self.import_errors.append(
+                {
+                    "resource_type": resource_type,
+                    "source_id": source_id,
+                    "name": data.get("name", "unknown"),
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                }
+            )
+
+            return None
+
+    async def _associate_input_inventories(
+        self, constructed_inventory_id: int, input_inventory_ids: list[int]
+    ) -> None:
+        """Associate input inventories with a constructed inventory.
+
+        Uses POST to /inventories/{id}/input_inventories/ to add each
+        input inventory to the constructed inventory.
+
+        Args:
+            constructed_inventory_id: Target constructed inventory ID
+            input_inventory_ids: List of target inventory IDs to associate
+        """
+        for input_inv_id in input_inventory_ids:
+            try:
+                endpoint = f"inventories/{constructed_inventory_id}/input_inventories/"
+                await self.client.post(endpoint, json_data={"id": input_inv_id})
+                logger.info(
+                    "input_inventory_associated",
+                    constructed_inventory_id=constructed_inventory_id,
+                    input_inventory_id=input_inv_id,
+                )
+            except APIError as e:
+                # Ignore "already associated" errors (idempotent)
+                if "already" in str(e).lower():
+                    logger.info(
+                        "input_inventory_already_associated",
+                        constructed_inventory_id=constructed_inventory_id,
+                        input_inventory_id=input_inv_id,
+                    )
+                else:
+                    logger.error(
+                        "input_inventory_association_failed",
+                        constructed_inventory_id=constructed_inventory_id,
+                        input_inventory_id=input_inv_id,
+                        error=str(e),
+                    )
+                    raise
 
     async def import_inventories(
         self,
         inventories: list[dict[str, Any]],
         progress_callback: Callable[[int, int, int], None] | None = None,
     ) -> list[dict[str, Any]]:
-        """Import multiple inventories concurrently with live progress updates.
+        """Import inventories using two-pass strategy for constructed inventory support.
+
+        Pass 1: Import regular and smart inventories (kind != "constructed")
+        Pass 2: Import constructed inventories (kind == "constructed")
+
+        This ordering ensures all input inventories have target ID mappings
+        before constructed inventories that reference them are created.
 
         Args:
             inventories: List of inventory data
             progress_callback: Optional callback for progress updates.
-                Called after each inventory with (success_count, failed_count).
+                Called after each inventory with (success_count, failed_count, skipped_count).
 
         Returns:
             List of created inventory data
         """
-        return await self._import_parallel("inventories", inventories, progress_callback)
+        # Split inventories into regular and constructed
+        regular_inventories = [
+            inv for inv in inventories if inv.get("kind") != "constructed"
+        ]
+        constructed_inventories = [
+            inv for inv in inventories if inv.get("kind") == "constructed"
+        ]
+
+        logger.info(
+            "inventory_import_two_pass_strategy",
+            total_inventories=len(inventories),
+            regular_count=len(regular_inventories),
+            constructed_count=len(constructed_inventories),
+            message="Pass 1: regular/smart inventories, Pass 2: constructed inventories",
+        )
+
+        all_results = []
+        total_success = 0
+        total_failed = 0
+        total_skipped = 0
+
+        # Pass 1: Import regular/smart inventories
+        if regular_inventories:
+            logger.info(
+                "inventory_import_pass1_starting",
+                count=len(regular_inventories),
+                message="Importing regular and smart inventories",
+            )
+
+            def pass1_progress(success, failed, skipped):
+                nonlocal total_success, total_failed, total_skipped
+                if progress_callback:
+                    progress_callback(
+                        total_success + success,
+                        total_failed + failed,
+                        total_skipped + skipped,
+                    )
+
+            pass1_results = await self._import_parallel(
+                "inventories", regular_inventories, progress_callback=pass1_progress
+            )
+
+            pass1_success = len([r for r in pass1_results if r and not r.get("_skipped")])
+            pass1_skipped = len([r for r in pass1_results if r and r.get("_skipped")])
+            pass1_failed = len(regular_inventories) - pass1_success - pass1_skipped
+
+            total_success += pass1_success
+            total_failed += pass1_failed
+            total_skipped += pass1_skipped
+            all_results.extend(pass1_results)
+
+            logger.info(
+                "inventory_import_pass1_completed",
+                success=pass1_success,
+                failed=pass1_failed,
+                skipped=pass1_skipped,
+            )
+
+        # Pass 2: Import constructed inventories (sequentially to handle dependencies)
+        if constructed_inventories:
+            logger.info(
+                "inventory_import_pass2_starting",
+                count=len(constructed_inventories),
+                message="Importing constructed inventories with input_inventories",
+            )
+
+            def pass2_progress(success, failed, skipped):
+                nonlocal total_success, total_failed, total_skipped
+                if progress_callback:
+                    progress_callback(
+                        total_success + success,
+                        total_failed + failed,
+                        total_skipped + skipped,
+                    )
+
+            pass2_results = await self._import_parallel(
+                "inventories", constructed_inventories, progress_callback=pass2_progress
+            )
+
+            pass2_success = len([r for r in pass2_results if r and not r.get("_skipped")])
+            pass2_skipped = len([r for r in pass2_results if r and r.get("_skipped")])
+            pass2_failed = len(constructed_inventories) - pass2_success - pass2_skipped
+
+            total_success += pass2_success
+            total_failed += pass2_failed
+            total_skipped += pass2_skipped
+            all_results.extend(pass2_results)
+
+            logger.info(
+                "inventory_import_pass2_completed",
+                success=pass2_success,
+                failed=pass2_failed,
+                skipped=pass2_skipped,
+            )
+
+        logger.info(
+            "inventory_import_two_pass_completed",
+            total_success=total_success,
+            total_failed=total_failed,
+            total_skipped=total_skipped,
+        )
+
+        return all_results
 
 
 class InventoryGroupImporter(ResourceImporter):
@@ -1980,6 +2377,15 @@ class InventorySourceImporter(ResourceImporter):
     - source_project (optional, for SCM sources)
     - credential (optional, for authentication)
     - execution_environment (optional, for custom execution environments)
+
+    Special handling for auto-created sources:
+    - When a constructed inventory is created, AAP auto-generates an inventory
+      source named "Auto-created source for: <name>". These sources carry the
+      constructed inventory plugin configuration (source_vars, limit).
+    - Instead of creating a new source (which fails with "Cannot create Inventory
+      Source for Smart or Constructed Inventories"), this importer detects auto-created
+      sources and updates the existing auto-created source on the target with
+      the source_vars and limit from the exported data.
     """
 
     DEPENDENCIES = {
@@ -1988,6 +2394,233 @@ class InventorySourceImporter(ResourceImporter):
         "credential": "credentials",
         "execution_environment": "execution_environments",
     }
+
+    # Prefix used by AAP for auto-created constructed inventory sources
+    AUTO_CREATED_SOURCE_PREFIX = "Auto-created source for: "
+
+    async def import_resource(
+        self,
+        resource_type: str,
+        source_id: int,
+        data: dict[str, Any],
+        resolve_dependencies: bool = True,
+    ) -> dict[str, Any] | None:
+        """Import inventory source with special handling for auto-created sources.
+
+        Auto-created sources (from constructed inventories) are detected by their
+        name prefix "Auto-created source for: ". Instead of creating them (which
+        fails), we find the auto-created source on the target and update it with
+        source_vars and limit from the exported data.
+
+        Args:
+            resource_type: Type of resource being imported
+            source_id: Source resource ID
+            data: Transformed resource data
+            resolve_dependencies: Whether to resolve FK dependencies
+
+        Returns:
+            Created/updated resource data or None if skipped/failed
+        """
+        source_name = data.get("name", "")
+
+        # Detect auto-created inventory sources for constructed inventories
+        if source_name.startswith(self.AUTO_CREATED_SOURCE_PREFIX):
+            return await self._handle_auto_created_source(
+                resource_type, source_id, data, resolve_dependencies
+            )
+
+        # Standard import for non-auto-created sources
+        return await super().import_resource(
+            resource_type, source_id, data, resolve_dependencies
+        )
+
+    async def _handle_auto_created_source(
+        self,
+        resource_type: str,
+        source_id: int,
+        data: dict[str, Any],
+        resolve_dependencies: bool = True,
+    ) -> dict[str, Any] | None:
+        """Handle auto-created inventory source for a constructed inventory.
+
+        Instead of creating a new source (which would fail), finds the
+        auto-created source on the target and updates it with source_vars
+        and limit from the exported data.
+
+        Args:
+            resource_type: Type of resource being imported
+            source_id: Source resource ID
+            data: Transformed resource data
+            resolve_dependencies: Whether to resolve FK dependencies
+
+        Returns:
+            Updated resource data or None if skipped/failed
+        """
+        # Check if already imported
+        if self.state.is_migrated(resource_type, source_id):
+            logger.debug(
+                "auto_created_source_already_imported",
+                resource_type=resource_type,
+                source_id=source_id,
+            )
+            self.stats["skipped_count"] += 1
+            return None
+
+        source_name = data.get("name", "")
+
+        # Mark as in progress
+        self.state.mark_in_progress(
+            resource_type=resource_type,
+            source_id=source_id,
+            source_name=source_name,
+            phase="import",
+        )
+
+        try:
+            # Resolve inventory dependency to get target inventory ID
+            if resolve_dependencies:
+                data = await self._resolve_dependencies(resource_type, data)
+
+            target_inventory_id = data.get("inventory")
+            if not target_inventory_id:
+                logger.warning(
+                    "auto_created_source_missing_inventory",
+                    source_id=source_id,
+                    source_name=source_name,
+                )
+                self.stats["error_count"] += 1
+                self.state.mark_failed(
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    error_message="Could not resolve inventory for auto-created source",
+                )
+                return None
+
+            # Find the auto-created source on the target by querying inventory sources
+            # for this specific inventory
+            try:
+                target_sources = await self.client.list_resources(
+                    "inventory_sources",
+                    filters={"inventory": target_inventory_id},
+                )
+            except Exception as e:
+                logger.error(
+                    "auto_created_source_lookup_failed",
+                    source_id=source_id,
+                    target_inventory_id=target_inventory_id,
+                    error=str(e),
+                )
+                self.stats["error_count"] += 1
+                self.state.mark_failed(
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    error_message=f"Failed to look up auto-created source: {str(e)}",
+                )
+                return None
+
+            # Find the auto-created source (name starts with prefix)
+            auto_source = None
+            for src in target_sources:
+                if src.get("name", "").startswith(self.AUTO_CREATED_SOURCE_PREFIX):
+                    auto_source = src
+                    break
+
+            if not auto_source:
+                logger.warning(
+                    "auto_created_source_not_found_on_target",
+                    source_id=source_id,
+                    source_name=source_name,
+                    target_inventory_id=target_inventory_id,
+                    message="Auto-created source not found; the inventory may not be constructed",
+                )
+                # Mark as skipped since we can't create it for constructed inventories
+                self.state.mark_skipped(
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    reason=f"Auto-created source not found on target for inventory {target_inventory_id}",
+                    source_name=source_name,
+                )
+                self.stats["skipped_count"] += 1
+                return None
+
+            # Build update payload with source_vars and limit from exported data
+            update_data = {}
+            if "source_vars" in data and data["source_vars"]:
+                update_data["source_vars"] = data["source_vars"]
+            if "limit" in data and data["limit"]:
+                update_data["limit"] = data["limit"]
+            if "verbosity" in data:
+                update_data["verbosity"] = data["verbosity"]
+            if "update_cache_timeout" in data:
+                update_data["update_cache_timeout"] = data["update_cache_timeout"]
+            if "update_on_launch" in data:
+                update_data["update_on_launch"] = data["update_on_launch"]
+
+            if update_data:
+                result = await self.client.update_resource(
+                    "inventory_sources",
+                    auto_source["id"],
+                    update_data,
+                )
+                logger.info(
+                    "auto_created_source_updated",
+                    source_id=source_id,
+                    source_name=source_name,
+                    target_id=auto_source["id"],
+                    updated_fields=list(update_data.keys()),
+                )
+            else:
+                result = auto_source
+                logger.info(
+                    "auto_created_source_mapped_no_update",
+                    source_id=source_id,
+                    source_name=source_name,
+                    target_id=auto_source["id"],
+                    message="No source_vars or limit to update",
+                )
+
+            # Save ID mapping and mark completed
+            self.state.save_id_mapping(
+                resource_type=resource_type,
+                source_id=source_id,
+                target_id=auto_source["id"],
+                source_name=source_name,
+                target_name=auto_source.get("name"),
+            )
+            self.state.mark_completed(
+                resource_type=resource_type,
+                source_id=source_id,
+                target_id=auto_source["id"],
+                target_name=auto_source.get("name"),
+                source_name=source_name,
+            )
+
+            self.stats["imported_count"] += 1
+            return result
+
+        except Exception as e:
+            logger.error(
+                "auto_created_source_import_failed",
+                source_id=source_id,
+                source_name=data.get("name"),
+                error=str(e),
+            )
+            self.stats["error_count"] += 1
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=f"{type(e).__name__}: {str(e)}",
+            )
+            self.import_errors.append(
+                {
+                    "resource_type": resource_type,
+                    "source_id": source_id,
+                    "name": data.get("name", "unknown"),
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                }
+            )
+            return None
 
     async def import_inventory_sources(
         self,
@@ -2601,6 +3234,19 @@ class WorkflowNodeImporter(ResourceImporter):
             phase="import",
         )
 
+        # Dispatch specialised node types to dedicated handlers.
+        # This keeps all new node-type logic isolated in new methods and leaves
+        # the existing UJT resolution path below completely untouched.
+        ujt_unified_type = (
+            (data.get("summary_fields") or {})
+            .get("unified_job_template", {})
+            .get("unified_job_type")
+        )
+        if ujt_unified_type == "workflow_approval":
+            return await self._handle_approval_node(source_id, data, workflow_target_id)
+        if ujt_unified_type == "system_job":
+            return await self._handle_system_job_node(source_id, data, workflow_target_id)
+
         try:
             # Resolve unified_job_template dependency only
             # (workflow_job_template is already the target ID)
@@ -2815,6 +3461,230 @@ class WorkflowNodeImporter(ResourceImporter):
                 }
             )
 
+            return None
+
+    # ── Specialised node-type handlers ───────────────────────────────────────
+    # These methods handle node types that require a different API flow from the
+    # standard UJT resolution path in import_resource().  All new code — the
+    # existing import_resource() logic above is untouched.
+
+    async def _handle_approval_node(
+        self,
+        source_id: int,
+        data: dict[str, Any],
+        workflow_target_id: int,
+    ) -> dict[str, Any] | None:
+        """Create an approval workflow node via the two-step AAP API.
+
+        AAP approval nodes cannot be created by setting unified_job_template
+        directly.  The correct flow is:
+          1. POST node without unified_job_template
+          2. POST to create_approval_template to create and link the template
+        """
+        resource_type = "workflow_nodes"
+        ujt_summary = (
+            (data.get("summary_fields") or {}).get("unified_job_template") or {}
+        )
+        approval_name = ujt_summary.get("name") or data.get("identifier", "approval")
+        approval_timeout = ujt_summary.get("timeout") or 0
+        approval_description = ujt_summary.get("description") or ""
+
+        # Build node payload — omit unified_job_template and read-only fields
+        skip_fields = {
+            "id", "type", "url", "related", "summary_fields", "created",
+            "modified", "natural_key", "unified_job_template",
+            "success_nodes", "failure_nodes", "always_nodes",
+            "_source_id", "_source_workflow_id", "_ujt_resource_type",
+        }
+        resolved = {k: v for k, v in data.items()
+                    if k not in skip_fields and v is not None}
+
+        nested_endpoint = (
+            f"workflow_job_templates/{workflow_target_id}/workflow_nodes/"
+        )
+
+        try:
+            result = await self.client.post(nested_endpoint, json_data=resolved)
+            node_id = result["id"]
+
+            # Step 2: create and link the approval template
+            await self.client.post(
+                f"workflow_job_template_nodes/{node_id}/create_approval_template/",
+                json_data={
+                    "name": approval_name,
+                    "description": approval_description,
+                    "timeout": approval_timeout,
+                },
+            )
+
+            self.state.mark_completed(
+                resource_type=resource_type,
+                source_id=source_id,
+                target_id=node_id,
+                target_name=result.get("identifier", "unknown"),
+            )
+            self.stats["imported_count"] += 1
+
+            logger.info(
+                "workflow_approval_node_imported",
+                source_id=source_id,
+                target_node_id=node_id,
+                approval_name=approval_name,
+            )
+
+            result["_edge_data"] = {
+                "success_nodes": data.get("success_nodes", []),
+                "failure_nodes": data.get("failure_nodes", []),
+                "always_nodes": data.get("always_nodes", []),
+            }
+            result["_source_id"] = source_id
+            return result
+
+        except Exception as e:
+            error_msg = f"Failed to import approval node: {e}"
+            logger.error(
+                "workflow_approval_node_import_failed",
+                source_id=source_id,
+                error=str(e),
+            )
+            self.stats["error_count"] += 1
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=error_msg,
+            )
+            self.import_errors.append({
+                "resource_type": resource_type,
+                "source_id": source_id,
+                "name": data.get("identifier", "unknown"),
+                "error": error_msg,
+                "error_type": type(e).__name__,
+            })
+            return None
+
+    async def _handle_system_job_node(
+        self,
+        source_id: int,
+        data: dict[str, Any],
+        workflow_target_id: int,
+    ) -> dict[str, Any] | None:
+        """Create a workflow node that references a system_job_template.
+
+        System job templates (Cleanup Activity Stream, etc.) are pre-existing
+        on every AAP instance with consistent names but potentially different
+        IDs.  Resolved by name lookup on the target rather than id_mappings.
+        """
+        resource_type = "workflow_nodes"
+        ujt_summary = (
+            (data.get("summary_fields") or {}).get("unified_job_template") or {}
+        )
+        ujt_name = ujt_summary.get("name")
+        ujt_source_id = data.get("unified_job_template")
+
+        # Look up the system_job_template on target by name
+        target_ujt_id = None
+        if ujt_name:
+            try:
+                results = await self.client.get(
+                    "system_job_templates/",
+                    params={"name": ujt_name},
+                )
+                resources = (results or {}).get("results", [])
+                if resources:
+                    target_ujt_id = resources[0]["id"]
+            except Exception as e:
+                logger.warning(
+                    "system_job_template_lookup_failed",
+                    ujt_name=ujt_name,
+                    error=str(e),
+                )
+
+        if not target_ujt_id:
+            error_msg = (
+                f"Cannot import workflow node: system_job_template '{ujt_name}' "
+                f"(source_id={ujt_source_id}) not found on target"
+            )
+            logger.error(
+                "workflow_node_system_job_not_found",
+                source_id=source_id,
+                ujt_name=ujt_name,
+            )
+            self.stats["error_count"] += 1
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=error_msg,
+            )
+            self.import_errors.append({
+                "resource_type": resource_type,
+                "source_id": source_id,
+                "name": data.get("identifier", "unknown"),
+                "error": error_msg,
+                "error_type": "DependencyError",
+            })
+            return None
+
+        # Build node payload with resolved target UJT ID
+        skip_fields = {
+            "id", "type", "url", "related", "summary_fields", "created",
+            "modified", "natural_key", "success_nodes", "failure_nodes",
+            "always_nodes", "_source_id", "_source_workflow_id",
+            "_ujt_resource_type",
+        }
+        resolved = {k: v for k, v in data.items()
+                    if k not in skip_fields and v is not None}
+        resolved["unified_job_template"] = target_ujt_id
+
+        nested_endpoint = (
+            f"workflow_job_templates/{workflow_target_id}/workflow_nodes/"
+        )
+
+        try:
+            result = await self.client.post(nested_endpoint, json_data=resolved)
+
+            self.state.mark_completed(
+                resource_type=resource_type,
+                source_id=source_id,
+                target_id=result["id"],
+                target_name=result.get("identifier", "unknown"),
+            )
+            self.stats["imported_count"] += 1
+
+            logger.info(
+                "workflow_system_job_node_imported",
+                source_id=source_id,
+                target_id=result["id"],
+                ujt_name=ujt_name,
+            )
+
+            result["_edge_data"] = {
+                "success_nodes": data.get("success_nodes", []),
+                "failure_nodes": data.get("failure_nodes", []),
+                "always_nodes": data.get("always_nodes", []),
+            }
+            result["_source_id"] = source_id
+            return result
+
+        except Exception as e:
+            error_msg = f"Failed to import system job node: {e}"
+            logger.error(
+                "workflow_system_job_node_import_failed",
+                source_id=source_id,
+                error=str(e),
+            )
+            self.stats["error_count"] += 1
+            self.state.mark_failed(
+                resource_type=resource_type,
+                source_id=source_id,
+                error_message=error_msg,
+            )
+            self.import_errors.append({
+                "resource_type": resource_type,
+                "source_id": source_id,
+                "name": data.get("identifier", "unknown"),
+                "error": error_msg,
+                "error_type": type(e).__name__,
+            })
             return None
 
     async def import_workflow_nodes(

@@ -962,7 +962,14 @@ class DataTransformer:
 
 
 class InventoryTransformer(DataTransformer):
-    """Transformer for inventory resources."""
+    """Transformer for inventory resources.
+
+    Handles regular, smart, and constructed inventories.
+    For constructed inventories, preserves the _input_inventory_ids field
+    (list of source inventory IDs) through transformation. These IDs are
+    resolved to target IDs during import, after regular inventories have
+    been imported and their ID mappings are available.
+    """
 
     DEPENDENCIES = {
         "organization": "organizations",
@@ -973,6 +980,10 @@ class InventoryTransformer(DataTransformer):
         self, data: dict[str, Any], resource_type: str
     ) -> dict[str, Any]:
         """Apply inventory-specific transformations.
+
+        For constructed inventories (kind="constructed"):
+        - Preserves _input_inventory_ids through transformation
+        - These source IDs are resolved to target IDs during import
 
         Args:
             data: Inventory data
@@ -1003,6 +1014,19 @@ class InventoryTransformer(DataTransformer):
                 )
                 data["variables"] = "{}"
             # If already a string, leave as-is (already in correct format)
+
+        # Log constructed inventory details for visibility
+        if data.get("kind") == "constructed":
+            input_ids = data.get("_input_inventory_ids", [])
+            logger.info(
+                "transforming_constructed_inventory",
+                resource_type="inventories",
+                source_id=source_id,
+                source_name=data.get("name"),
+                input_inventory_count=len(input_ids),
+                input_inventory_ids=input_ids,
+                message="input_inventory_ids will be resolved to target IDs during import",
+            )
 
         return data
 

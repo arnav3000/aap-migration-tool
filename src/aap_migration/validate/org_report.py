@@ -173,6 +173,10 @@ def filter_validation_result_for_org(
         entry for entry in result.sync_entries
         if belongs_to_org(entry, org_name)
     ]
+    workflow_comparisons = [
+        item for item in result.workflow_comparisons
+        if not item.org or item.org == org_name
+    ]
 
     per_type = apply_migration_buckets(per_type, object_inventory)
 
@@ -189,6 +193,7 @@ def filter_validation_result_for_org(
         # Org-scoped runs skip auditor; keep empty on slices too
         auditor_cross_check=result.auditor_cross_check,
         sync_entries=sync_entries,
+        workflow_comparisons=workflow_comparisons,
     )
 
 

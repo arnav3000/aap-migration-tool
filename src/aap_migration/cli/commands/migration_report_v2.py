@@ -140,7 +140,7 @@ def normalize_error_key(error_message: str) -> str:
 # ---------------------------------------------------------------------------
 _EXPORT_META_FIELDS = {
     "created", "modified", "last_job_run", "last_job_failed",
-    "next_job_run", "last_update_failed",
+    "next_job_run", "last_update_failed", "last_updated",
 }
 
 
@@ -237,8 +237,13 @@ _HUMAN_READABLE_ERRORS: dict[str, str] = {
 def _build_export_lookup(export_dir: Path) -> dict:
     """Build lookup table from export files: (resource_type, source_id) -> metadata.
 
-    Extracts: modified, modified_by, created, last_job_run, last_job_failed,
-    next_job_run, sync_status (from export 'status' field).
+    Extracts common fields (modified, modified_by, created, last_job_run,
+    last_job_failed, next_job_run, last_update_failed, last_updated,
+    sync_status) plus resource-type-specific fields used for staleness
+    classification: ask_inventory_on_launch (JTs), source/source_project
+    (inventory sources), schedule_enabled/next_run (schedules),
+    total_hosts/pending_deletion/inventory_sources_with_failures (inventories),
+    and wf_total_nodes/wf_null_node_count/wf_null_node_ids (workflows).
     """
     lookup: dict = {}
     if not export_dir.is_dir():
@@ -316,6 +321,45 @@ def _build_export_lookup(export_dir: Path) -> dict:
                     scm_val = item.get(scm_field)
                     if scm_val:
                         meta[scm_field] = scm_val
+
+                if resource_type == "workflow_job_templates":
+                    nodes = item.get("nodes", [])
+                    null_nodes = [
+                        n for n in nodes
+                        if isinstance(n, dict) and n.get("unified_job_template") is None
+                    ]
+                    meta["wf_total_nodes"] = len(nodes)
+                    meta["wf_null_node_count"] = len(null_nodes)
+                    meta["wf_null_node_ids"] = [n.get("id") for n in null_nodes]
+
+                if resource_type == "job_templates":
+                    ask_inv = item.get("ask_inventory_on_launch")
+                    if ask_inv is not None:
+                        meta["ask_inventory_on_launch"] = ask_inv
+
+                if resource_type == "inventory_sources":
+                    for is_field in ("source", "source_project"):
+                        is_val = item.get(is_field)
+                        if is_val is not None:
+                            meta[is_field] = is_val
+
+                if resource_type == "schedules":
+                    sched_enabled = item.get("enabled")
+                    if sched_enabled is not None:
+                        meta["schedule_enabled"] = sched_enabled
+                    next_run = item.get("next_run")
+                    if next_run is not None:
+                        meta["next_run"] = next_run
+
+                if resource_type == "inventories":
+                    for inv_field in (
+                        "total_hosts", "has_active_failures",
+                        "pending_deletion", "total_inventory_sources",
+                        "inventory_sources_with_failures",
+                    ):
+                        inv_val = item.get(inv_field)
+                        if inv_val is not None:
+                            meta[inv_field] = inv_val
 
                 lookup[(resource_type, sid)] = meta
 
@@ -522,12 +566,10 @@ _MISSING_DEPENDENCY_PATTERNS = [
 # Each entry maps a resource type to a list of (metadata_key, human_label)
 # tuples.  If any metadata_key is absent or empty the resource is considered
 # "Probably Stale" because a mandatory linked object is missing.
+# NOTE: inventory_sources credential check is handled inline (source-aware).
 _REQUIRED_FIELDS_BY_TYPE: dict[str, list[tuple[str, str]]] = {
     "job_templates": [
         ("project_name", "project"),
-    ],
-    "inventory_sources": [
-        ("credential_names", "credential"),
     ],
     "workflow_job_template_nodes": [
         ("project_name", "unified_job_template"),
@@ -538,16 +580,32 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, list[tuple[str, str]]] = {
 def _determine_resource_status(resource: dict) -> str:
     """Classify a resource's staleness.
 
-    Rules:
-    - **projects**: 'Probably Stale' when last modified > 1 year ago AND
-      sync_status is in a failed state.
+    Rules (evaluated top-to-bottom; first match wins for early-return
+    branches, otherwise the function falls through to generic checks):
+
+    - **projects**: 'Probably Stale' when ``last_job_run`` (or ``modified``
+      as fallback) is > 1 year ago AND the sync status indicates failure
+      (``status`` in failed/error, or ``last_update_failed`` is True).
+    - **job_templates**: 'Probably Stale' when the project is missing
+      (required-field check), OR when never run with no playbook, OR when
+      ``last_job_run`` > 1 year ago AND ``last_job_failed`` is True, OR
+      when no inventory is assigned and ``ask_inventory_on_launch`` is False.
+    - **inventory_sources**: 'Probably Stale' when a cloud/API source has
+      no credential (source-type-aware), OR when sync failed / update failed
+      AND last sync > 1 year ago, OR when status is 'never updated'.
+    - **workflow_job_templates**: 'Probably Stale' when the workflow has
+      zero nodes, OR one or more nodes have ``unified_job_template`` null,
+      OR ``last_job_run`` > 1 year ago, OR last run failed AND > 6 months
+      ago, OR never run AND ``modified`` > 1 year ago.
+    - **schedules**: 'Probably Stale' when disabled AND ``modified``
+      > 1 year ago, OR disabled AND no ``next_run``.
+    - **inventories**: 'Probably Stale' when ``pending_deletion`` is True,
+      OR empty (0 hosts) AND ``modified`` > 1 year ago, OR all inventory
+      sources are failing.
     - **all resources**: 'Probably Stale' when a required field for that
-      resource type has no linked object assigned (e.g. a job_template with
-      no project).  Required fields are defined in ``_REQUIRED_FIELDS_BY_TYPE``
-      based on the AAP 2.4 API documentation.
+      resource type has no linked object assigned.
     - **all resources**: 'Probably Stale' when the migration error message
-      indicates a missing dependency (playbook not found, project missing,
-      credential missing, etc.).
+      indicates a missing dependency.
     - Otherwise 'Active' or 'Unknown' (if no modified date).
     """
     resource_type = resource.get("resource_type", "")
@@ -555,21 +613,122 @@ def _determine_resource_status(resource: dict) -> str:
     error_msg = (resource.get("error_message") or "").lower()
     sync_status = (resource.get("sync_status") or "").lower()
 
-    # --- Projects: age + sync failure ---
+    now = datetime.now(tz=timezone.utc)
+    one_year_ago = now - timedelta(days=365)
+    six_months_ago = now - timedelta(days=180)
+
+    def _parse_dt(dt_str: str):
+        """Parse an ISO timestamp, return None on failure."""
+        if not dt_str:
+            return None
+        try:
+            return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
+    # --- Projects: age + sync/update failure ---
     if resource_type == "projects":
         if not modified_str:
             return "Unknown"
-        try:
-            modified_dt = datetime.fromisoformat(modified_str.replace("Z", "+00:00"))
-            one_year_ago = datetime.now(tz=timezone.utc) - timedelta(days=365)
-            is_old = modified_dt < one_year_ago
-        except (ValueError, TypeError):
-            is_old = False
+        age_field = resource.get("last_job_run") or modified_str
+        age_dt = _parse_dt(age_field)
+        is_old = age_dt is not None and age_dt < one_year_ago
 
         sync_failed = sync_status in ("failed", "error")
-        if is_old and sync_failed:
+        update_failed = resource.get("last_update_failed", False)
+        if is_old and (sync_failed or update_failed):
             return "Probably Stale"
         return "Active" if modified_str else "Unknown"
+
+    # --- Workflow Job Templates ---
+    if resource_type == "workflow_job_templates":
+        total_nodes = resource.get("wf_total_nodes", -1)
+        null_count = resource.get("wf_null_node_count", 0)
+
+        if total_nodes == 0:
+            return "Probably Stale"
+        if null_count > 0:
+            return "Probably Stale"
+
+        last_run_str = resource.get("last_job_run", "")
+        last_failed = resource.get("last_job_failed", False)
+        lr_dt = _parse_dt(last_run_str)
+        if lr_dt is not None:
+            if lr_dt < one_year_ago:
+                return "Probably Stale"
+            if last_failed and lr_dt < six_months_ago:
+                return "Probably Stale"
+
+        if not last_run_str:
+            mod_dt = _parse_dt(modified_str)
+            if mod_dt is not None and mod_dt < one_year_ago:
+                return "Probably Stale"
+
+    # --- Job Templates: dedicated checks before generic required-field ---
+    if resource_type == "job_templates":
+        last_run_str = resource.get("last_job_run", "")
+        last_failed = resource.get("last_job_failed", False)
+
+        if not last_run_str and not resource.get("playbook"):
+            return "Probably Stale"
+
+        if last_run_str:
+            lr_dt = _parse_dt(last_run_str)
+            if lr_dt is not None and lr_dt < one_year_ago and last_failed:
+                return "Probably Stale"
+
+        inv_name = resource.get("inventory_name", "")
+        if (not inv_name or inv_name == "N/A"):
+            if not resource.get("ask_inventory_on_launch", False):
+                return "Probably Stale"
+
+    # --- Inventory Sources: source-aware credential + status checks ---
+    if resource_type == "inventory_sources":
+        source_type = resource.get("source", "")
+        needs_credential = source_type not in ("scm", "file", "constructed", "")
+        if needs_credential:
+            cred = resource.get("credential_names", "")
+            if not cred or cred == "N/A":
+                return "Probably Stale"
+
+        update_failed = resource.get("last_update_failed", False)
+        if update_failed or sync_status in ("failed", "error"):
+            age_str = resource.get("last_updated", "") or resource.get("last_job_run", "")
+            age_dt = _parse_dt(age_str)
+            if age_dt is not None and age_dt < one_year_ago:
+                return "Probably Stale"
+
+        if sync_status == "never updated":
+            return "Probably Stale"
+
+    # --- Schedules: disabled / expired ---
+    if resource_type == "schedules":
+        enabled = resource.get("schedule_enabled", True)
+        next_run_str = resource.get("next_run", "")
+
+        if not enabled:
+            mod_dt = _parse_dt(modified_str)
+            if mod_dt is not None and mod_dt < one_year_ago:
+                return "Probably Stale"
+
+        if not next_run_str and not enabled:
+            return "Probably Stale"
+
+    # --- Inventories: pending deletion / empty+old / all sources failing ---
+    if resource_type == "inventories":
+        if resource.get("pending_deletion", False):
+            return "Probably Stale"
+
+        total_hosts = resource.get("total_hosts", -1)
+        if total_hosts == 0:
+            mod_dt = _parse_dt(modified_str)
+            if mod_dt is not None and mod_dt < one_year_ago:
+                return "Probably Stale"
+
+        total_inv_src = resource.get("total_inventory_sources", 0)
+        fail_inv_src = resource.get("inventory_sources_with_failures", 0)
+        if total_inv_src > 0 and fail_inv_src == total_inv_src:
+            return "Probably Stale"
 
     # --- Required-field check (all non-project resource types) ---
     required_fields = _REQUIRED_FIELDS_BY_TYPE.get(resource_type, [])
@@ -827,11 +986,19 @@ def generate_enhanced_report(
                 resource["next_job_run"] = meta.get("next_job_run", "")
                 resource["sync_status"] = meta.get("sync_status", "")
                 resource["last_update_failed"] = meta.get("last_update_failed")
+                resource["last_updated"] = meta.get("last_updated", "")
 
                 for extra_key in (
                     "playbook", "project_name", "inventory_name",
                     "credential_names", "organization_name",
                     "scm_type", "scm_url", "scm_branch",
+                    "wf_total_nodes", "wf_null_node_count", "wf_null_node_ids",
+                    "ask_inventory_on_launch",
+                    "source", "source_project",
+                    "schedule_enabled", "next_run",
+                    "total_hosts", "has_active_failures",
+                    "pending_deletion", "total_inventory_sources",
+                    "inventory_sources_with_failures",
                 ):
                     if extra_key in meta:
                         resource[extra_key] = meta[extra_key]
@@ -860,6 +1027,73 @@ def generate_enhanced_report(
                             f"A duplicate {ek.replace('Duplicate ', '')} was found in the source AAP."
                             " Only the first occurrence was imported."
                         )
+
+                # Tag resources with staleness-related error categories for
+                # filter visibility.  Only applied when no migration error
+                # already occupies the error_key slot.
+                rt = resource["resource_type"]
+                if not resource.get("error_key"):
+                    if rt == "workflow_job_templates":
+                        wf_total = resource.get("wf_total_nodes", -1)
+                        wf_null = resource.get("wf_null_node_count", 0)
+                        if wf_total == 0:
+                            resource["error_key"] = "Workflow: empty (no nodes)"
+                            resource["error_explanation"] = (
+                                "This workflow has zero nodes defined. It cannot "
+                                "execute any work and is likely abandoned."
+                            )
+                            error_counter[resource["error_key"]] += 1
+                        elif wf_null > 0:
+                            resource["error_key"] = "Workflow: deleted node(s)"
+                            resource["error_explanation"] = (
+                                f"{wf_null} of {wf_total} workflow node(s) have no job template "
+                                f"assigned (unified_job_template is null). This typically means the "
+                                f"referenced job template was deleted from AAP 2.4."
+                            )
+                            error_counter[resource["error_key"]] += 1
+
+                    elif rt == "inventory_sources":
+                        is_status = (resource.get("sync_status") or "").lower()
+                        if is_status == "never updated":
+                            resource["error_key"] = "Inventory source: never synced"
+                            resource["error_explanation"] = (
+                                "This inventory source was created but has never been synced. "
+                                "It may be abandoned or misconfigured."
+                            )
+                            error_counter[resource["error_key"]] += 1
+
+                    elif rt == "schedules":
+                        sched_enabled = resource.get("schedule_enabled", True)
+                        if not sched_enabled:
+                            resource["error_key"] = "Schedule: disabled"
+                            resource["error_explanation"] = (
+                                "This schedule is disabled and will not trigger any jobs."
+                            )
+                            error_counter[resource["error_key"]] += 1
+
+                    elif rt == "inventories":
+                        if resource.get("pending_deletion", False):
+                            resource["error_key"] = "Inventory: pending deletion"
+                            resource["error_explanation"] = (
+                                "This inventory is marked for deletion on the source AAP."
+                            )
+                            error_counter[resource["error_key"]] += 1
+                        elif resource.get("total_hosts", -1) == 0:
+                            resource["error_key"] = "Inventory: empty (0 hosts)"
+                            resource["error_explanation"] = (
+                                "This inventory contains no hosts. It may be "
+                                "abandoned or was never populated."
+                            )
+                            error_counter[resource["error_key"]] += 1
+
+                    elif rt == "job_templates":
+                        if not resource.get("playbook") and not resource.get("last_job_run"):
+                            resource["error_key"] = "Job template: no playbook, never run"
+                            resource["error_explanation"] = (
+                                "This job template has no playbook assigned and has never "
+                                "been executed. It is likely a leftover or incomplete template."
+                            )
+                            error_counter[resource["error_key"]] += 1
 
                 # Determine resource staleness (needs metadata + error_message populated)
                 resource["resource_status"] = _determine_resource_status(resource)
@@ -1721,6 +1955,46 @@ function showErrorDetail(idx) {{
         b += '<div class="modal-field"><div class="field-label">Error Explanation</div><div class="field-value explanation-box">' + escapeHtml(r.error_explanation) + '</div></div>';
     }}
     b += mf('Full Error Message', r.error_message||'No error message', true);
+    if (r.resource_type === 'workflow_job_templates') {{
+        if (r.wf_total_nodes === 0) {{
+            b += '<div class="modal-field"><div class="field-label" style="color:#dc3545;">Empty Workflow</div>'
+               + '<div class="field-value" style="background:#fff5f5;border-color:#f8d7da;color:#721c24;">'
+               + 'This workflow has zero nodes defined. It cannot execute any work and is likely abandoned.'
+               + '</div></div>';
+        }} else if (r.wf_null_node_count > 0) {{
+            const nodeIds = (r.wf_null_node_ids || []).join(', ');
+            b += '<div class="modal-field"><div class="field-label" style="color:#dc3545;">Misconfigured Nodes</div>'
+               + '<div class="field-value" style="background:#fff5f5;border-color:#f8d7da;color:#721c24;">'
+               + r.wf_null_node_count + ' of ' + r.wf_total_nodes
+               + ' workflow node(s) have no job template assigned (unified_job_template is null). '
+               + 'This typically means the referenced job template was deleted from AAP 2.4.'
+               + (nodeIds ? '<br><strong>Affected node IDs:</strong> ' + nodeIds : '')
+               + '</div></div>';
+        }}
+    }}
+    if (r.resource_type === 'inventories') {{
+        if (r.pending_deletion) {{
+            b += '<div class="modal-field"><div class="field-label" style="color:#dc3545;">Pending Deletion</div>'
+               + '<div class="field-value" style="background:#fff5f5;border-color:#f8d7da;color:#721c24;">'
+               + 'This inventory is marked for deletion on the source AAP.'
+               + '</div></div>';
+        }}
+        if (r.total_hosts != null) {{
+            b += mf('Total Hosts', String(r.total_hosts));
+        }}
+        if (r.total_inventory_sources != null) {{
+            let srcInfo = String(r.total_inventory_sources) + ' source(s)';
+            if (r.inventory_sources_with_failures > 0) srcInfo += ', ' + r.inventory_sources_with_failures + ' failing';
+            b += mf('Inventory Sources', srcInfo);
+        }}
+    }}
+    if (r.resource_type === 'inventory_sources' && r.source) {{
+        b += mf('Source Type', r.source);
+    }}
+    if (r.resource_type === 'schedules') {{
+        b += mf('Schedule Enabled', r.schedule_enabled != null ? String(r.schedule_enabled) : 'N/A');
+        b += mf('Next Run', r.next_run ? r.next_run.replace('T',' ').replace('Z','') : 'None');
+    }}
     b += mf('Last Modified', r.modified?r.modified.replace('T',' ').replace('Z',''):'N/A');
     b += mf('Resource Status in AAP', r.resource_status||'Unknown');
     b += mf('Created By', r.created_by||'N/A');

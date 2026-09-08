@@ -251,6 +251,98 @@ class T3FieldParity:
 
 
 @dataclass
+class WorkflowNodeFieldRow:
+    field: str = ""
+    expected: str = ""
+    actual: str = ""
+    status: str = "match"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "field": self.field,
+            "expected": self.expected,
+            "actual": self.actual,
+            "status": self.status,
+        }
+
+
+@dataclass
+class WorkflowNodeRow:
+    identifier: str = ""
+    src_kind: str = ""
+    tgt_kind: str = ""
+    src_ref: str = ""
+    tgt_ref: str = ""
+    overrides_changed: list[str] = field(default_factory=list)
+    field_rows: list[WorkflowNodeFieldRow] = field(default_factory=list)
+    status: str = "match"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "identifier": self.identifier,
+            "src_kind": self.src_kind,
+            "tgt_kind": self.tgt_kind,
+            "src_ref": self.src_ref,
+            "tgt_ref": self.tgt_ref,
+            "overrides_changed": list(self.overrides_changed),
+            "field_rows": [r.to_dict() for r in self.field_rows],
+            "status": self.status,
+        }
+
+
+@dataclass
+class WorkflowEdgeRow:
+    from_node: str = ""
+    to_node: str = ""
+    expected_type: str = ""
+    actual_type: str = ""
+    status: str = "match"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "from": self.from_node,
+            "to": self.to_node,
+            "expected_type": self.expected_type,
+            "actual_type": self.actual_type,
+            "status": self.status,
+        }
+
+
+@dataclass
+class WorkflowCompareResult:
+    workflow_key: str = ""
+    workflow: str = ""
+    org: str = ""
+    src_nodes: int = 0
+    tgt_nodes: int = 0
+    src_edges: int = 0
+    tgt_edges: int = 0
+    node_diffs: int = 0
+    edge_diffs: int = 0
+    field_diffs: int = 0
+    verdict: str = "match"
+    node_rows: list[WorkflowNodeRow] = field(default_factory=list)
+    edge_rows: list[WorkflowEdgeRow] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "workflow_key": self.workflow_key,
+            "workflow": self.workflow,
+            "org": self.org,
+            "src_nodes": self.src_nodes,
+            "tgt_nodes": self.tgt_nodes,
+            "src_edges": self.src_edges,
+            "tgt_edges": self.tgt_edges,
+            "node_diffs": self.node_diffs,
+            "edge_diffs": self.edge_diffs,
+            "field_diffs": self.field_diffs,
+            "verdict": self.verdict,
+            "node_rows": [r.to_dict() for r in self.node_rows],
+            "edge_rows": [r.to_dict() for r in self.edge_rows],
+        }
+
+
+@dataclass
 class PerTypeResult:
     resource_type: str = ""
     display_name: str = ""
@@ -483,6 +575,7 @@ class ValidationResult:
         default_factory=AuditorCrossCheck
     )
     sync_entries: list[SyncEntry] = field(default_factory=list)
+    workflow_comparisons: list[WorkflowCompareResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -495,6 +588,8 @@ class ValidationResult:
         }
         if self.sync_entries:
             d["sync_entries"] = [e.to_dict() for e in self.sync_entries]
+        if self.workflow_comparisons:
+            d["workflow_comparisons"] = [w.to_dict() for w in self.workflow_comparisons]
         return d
 
     def inventory_to_dict(self) -> dict[str, list[dict[str, Any]]]:

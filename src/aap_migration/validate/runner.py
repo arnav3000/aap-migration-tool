@@ -62,6 +62,10 @@ from aap_migration.validate.models import (
     T4HostSampling,
     ValidationMetadata,
     ValidationResult,
+    WorkflowCompareResult,
+    WorkflowEdgeRow,
+    WorkflowNodeFieldRow,
+    WorkflowNodeRow,
 )
 
 logger = get_logger(__name__)
@@ -1244,26 +1248,40 @@ async def _fetch_live_org_scoped(
             target_client, "schedules", "unified_job_template", parent_ids,
         )
 
-    if node_types:
+    if node_types or "workflow_job_templates" in type_set:
         if not fetched.get("workflow_job_templates"):
             rows = await _fetch_by_organization_ids(
                 target_client, "workflow_job_templates", org_ids,
             )
             fetched["workflow_job_templates"] = rows
-        nodes: list[dict] = []
-        for wjt in fetched.get("workflow_job_templates", []):
-            wid = _object_target_id(wjt)
-            if wid is None:
-                continue
-            page = await _fetch_related_page(
-                target_client, f"workflow_job_templates/{wid}/workflow_nodes/",
-            )
-            nodes.extend(page)
-        nodes = _dedupe_by_id(nodes)
+        nodes = await _fetch_workflow_nodes_for_templates(
+            target_client, fetched.get("workflow_job_templates", []),
+        )
+        fetched["workflow_nodes"] = nodes
         for ntype in node_types:
             fetched[ntype] = nodes
 
-    return {t: fetched.get(t, []) for t in types}
+    result = {t: fetched.get(t, []) for t in types}
+    if fetched.get("workflow_nodes") is not None:
+        result["workflow_nodes"] = fetched["workflow_nodes"]
+    return result
+
+
+async def _fetch_workflow_nodes_for_templates(
+    target_client: Any,
+    workflows: list[dict],
+) -> list[dict]:
+    """Fetch workflow nodes via nested WJT endpoints (not a flat list API)."""
+    nodes: list[dict] = []
+    for wjt in workflows:
+        wid = _object_target_id(wjt)
+        if wid is None:
+            continue
+        page = await _fetch_related_page(
+            target_client, f"workflow_job_templates/{wid}/workflow_nodes/",
+        )
+        nodes.extend(page)
+    return _dedupe_by_id(nodes)
 
 
 async def _fetch_live_all_types(
@@ -1272,8 +1290,23 @@ async def _fetch_live_all_types(
 ) -> dict[str, list[dict]]:
     """Unscoped live fetch: list every type in full."""
     fetched: dict[str, list[dict]] = {}
+    type_set = set(types)
+    node_types = type_set & WORKFLOW_NODE_TYPES
     for rtype in types:
+        if rtype in WORKFLOW_NODE_TYPES:
+            continue
         fetched[rtype] = await _list_resources_safe(target_client, rtype)
+
+    if node_types or "workflow_job_templates" in type_set:
+        workflows = fetched.get("workflow_job_templates")
+        if workflows is None:
+            workflows = await _list_resources_safe(target_client, "workflow_job_templates")
+            fetched["workflow_job_templates"] = workflows
+        nodes = await _fetch_workflow_nodes_for_templates(target_client, workflows)
+        fetched["workflow_nodes"] = nodes
+        for ntype in node_types:
+            fetched[ntype] = nodes
+
     return fetched
 
 
@@ -1981,6 +2014,325 @@ def _build_sync_entries(
     return entries
 
 
+def _node_identifier(node: dict) -> str:
+    return str(node.get("identifier") or node.get("name") or node.get("id") or "")
+
+
+def _workflow_node_kind(node: dict) -> str:
+    ujt = (node.get("summary_fields") or {}).get("unified_job_template")
+    if isinstance(ujt, dict):
+        ntype = str(ujt.get("type") or "").strip()
+        if ntype:
+            return ntype
+        ujt_kind = str(ujt.get("unified_job_type") or "").strip()
+        if ujt_kind == "job":
+            return "job_template"
+        if ujt_kind == "workflow_job":
+            return "workflow_job_template"
+        if ujt_kind in ("workflow_approval", "approval"):
+            return "approval"
+        if ujt_kind == "project_update":
+            return "project"
+    if node.get("unified_job_template"):
+        return "job_template"
+    return "approval"
+
+
+def _workflow_node_ref(node: dict) -> str:
+    kind = _workflow_node_kind(node)
+    if kind == "approval":
+        return ""
+    ujt = (node.get("summary_fields") or {}).get("unified_job_template")
+    if not isinstance(ujt, dict):
+        return ""
+    nname = str(ujt.get("name") or "").strip()
+    if not nname:
+        return ""
+    return f"{kind}/{nname}" if kind else nname
+
+
+_WORKFLOW_NODE_OVERRIDE_FIELDS = (
+    "inventory",
+    "execution_environment",
+    "extra_data",
+    "limit",
+    "job_tags",
+    "skip_tags",
+    "verbosity",
+    "job_type",
+    "scm_branch",
+    "forks",
+    "timeout",
+)
+
+
+def _workflow_node_overrides(node: dict) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for field in _WORKFLOW_NODE_OVERRIDE_FIELDS:
+        if field not in node:
+            continue
+        val = node.get(field)
+        if val in (None, "", [], {}):
+            continue
+        out[field] = json.dumps(val, sort_keys=True, default=str)
+    return out
+
+
+def _workflow_node_field_display(node: dict | None, field: str) -> str:
+    if node is None:
+        return "—"
+    if field == "presence":
+        return "present"
+    if field == "kind":
+        return _workflow_node_kind(node) or "—"
+    if field == "unified_job_template":
+        return _workflow_node_ref(node) or "—"
+    if field in ("inventory", "execution_environment"):
+        sf = (node.get("summary_fields") or {}).get(field)
+        if isinstance(sf, dict) and sf.get("name"):
+            return str(sf["name"])
+    if field not in node:
+        return "—"
+    val = node.get(field)
+    if val in (None, "", [], {}):
+        return "—"
+    if isinstance(val, (dict, list)):
+        return json.dumps(val, sort_keys=True, default=str)
+    return str(val)
+
+
+def _build_workflow_node_field_rows(
+    src_node: dict | None,
+    tgt_node: dict | None,
+    src_kind: str,
+    tgt_kind: str,
+    src_ref: str,
+    tgt_ref: str,
+    node_status: str,
+) -> list[WorkflowNodeFieldRow]:
+    rows: list[WorkflowNodeFieldRow] = []
+
+    if src_node is None or tgt_node is None:
+        rows.append(
+            WorkflowNodeFieldRow(
+                field="presence",
+                expected="present" if src_node else "—",
+                actual="present" if tgt_node else "—",
+                status="mismatch",
+            )
+        )
+
+    if src_kind != tgt_kind:
+        rows.append(
+            WorkflowNodeFieldRow(
+                field="kind",
+                expected=src_kind or "—",
+                actual=tgt_kind or "—",
+                status="mismatch",
+            )
+        )
+
+    if src_ref != tgt_ref:
+        rows.append(
+            WorkflowNodeFieldRow(
+                field="unified_job_template",
+                expected=src_ref or "—",
+                actual=tgt_ref or "—",
+                status="mismatch",
+            )
+        )
+
+    src_overrides = _workflow_node_overrides(src_node) if src_node else {}
+    tgt_overrides = _workflow_node_overrides(tgt_node) if tgt_node else {}
+    override_status = "changed" if node_status == "changed" else "mismatch"
+    for key in sorted(set(src_overrides) | set(tgt_overrides)):
+        if src_overrides.get(key) == tgt_overrides.get(key):
+            continue
+        rows.append(
+            WorkflowNodeFieldRow(
+                field=key,
+                expected=_workflow_node_field_display(src_node, key),
+                actual=_workflow_node_field_display(tgt_node, key),
+                status=override_status,
+            )
+        )
+
+    return rows
+
+
+def _extract_workflow_nodes_from_export(workflow: dict) -> list[dict]:
+    for key in ("_workflow_nodes", "nodes"):
+        raw = workflow.get(key)
+        if isinstance(raw, list):
+            return [n for n in raw if isinstance(n, dict)]
+    return []
+
+
+def _build_edge_map(nodes: list[dict]) -> tuple[dict[tuple[str, str], str], int]:
+    """Map (from_identifier, to_identifier) → edge type (success/failure/always)."""
+    id_to_ident: dict[int, str] = {}
+    for node in nodes:
+        nid = _object_source_id(node)
+        ident = _node_identifier(node)
+        if nid is not None and ident:
+            id_to_ident[nid] = ident
+    edge_map: dict[tuple[str, str], str] = {}
+    edge_count = 0
+    for node in nodes:
+        src_ident = _node_identifier(node)
+        if not src_ident:
+            continue
+        for edge_type in ("success_nodes", "failure_nodes", "always_nodes"):
+            type_label = edge_type.replace("_nodes", "")
+            for child in node.get(edge_type, []) or []:
+                try:
+                    child_id = int(child)
+                except (TypeError, ValueError):
+                    continue
+                dst_ident = id_to_ident.get(child_id)
+                if dst_ident:
+                    edge_map[(src_ident, dst_ident)] = type_label
+                    edge_count += 1
+    return edge_map, edge_count
+
+
+def _build_workflow_comparisons(
+    exports: dict[str, list[dict]],
+    live_fetched: dict[str, list[dict]],
+    src_to_tgt: dict[str, dict[int, int]],
+) -> list[WorkflowCompareResult]:
+    src_wjts = exports.get("workflow_job_templates", [])
+    tgt_wjts = live_fetched.get("workflow_job_templates", [])
+    tgt_nodes = live_fetched.get("workflow_nodes", [])
+    if not src_wjts or not tgt_wjts:
+        return []
+
+    target_nodes_by_wjt: dict[int, list[dict]] = defaultdict(list)
+    for node in tgt_nodes:
+        sf_wjt = (node.get("summary_fields") or {}).get("workflow_job_template")
+        wid = None
+        if isinstance(sf_wjt, dict):
+            wid = _object_target_id(sf_wjt)
+        if wid is None:
+            wid = _object_target_id({"id": node.get("workflow_job_template")})
+        if wid is not None:
+            target_nodes_by_wjt[wid].append(node)
+
+    out: list[WorkflowCompareResult] = []
+    for src_wjt in src_wjts:
+        sid = _object_source_id(src_wjt)
+        if sid is None:
+            continue
+        tid = src_to_tgt.get("workflow_job_templates", {}).get(sid)
+        if tid is None:
+            continue
+        name = _object_display_name(src_wjt) or f"id:{sid}"
+        org_name, _ = _get_org_info(src_wjt)
+        src_nodes = _extract_workflow_nodes_from_export(src_wjt)
+        tgt_nodes_for_wjt = target_nodes_by_wjt.get(tid, [])
+
+        src_by_ident = { _node_identifier(n): n for n in src_nodes if _node_identifier(n) }
+        tgt_by_ident = { _node_identifier(n): n for n in tgt_nodes_for_wjt if _node_identifier(n) }
+        all_identifiers = sorted(set(src_by_ident) | set(tgt_by_ident))
+
+        node_rows: list[WorkflowNodeRow] = []
+        node_diff_count = 0
+        field_diff_count = 0
+        for ident in all_identifiers:
+            src_node = src_by_ident.get(ident)
+            tgt_node = tgt_by_ident.get(ident)
+            src_kind = _workflow_node_kind(src_node) if src_node else ""
+            tgt_kind = _workflow_node_kind(tgt_node) if tgt_node else ""
+            src_ref = _workflow_node_ref(src_node) if src_node else ""
+            tgt_ref = _workflow_node_ref(tgt_node) if tgt_node else ""
+            status = "match"
+            if src_node is None or tgt_node is None:
+                status = "mismatch"
+                node_diff_count += 1
+            elif src_kind != tgt_kind or src_ref != tgt_ref:
+                status = "mismatch"
+                node_diff_count += 1
+
+            overrides_changed: list[str] = []
+            if src_node is not None and tgt_node is not None:
+                src_overrides = _workflow_node_overrides(src_node)
+                tgt_overrides = _workflow_node_overrides(tgt_node)
+                for key in sorted(set(src_overrides) | set(tgt_overrides)):
+                    if src_overrides.get(key) != tgt_overrides.get(key):
+                        overrides_changed.append(key)
+                if overrides_changed and status == "match":
+                    status = "changed"
+
+            if status != "match":
+                field_rows = _build_workflow_node_field_rows(
+                    src_node,
+                    tgt_node,
+                    src_kind,
+                    tgt_kind,
+                    src_ref,
+                    tgt_ref,
+                    status,
+                )
+                node_rows.append(
+                    WorkflowNodeRow(
+                        identifier=ident,
+                        src_kind=src_kind,
+                        tgt_kind=tgt_kind,
+                        src_ref=src_ref,
+                        tgt_ref=tgt_ref,
+                        overrides_changed=overrides_changed,
+                        field_rows=field_rows,
+                        status=status,
+                    )
+                )
+                field_diff_count += len(field_rows)
+
+        src_edge_map, src_edge_count = _build_edge_map(src_nodes)
+        tgt_edge_map, tgt_edge_count = _build_edge_map(tgt_nodes_for_wjt)
+        edge_rows: list[WorkflowEdgeRow] = []
+        edge_diff_count = 0
+        # AAP list endpoints often omit edge id arrays on export nodes; skip
+        # edge parity when the source snapshot has no edge data to compare.
+        if src_edge_count > 0:
+            for from_node, to_node in sorted(set(src_edge_map) | set(tgt_edge_map)):
+                expected = src_edge_map.get((from_node, to_node), "")
+                actual = tgt_edge_map.get((from_node, to_node), "")
+                if expected == actual:
+                    continue
+                edge_rows.append(
+                    WorkflowEdgeRow(
+                        from_node=from_node,
+                        to_node=to_node,
+                        expected_type=expected or "—",
+                        actual_type=actual or "—",
+                        status="mismatch",
+                    )
+                )
+            edge_diff_count = len(edge_rows)
+        verdict = "mismatch" if (node_diff_count or edge_diff_count) else "match"
+        if verdict == "match" and any(r.overrides_changed for r in node_rows):
+            verdict = "changed"
+
+        out.append(
+            WorkflowCompareResult(
+                workflow_key=f"{org_name}::{name}".lower(),
+                workflow=name,
+                org=org_name,
+                src_nodes=len(src_nodes),
+                tgt_nodes=len(tgt_nodes_for_wjt),
+                src_edges=src_edge_count,
+                tgt_edges=tgt_edge_count,
+                node_diffs=node_diff_count,
+                edge_diffs=edge_diff_count,
+                field_diffs=field_diff_count,
+                verdict=verdict,
+                node_rows=node_rows,
+                edge_rows=edge_rows,
+            )
+        )
+    return out
+
+
 def build_validation_result(
     exports: dict[str, list[dict]],
     all_stats: dict[str, dict],
@@ -2369,6 +2721,13 @@ def build_validation_result(
             tgt_inv_org_by_id,
             tgt_ujt_org_by_name,
         )
+    workflow_comparisons: list[WorkflowCompareResult] = []
+    if live_mode and live_fetched:
+        workflow_comparisons = _build_workflow_comparisons(
+            exports,
+            live_fetched,
+            src_to_tgt,
+        )
 
     sync_failed = sum(1 for entry in sync_entries if entry.failed)
 
@@ -2386,6 +2745,7 @@ def build_validation_result(
         t4_host_sampling=t4,
         auditor_cross_check=auditor_cross_check or AuditorCrossCheck(),
         sync_entries=sync_entries,
+        workflow_comparisons=workflow_comparisons,
     )
 
 
