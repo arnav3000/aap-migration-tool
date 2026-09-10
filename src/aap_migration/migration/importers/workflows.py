@@ -19,6 +19,101 @@ class WorkflowImporter(ResourceImporter):
         "webhook_credential": "credentials",
     }
 
+    @staticmethod
+    def _workflow_node_failure_message(
+        node_errors: list[dict[str, Any]],
+        imported_count: int,
+        expected_count: int,
+    ) -> str:
+        """Build a workflow-level error message from failed node imports."""
+        if node_errors:
+            details = "; ".join(
+                f"{err.get('name', 'unknown')}: {err.get('error', 'unknown error')}"
+                for err in node_errors
+            )
+            return (
+                f"Workflow node import failed ({imported_count}/{expected_count} created). "
+                f"{details}"
+            )
+        return (
+            f"Workflow node import failed: only {imported_count} of {expected_count} "
+            f"nodes were created."
+        )
+
+    def _finalize_pending_workflow(
+        self,
+        source_id: int,
+        info: dict[str, Any],
+        node_errors: list[dict[str, Any]],
+        imported_count: int,
+        expected_count: int,
+        results: list[dict[str, Any]],
+        workflows_with_surveys: list[dict[str, Any]],
+        workflows_with_schedules: list[dict[str, Any]],
+        workflows_with_notifications: list[dict[str, Any]],
+    ) -> bool:
+        """Mark workflow failed or append to success results after node import.
+
+        Returns True if the workflow succeeded, False if it failed.
+        """
+        result = info["result"]
+        workflow_name = info.get("name") or result.get("name", "unknown")
+
+        if imported_count < expected_count or node_errors:
+            error_msg = self._workflow_node_failure_message(
+                node_errors, imported_count, expected_count
+            )
+            self.state.mark_failed(
+                resource_type="workflow_job_templates",
+                source_id=source_id,
+                error_message=error_msg,
+            )
+            self._record_import_failure(
+                "workflow_job_templates",
+                source_id,
+                str(workflow_name),
+                error_msg,
+                error_type="WorkflowNodeImportError",
+            )
+            logger.error(
+                "workflow_import_failed_due_to_nodes",
+                workflow_name=workflow_name,
+                source_workflow_id=source_id,
+                imported_count=imported_count,
+                expected_count=expected_count,
+                error=error_msg,
+            )
+            return False
+
+        results.append(result)
+        if info.get("survey_spec"):
+            workflows_with_surveys.append(
+                {
+                    "workflow_id": result["id"],
+                    "workflow_name": workflow_name,
+                    "survey_spec": info["survey_spec"],
+                }
+            )
+        if info.get("schedules"):
+            workflows_with_schedules.append(
+                {
+                    "source_workflow_id": source_id,
+                    "workflow_id": result["id"],
+                    "workflow_name": workflow_name,
+                    "schedules": info["schedules"],
+                }
+            )
+        if info.get("notifications"):
+            workflows_with_notifications.append(
+                {
+                    "source_workflow_id": source_id,
+                    "workflow_id": result["id"],
+                    "workflow_name": workflow_name,
+                    "notifications": info["notifications"],
+                }
+            )
+        return True
+
     async def import_workflows(
         self,
         workflows: list[dict[str, Any]],
@@ -42,6 +137,8 @@ class WorkflowImporter(ResourceImporter):
         failed_count = 0
         skipped_count = 0
         all_pending_nodes = []  # Collect all nodes for batch import
+        pending_workflows: dict[Any, dict[str, Any]] = {}  # Defer success until nodes import
+        node_source_to_workflow: dict[int, Any] = {}  # Map node source id -> workflow source id
         workflows_with_surveys = []  # Collect workflows that have surveys to apply
         workflows_with_schedules = []  # Collect workflows that have schedules to create
         workflows_with_notifications = []  # Collect workflows that have notification associations
@@ -238,48 +335,58 @@ class WorkflowImporter(ResourceImporter):
                 continue  # Skip to next workflow
 
             if result:
+                result["_source_id"] = source_id
+
                 if nodes and len(nodes) > 0:
-                    # Store workflow mapping for node import
+                    # Defer workflow success until all nodes are imported
                     for node in nodes:
-                        # Add workflow_job_template reference to node
                         node["workflow_job_template"] = result["id"]
                         node["_source_workflow_id"] = source_id
+                        node_source_id = node.get("_source_id") or node.get("id")
+                        if node_source_id is not None:
+                            node_source_to_workflow[int(node_source_id)] = source_id
                     all_pending_nodes.extend(nodes)
+                    pending_workflows[source_id] = {
+                        "result": result,
+                        "name": workflow.get("name", "unknown"),
+                        "node_count": len(nodes),
+                        "survey_spec": survey_spec,
+                        "schedules": schedules,
+                        "notifications": notifications,
+                    }
+                else:
+                    # No nodes to import — shell-only workflow is complete
+                    results.append(result)
+                    success_count += 1
 
-                # Store survey spec for later import
-                if survey_spec:
-                    workflows_with_surveys.append(
-                        {
-                            "workflow_id": result["id"],
-                            "workflow_name": result.get("name", "unknown"),
-                            "survey_spec": survey_spec,
-                        }
-                    )
+                    if survey_spec:
+                        workflows_with_surveys.append(
+                            {
+                                "workflow_id": result["id"],
+                                "workflow_name": result.get("name", "unknown"),
+                                "survey_spec": survey_spec,
+                            }
+                        )
 
-                # Store schedules for later import
-                if schedules:
-                    workflows_with_schedules.append(
-                        {
-                            "source_workflow_id": source_id,
-                            "workflow_id": result["id"],
-                            "workflow_name": result.get("name", "unknown"),
-                            "schedules": schedules,
-                        }
-                    )
+                    if schedules:
+                        workflows_with_schedules.append(
+                            {
+                                "source_workflow_id": source_id,
+                                "workflow_id": result["id"],
+                                "workflow_name": result.get("name", "unknown"),
+                                "schedules": schedules,
+                            }
+                        )
 
-                # Store notification associations for later import
-                if notifications:
-                    workflows_with_notifications.append(
-                        {
-                            "source_workflow_id": source_id,
-                            "workflow_id": result["id"],
-                            "workflow_name": result.get("name", "unknown"),
-                            "notifications": notifications,
-                        }
-                    )
-
-                results.append(result)
-                success_count += 1
+                    if notifications:
+                        workflows_with_notifications.append(
+                            {
+                                "source_workflow_id": source_id,
+                                "workflow_id": result["id"],
+                                "workflow_name": result.get("name", "unknown"),
+                                "notifications": notifications,
+                            }
+                        )
             else:
                 failed_count += 1
                 error_detail = self._failure_detail_for_resource(
@@ -301,11 +408,9 @@ class WorkflowImporter(ResourceImporter):
             logger.info(
                 "importing_workflow_nodes",
                 total_nodes=len(all_pending_nodes),
-                total_workflows=len(results),
+                total_workflows=len(pending_workflows),
             )
 
-            # Create node importer and import nodes
-            # WorkflowNodeImporter lives in workflow_nodes.py
             node_importer = WorkflowNodeImporter(
                 client=self.client,
                 state=self.state,
@@ -315,12 +420,11 @@ class WorkflowImporter(ResourceImporter):
             try:
                 imported_nodes = await node_importer.import_workflow_nodes(
                     all_pending_nodes,
-                    progress_callback=None,  # Could add separate progress for nodes
+                    progress_callback=None,
                 )
 
                 nodes_imported = len(imported_nodes)
                 nodes_expected = len(all_pending_nodes)
-                # FIX: Use import_errors list instead of stats counter (which was never incremented)
                 nodes_failed = len(node_importer.import_errors)
 
                 logger.info(
@@ -330,109 +434,89 @@ class WorkflowImporter(ResourceImporter):
                     total_nodes=nodes_expected,
                 )
 
-                # SECURITY FIX: If any nodes failed, mark parent workflows as failed
-                # This prevents reporting workflows as successful when they're incomplete
-                # Note: This is now a backup - main validation happens before workflow import
-                if nodes_failed > 0:
-                    # Group failed nodes by their parent workflow
-                    failed_by_workflow: dict[Any, list[dict[str, Any]]] = {}
-                    for error_record in node_importer.import_errors:
-                        # Find the node in all_pending_nodes to get its parent workflow
-                        node_source_id = error_record.get("source_id")
-                        for node in all_pending_nodes:
-                            if node.get("_source_id") == node_source_id:
-                                source_workflow_id = node.get("_source_workflow_id")
-                                if source_workflow_id:
-                                    if source_workflow_id not in failed_by_workflow:
-                                        failed_by_workflow[source_workflow_id] = []
-                                    failed_by_workflow[source_workflow_id].append(error_record)
-                                break
+                failed_by_workflow: dict[Any, list[dict[str, Any]]] = {}
+                for error_record in node_importer.import_errors:
+                    source_workflow_id = error_record.get("source_workflow_id")
+                    if source_workflow_id is not None:
+                        failed_by_workflow.setdefault(source_workflow_id, []).append(error_record)
 
-                    # Mark affected workflows as failed
-                    workflows_marked_failed = 0
-                    for source_workflow_id, failed_nodes in failed_by_workflow.items():
-                        # Find the workflow result to get its name
-                        workflow_name = "unknown"
-                        for workflow in results:
-                            if workflow.get("_source_id") == source_workflow_id:
-                                workflow_name = workflow.get("name", "unknown")
-                                break
-
-                        error_msg = (
-                            f"Workflow imported but {len(failed_nodes)} of its workflow nodes "
-                            f"failed to import. Workflow is incomplete and may not function correctly. "
-                            f"Failed nodes: {', '.join([n.get('name', 'unknown') for n in failed_nodes])}"
+                imported_by_workflow: dict[Any, int] = {}
+                for node_result in imported_nodes:
+                    node_source_id = node_result.get("_source_id")
+                    if node_source_id is None:
+                        continue
+                    workflow_source_id = node_source_to_workflow.get(int(node_source_id))
+                    if workflow_source_id is not None:
+                        imported_by_workflow[workflow_source_id] = (
+                            imported_by_workflow.get(workflow_source_id, 0) + 1
                         )
 
-                        # Mark workflow as failed in database
-                        self.state.mark_failed(
-                            resource_type="workflow_job_templates",
-                            source_id=source_workflow_id,
-                            error_message=error_msg,
-                        )
+                successful_workflow_ids: set[Any] = set()
+                for source_workflow_id, info in pending_workflows.items():
+                    expected_count = info["node_count"]
+                    imported_count = imported_by_workflow.get(source_workflow_id, 0)
+                    node_errors = failed_by_workflow.get(source_workflow_id, [])
 
-                        logger.error(
-                            "workflow_marked_failed_due_to_node_failures",
-                            workflow_name=workflow_name,
-                            source_workflow_id=source_workflow_id,
-                            failed_nodes=len(failed_nodes),
-                            error=error_msg,
-                        )
+                    if self._finalize_pending_workflow(
+                        source_workflow_id,
+                        info,
+                        node_errors,
+                        imported_count,
+                        expected_count,
+                        results,
+                        workflows_with_surveys,
+                        workflows_with_schedules,
+                        workflows_with_notifications,
+                    ):
+                        successful_workflow_ids.add(source_workflow_id)
+                        success_count += 1
+                    else:
+                        failed_count += 1
 
-                        workflows_marked_failed += 1
+                    if progress_callback:
+                        progress_callback(success_count, failed_count, skipped_count)
 
-                    # Adjust success/failure counts
-                    if workflows_marked_failed > 0:
-                        success_count -= workflows_marked_failed
-                        failed_count += workflows_marked_failed
-
-                        logger.warning(
-                            "workflows_marked_failed_due_to_nodes",
-                            count=workflows_marked_failed,
-                            total_workflows=len(results),
-                        )
-
-                # Phase 3: Create edges (connections) between nodes
-                if imported_nodes:
+                # Phase 3: Create edges only for fully successful workflows
+                nodes_for_edges = []
+                for node in imported_nodes:
+                    node_source_id = node.get("_source_id")
+                    if node_source_id is None:
+                        continue
+                    workflow_source_id = node_source_to_workflow.get(int(node_source_id))
+                    if workflow_source_id in successful_workflow_ids:
+                        nodes_for_edges.append(node)
+                if nodes_for_edges:
                     logger.info(
                         "starting_edge_creation_phase",
-                        node_count=len(imported_nodes),
+                        node_count=len(nodes_for_edges),
                     )
-                    await self._create_workflow_edges(imported_nodes)
+                    await self._create_workflow_edges(nodes_for_edges)
                 else:
                     logger.warning("no_imported_nodes_for_edge_creation")
 
             except Exception as e:
-                # SECURITY FIX: If node import completely fails, mark all workflows as failed
                 logger.error(
                     "workflow_nodes_import_failed",
                     total_nodes=len(all_pending_nodes),
                     error=str(e),
                 )
 
-                # Mark all workflows that had nodes as failed
-                workflows_with_nodes = set()
-                for node in all_pending_nodes:
-                    source_workflow_id = node.get("_source_workflow_id")
-                    if source_workflow_id:
-                        workflows_with_nodes.add(source_workflow_id)
-
-                for source_workflow_id in workflows_with_nodes:
-                    # Find workflow name
-                    workflow_name = "unknown"
-                    for workflow in results:
-                        if workflow.get("_source_id") == source_workflow_id:
-                            workflow_name = workflow.get("name", "unknown")
-                            break
-
-                    error_msg = f"Workflow node import failed with exception: {str(e)}"
-
+                error_msg = f"Workflow node import failed with exception: {str(e)}"
+                for source_workflow_id, info in pending_workflows.items():
+                    workflow_name = info.get("name") or info["result"].get("name", "unknown")
                     self.state.mark_failed(
                         resource_type="workflow_job_templates",
                         source_id=source_workflow_id,
                         error_message=error_msg,
                     )
-
+                    self._record_import_failure(
+                        "workflow_job_templates",
+                        source_workflow_id,
+                        str(workflow_name),
+                        error_msg,
+                        error_type=type(e).__name__,
+                    )
+                    failed_count += 1
                     logger.error(
                         "workflow_marked_failed_due_to_exception",
                         workflow_name=workflow_name,
@@ -440,11 +524,8 @@ class WorkflowImporter(ResourceImporter):
                         error=error_msg,
                     )
 
-                # Adjust counts
-                workflows_failed = len(workflows_with_nodes)
-                if workflows_failed > 0:
-                    success_count -= workflows_failed
-                    failed_count += workflows_failed
+                    if progress_callback:
+                        progress_callback(success_count, failed_count, skipped_count)
 
         # Phase 4: Import survey specs
         if workflows_with_surveys:

@@ -325,6 +325,89 @@ async def test_workflow_importer_followup_nodes_and_dependencies(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_workflow_importer_fails_when_nodes_fail(monkeypatch):
+    state = FakeState()
+    client = FakeClient()
+    importer = WorkflowImporter(client, state, PerformanceConfig())
+
+    fake_session = FakeFailedDepSession(failed_jobs=set(), failed_workflows=set())
+    monkeypatch.setattr(
+        "aap_migration.migration.importers.workflows.get_session",
+        lambda _db_url: contextlib.nullcontext(fake_session),
+    )
+    monkeypatch.setattr(
+        "aap_migration.migration.importers.workflows.MigrationProgress",
+        SimpleNamespace(source_id="source_id", resource_type="resource_type", status="status"),
+    )
+
+    async def fake_import_resource(resource_type, source_id, data):
+        return {"id": 401, "name": data["name"]}
+
+    monkeypatch.setattr(importer, "import_resource", fake_import_resource)
+
+    class FailingNodeImporter:
+        def __init__(self, client, state, performance_config):
+            self.import_errors = [
+                {
+                    "resource_type": "workflow_nodes",
+                    "source_id": 91,
+                    "source_workflow_id": 11,
+                    "name": "node-1",
+                    "error": (
+                        "Cannot import workflow node: Referenced job template "
+                        "(source_id=77) was not successfully imported."
+                    ),
+                    "error_type": "DependencyError",
+                }
+            ]
+
+        async def import_workflow_nodes(self, nodes, progress_callback=None):
+            return []
+
+    monkeypatch.setattr(
+        "aap_migration.migration.importers.workflows.WorkflowNodeImporter", FailingNodeImporter
+    )
+    monkeypatch.setattr(importer, "_create_workflow_edges", lambda nodes: None)
+
+    results = await importer.import_workflows(
+        [
+            {
+                "_source_id": 11,
+                "name": "Broken WF",
+                "_workflow_nodes": [
+                    {
+                        "_source_id": 91,
+                        "identifier": "node-1",
+                        "unified_job_template": 77,
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert results == []
+    assert state.failed == [
+        {
+            "resource_type": "workflow_job_templates",
+            "source_id": 11,
+            "error_message": (
+                "Workflow node import failed (0/1 created). node-1: Cannot import workflow node: "
+                "Referenced job template (source_id=77) was not successfully imported."
+            ),
+        }
+    ]
+    assert importer.import_errors == [
+        {
+            "resource_type": "workflow_job_templates",
+            "source_id": 11,
+            "name": "Broken WF",
+            "error": state.failed[0]["error_message"],
+            "error_type": "WorkflowNodeImportError",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_credential_input_sources_and_settings_importers(monkeypatch):
     state = FakeState(mapped_ids={("credentials", 10): 110, ("credentials", 20): 220})
     client = FakeClient()

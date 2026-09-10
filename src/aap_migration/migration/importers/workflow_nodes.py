@@ -42,10 +42,26 @@ class WorkflowNodeImporter(ResourceImporter):
         # Get the workflow template ID (should be target ID, not source)
         workflow_target_id = data.get("workflow_job_template")
         if not workflow_target_id:
+            error_msg = (
+                "Cannot import workflow node: missing workflow_job_template reference "
+                f"(source node id={source_id})"
+            )
             logger.error(
                 "workflow_node_missing_workflow_id",
                 source_id=source_id,
                 data_keys=list(data.keys()),
+                error=error_msg,
+            )
+            self.stats["error_count"] += 1
+            self.import_errors.append(
+                {
+                    "resource_type": resource_type,
+                    "source_id": source_id,
+                    "source_workflow_id": data.get("_source_workflow_id"),
+                    "name": data.get("identifier", "unknown"),
+                    "error": error_msg,
+                    "error_type": "ValidationError",
+                }
             )
             return None
 
@@ -109,6 +125,7 @@ class WorkflowNodeImporter(ResourceImporter):
                         {
                             "resource_type": resource_type,
                             "source_id": source_id,
+                            "source_workflow_id": data.get("_source_workflow_id"),
                             "name": data.get("identifier", "unknown"),
                             "error": error_msg,
                             "error_type": "DependencyError",
@@ -205,6 +222,7 @@ class WorkflowNodeImporter(ResourceImporter):
                 {
                     "resource_type": resource_type,
                     "source_id": source_id,
+                    "source_workflow_id": data.get("_source_workflow_id"),
                     "name": data.get("identifier", "unknown"),
                     "error": str(e),
                     "error_type": type(e).__name__,
@@ -276,13 +294,12 @@ class WorkflowNodeImporter(ResourceImporter):
                     {
                         "resource_type": "workflow_nodes",
                         "source_id": source_id,
+                        "source_workflow_id": node.get("_source_workflow_id"),
                         "name": node.get("identifier", "unknown"),
                         "error": str(e),
                         "error_type": type(e).__name__,
                     }
                 )
-
-                raise
             finally:
                 # Update progress after each node
                 if progress_callback:
