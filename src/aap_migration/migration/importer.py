@@ -2580,12 +2580,16 @@ class InventorySourceImporter(ResourceImporter):
                 )
 
             # Save ID mapping and mark completed
+            # Flag auto-created sources for deferred constructed inventory sync.
+            # The sync must run AFTER hosts migration so the constructed inventory
+            # plugin evaluates against fully populated input inventories.
             self.state.save_id_mapping(
                 resource_type=resource_type,
                 source_id=source_id,
                 target_id=auto_source["id"],
                 source_name=source_name,
                 target_name=auto_source.get("name"),
+                mapping_metadata={"needs_constructed_sync": True},
             )
             self.state.mark_completed(
                 resource_type=resource_type,
@@ -2758,12 +2762,13 @@ class InventorySourceImporter(ResourceImporter):
                             error=str(e),
                         )
 
-        # Automatically trigger sync for all successfully imported inventory sources
+        # Automatically trigger sync for successfully imported inventory sources.
+        # Auto-created sources (constructed inventories) are DEFERRED — their sync
+        # must run after hosts migration so the constructed inventory plugin
+        # evaluates against fully populated input inventories.
         if results:
-            logger.info(
-                "triggering_inventory_source_syncs",
-                total_inventory_sources=len(results),
-            )
+            deferred_count = 0
+            sync_count = 0
 
             for result in results:
                 inventory_source_id = result.get("id")
@@ -2772,12 +2777,27 @@ class InventorySourceImporter(ResourceImporter):
                 if not inventory_source_id:
                     continue
 
+                # Defer sync for auto-created constructed inventory sources.
+                # The needs_constructed_sync flag is already persisted to the DB
+                # by _handle_auto_created_source(); sync will be triggered after
+                # hosts migration via trigger_deferred_constructed_syncs().
+                if inventory_source_name.startswith(self.AUTO_CREATED_SOURCE_PREFIX):
+                    deferred_count += 1
+                    logger.info(
+                        "constructed_inventory_sync_deferred",
+                        inventory_source_id=inventory_source_id,
+                        inventory_source_name=inventory_source_name,
+                        reason="Deferred until after hosts migration",
+                    )
+                    continue
+
                 try:
                     # Trigger sync via POST to /inventory_sources/{id}/update/
                     sync_result = await self.client.post(
                         f"inventory_sources/{inventory_source_id}/update/",
                         json_data={},
                     )
+                    sync_count += 1
                     logger.info(
                         "inventory_source_sync_triggered",
                         inventory_source_id=inventory_source_id,
@@ -2793,7 +2813,106 @@ class InventorySourceImporter(ResourceImporter):
                         hint="Check inventory source manually for outdated EE's which are pointing to older AAP-2.4 automation hub address",
                     )
 
+            logger.info(
+                "inventory_source_sync_summary",
+                total_results=len(results),
+                synced_immediately=sync_count,
+                deferred_for_hosts=deferred_count,
+            )
+
         return results
+
+    async def trigger_deferred_constructed_syncs(self) -> list[dict[str, Any]]:
+        """Trigger sync for constructed inventory sources deferred during import.
+
+        Queries the MigrationState DB for inventory sources flagged with
+        needs_constructed_sync=True and fires POST /inventory_sources/{id}/update/
+        for each. On success, clears the flag. On failure, leaves the flag
+        as True so it will be retried on the next run.
+
+        This method is safe to call multiple times (idempotent). It reads
+        entirely from the database, so it works with a fresh importer instance
+        — it does not depend on any state from the original import run.
+
+        Should be called AFTER hosts migration to ensure constructed inventories
+        compute membership against fully populated input inventories.
+
+        Returns:
+            List of sync results (dicts with 'id', 'name', 'status').
+        """
+        pending = self.state.get_pending_constructed_syncs()
+
+        if not pending:
+            logger.info(
+                "no_deferred_constructed_syncs",
+                message="No constructed inventory sources pending sync",
+            )
+            return []
+
+        logger.info(
+            "triggering_deferred_constructed_syncs",
+            total_pending=len(pending),
+            message="Triggering constructed inventory syncs (deferred until after hosts migration)",
+        )
+
+        sync_results = []
+        success_count = 0
+        failed_count = 0
+
+        for source_info in pending:
+            target_id = source_info["target_id"]
+            source_name = source_info.get("source_name", "unknown")
+            source_id = source_info["source_id"]
+
+            try:
+                sync_result = await self.client.post(
+                    f"inventory_sources/{target_id}/update/",
+                    json_data={},
+                )
+
+                # Clear the flag on success
+                self.state.clear_constructed_sync_flag(source_id)
+
+                success_count += 1
+                sync_results.append({
+                    "id": target_id,
+                    "name": source_name,
+                    "status": "synced",
+                    "inventory_update_id": sync_result.get("id"),
+                })
+
+                logger.info(
+                    "deferred_constructed_sync_triggered",
+                    target_id=target_id,
+                    source_name=source_name,
+                    inventory_update_id=sync_result.get("id"),
+                )
+
+            except Exception as e:
+                failed_count += 1
+                sync_results.append({
+                    "id": target_id,
+                    "name": source_name,
+                    "status": "failed",
+                    "error": str(e),
+                })
+
+                logger.warning(
+                    "deferred_constructed_sync_failed",
+                    target_id=target_id,
+                    source_name=source_name,
+                    error=str(e),
+                    hint="Flag remains True in DB — will retry on next run",
+                )
+
+        logger.info(
+            "deferred_constructed_sync_complete",
+            total=len(pending),
+            success=success_count,
+            failed=failed_count,
+        )
+
+        return sync_results
 
 
 class ScheduleImporter(ResourceImporter):
