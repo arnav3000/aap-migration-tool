@@ -1262,6 +1262,104 @@ class MigrationState:
                 )
                 raise StateError(f"Failed to get all mappings dict: {e}") from e
 
+    def get_pending_constructed_syncs(self) -> list[dict[str, Any]]:
+        """Get inventory sources flagged for deferred constructed inventory sync.
+
+        Returns inventory source mappings where mapping_metadata contains
+        needs_constructed_sync=True. These are auto-created sources for
+        constructed inventories whose sync was deferred until after hosts
+        migration.
+
+        Returns:
+            List of dicts with 'source_id', 'target_id', 'source_name',
+            'target_name' for each pending sync.
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    mappings = (
+                        session.query(IDMapping)
+                        .filter(
+                            IDMapping.resource_type == "inventory_sources",
+                            IDMapping.target_id.isnot(None),
+                            IDMapping.mapping_metadata.isnot(None),
+                        )
+                        .all()
+                    )
+
+                    # Filter in Python for cross-DB compatibility
+                    # (avoids json_extract which is SQLite-specific)
+                    results = []
+                    for m in mappings:
+                        meta = m.mapping_metadata
+                        if isinstance(meta, dict) and meta.get("needs_constructed_sync") is True:
+                            results.append({
+                                "source_id": m.source_id,
+                                "target_id": m.target_id,
+                                "source_name": m.source_name,
+                                "target_name": m.target_name,
+                            })
+
+                    logger.info(
+                        "pending_constructed_syncs_found",
+                        count=len(results),
+                    )
+                    return results
+
+            except Exception as e:
+                logger.error(
+                    "failed_to_get_pending_constructed_syncs",
+                    error=str(e),
+                )
+                raise StateError(f"Failed to get pending constructed syncs: {e}") from e
+
+    def clear_constructed_sync_flag(
+        self,
+        source_id: int,
+    ) -> None:
+        """Clear the needs_constructed_sync flag for an inventory source.
+
+        Called after a successful constructed inventory sync to mark it
+        as complete. Sets needs_constructed_sync to False in the
+        mapping_metadata JSON.
+
+        Args:
+            source_id: Source system inventory source ID
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    mapping = (
+                        session.query(IDMapping)
+                        .filter_by(
+                            resource_type="inventory_sources",
+                            source_id=source_id,
+                        )
+                        .first()
+                    )
+
+                    if mapping and isinstance(mapping.mapping_metadata, dict):
+                        mapping.mapping_metadata = {
+                            **mapping.mapping_metadata,
+                            "needs_constructed_sync": False,
+                        }
+                        session.commit()
+                        logger.debug(
+                            "cleared_constructed_sync_flag",
+                            source_id=source_id,
+                            target_id=mapping.target_id,
+                        )
+
+            except Exception as e:
+                logger.error(
+                    "failed_to_clear_constructed_sync_flag",
+                    source_id=source_id,
+                    error=str(e),
+                )
+                raise StateError(
+                    f"Failed to clear constructed sync flag: {e}"
+                ) from e
+
     def get_id_mapping(
         self,
         resource_type: str,
