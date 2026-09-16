@@ -16,7 +16,7 @@ permissions:
 
 env:
   REGISTRY: quay.io
-  IMAGE_NAME: arbhati/aap-migration-toolkit
+  IMAGE_NAME: rmuppane1/aap-migration
 
 jobs:
   build-scan-push:
