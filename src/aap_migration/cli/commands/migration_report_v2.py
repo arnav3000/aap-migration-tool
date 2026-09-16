@@ -367,15 +367,15 @@ def _build_export_lookup(export_dir: Path) -> dict:
 
 
 def _build_user_email_lookup(export_dir: Path, org_mapper: OrganizationMapper, source_config=None) -> dict[str, list[str]]:
-    """Build org_name -> [emails] mapping from export user data, excluding auditors.
+    """Build org_name -> [emails] mapping from export user data, excluding auditors and superusers.
 
     Strategy:
     1. Read organization export to get org IDs and names.
     2. Fetch /api/v2/organizations/{id}/users/ from source API to build
        user_id → [org_ids] mapping (users are global in AAP, membership is via roles).
-    3. Read user export for emails and is_system_auditor.
+    3. Read user export for emails, is_system_auditor, and is_superuser.
     4. Match user_id → org_names using the API-fetched membership.
-    5. Exclude system auditors and users without email.
+    5. Exclude system auditors, superusers (system administrators), and users without email.
     6. A user belonging to multiple orgs will appear in ALL of them.
 
     Falls back to org_mapper if the source API is unreachable.
@@ -401,6 +401,7 @@ def _build_user_email_lookup(export_dir: Path, org_mapper: OrganizationMapper, s
             user_data[uid] = {
                 "email": user.get("email", "").strip(),
                 "is_system_auditor": user.get("is_system_auditor", False),
+                "is_superuser": user.get("is_superuser", False),
             }
 
     if not user_data:
@@ -418,11 +419,13 @@ def _build_user_email_lookup(export_dir: Path, org_mapper: OrganizationMapper, s
             org_name = org_mapper.get_organization_name("users", uid)
             user_orgs_map[uid] = [org_name]
 
-    # Assemble org_name → [emails], excluding auditors and empty emails.
+    # Assemble org_name → [emails], excluding auditors, superusers, and empty emails.
     # A user in multiple orgs appears under each org.
     org_emails: dict[str, list[str]] = defaultdict(list)
     for uid, info in user_data.items():
         if info["is_system_auditor"]:
+            continue
+        if info["is_superuser"]:
             continue
         if not info["email"]:
             continue
@@ -1756,7 +1759,7 @@ function renderSummaryTab() {{
             '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'failures\\')" title="View Failures"><span class="status-failed">' + s.failed + '</span></td>' +
             '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'skipped\\')" title="View Skipped"><span class="status-skipped">' + s.skipped + '</span></td>' +
             '<td class="clickable" onclick="goToOrgTab(\\'' + ne + '\\',\\'pending\\')" title="View Pending"><span class="status-pending">' + s.pending + '</span></td>' +
-            '<td>' + (st>0?'<span class="resource-status-stale">'+st+'</span>':'0') + '</td>' +
+            '<td><span class="resource-status-stale">' + st + '</span></td>' +
             '<td><span class="success-rate '+rc+'">' + r + '%</span></td>' +
             '<td style="font-size:0.85em">' + s.resource_types.join(', ') + '</td></tr>';
     }});
