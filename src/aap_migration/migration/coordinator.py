@@ -82,6 +82,12 @@ class MigrationCoordinator:
             "use_bulk": True,
         },
         {
+            "name": "host_memberships",
+            "description": "Host-Inventory Memberships (multi-inventory hosts)",
+            "resource_types": ["host_inventory_memberships"],
+            "batch_size": 100,
+        },
+        {
             "name": "instances",
             "description": "Instances (AAP Controller Nodes)",
             "resource_types": ["instances"],
@@ -103,6 +109,12 @@ class MigrationCoordinator:
             "name": "inventory_config",
             "description": "Inventory Sources and Groups",
             "resource_types": ["inventory_sources", "inventory_groups"],
+            "batch_size": 100,
+        },
+        {
+            "name": "host_group_memberships",
+            "description": "Host-Group Memberships (hosts assigned to inventory groups)",
+            "resource_types": ["host_group_memberships"],
             "batch_size": 100,
         },
         {

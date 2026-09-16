@@ -208,6 +208,17 @@ RESOURCE_REGISTRY: dict[str, ResourceTypeInfo] = {
         has_transformer=False,  # No transformation needed - direct mapping
         batch_size=100,  # Batch size for adding hosts to inventories
     ),
+    "host_group_memberships": ResourceTypeInfo(
+        name="host_group_memberships",
+        endpoint="",  # No single endpoint — queries groups/{id}/hosts/ per group
+        description="Host-Group Memberships (hosts belonging to groups)",
+        migration_order=123,  # After host_inventory_memberships (121), before instance_groups (125)
+        cleanup_order=38,  # Before host_inventory_memberships (39)
+        has_exporter=True,
+        has_importer=True,
+        has_transformer=False,
+        batch_size=100,
+    ),
     "instances": ResourceTypeInfo(
         name="instances",
         endpoint="instances/",

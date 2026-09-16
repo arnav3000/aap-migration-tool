@@ -928,6 +928,10 @@ class InventoryGroupExporter(ResourceExporter):
     """Exporter for inventory group resources.
 
     Inventory groups can have nested hierarchies (parent-child relationships).
+    The AAP API does not include child group IDs in the group list response;
+    hierarchy is exposed only via the groups/{id}/children/ sub-endpoint.
+    This exporter fetches those IDs in _process_resource() so the importer's
+    _topological_sort_tiers() can reconstruct parent-child relationships.
     """
 
     async def export(
@@ -952,6 +956,76 @@ class InventoryGroupExporter(ResourceExporter):
             filters=filters,
         ):
             yield group
+
+    async def _process_resource(
+        self, resource: dict[str, Any], resource_type: str
+    ) -> dict[str, Any] | None:
+        """Process group resource: fetch and attach child group IDs.
+
+        The AAP API does not return a 'children' list of IDs in the group
+        response — only a URL in the 'related' field. We must explicitly call
+        groups/{id}/children/ to populate the 'children' field so the importer's
+        _topological_sort_tiers() can reconstruct the hierarchy.
+
+        This override is called by both export() (via export_resources) and
+        export_parallel(), ensuring children are always captured regardless
+        of which export path the migration pipeline uses.
+
+        Args:
+            resource: Raw group data from the API
+            resource_type: Type of resource
+
+        Returns:
+            Processed group with 'children' field, or None if skipped
+        """
+        processed = await super()._process_resource(resource, resource_type)
+        if processed and processed.get("id"):
+            children_ids = await self._fetch_children_ids(processed["id"])
+            if children_ids:
+                processed["children"] = children_ids
+                logger.debug(
+                    "group_children_fetched",
+                    group_id=processed["id"],
+                    group_name=processed.get("name"),
+                    children_count=len(children_ids),
+                    children_ids=children_ids,
+                )
+        return processed
+
+    async def _fetch_children_ids(self, group_id: int) -> list[int]:
+        """Fetch child group IDs for a given group via the children endpoint.
+
+        Paginates through groups/{id}/children/ and collects all child IDs.
+
+        Args:
+            group_id: The parent group ID
+
+        Returns:
+            List of child group IDs (empty if none or on error)
+        """
+        children_ids: list[int] = []
+        try:
+            page = 1
+            while True:
+                resp = await self.client.get(
+                    f"groups/{group_id}/children/",
+                    params={"page": page, "page_size": 200},
+                )
+                for child in resp.get("results", []):
+                    child_id = child.get("id")
+                    if child_id:
+                        children_ids.append(child_id)
+                if not resp.get("next"):
+                    break
+                page += 1
+        except Exception as e:
+            logger.warning(
+                "failed_to_fetch_group_children",
+                group_id=group_id,
+                error=str(e),
+                message="Could not fetch children for group; hierarchy may be incomplete",
+            )
+        return children_ids
 
 
 class InventorySourceExporter(ResourceExporter):
@@ -1238,6 +1312,96 @@ class HostInventoryMembershipExporter(ResourceExporter):
             unique_hosts=len(set(h for h, _ in seen_pairs)),
             message=f"Exported {total_memberships} host-inventory membership relationships",
         )
+
+    async def export_parallel(
+        self,
+        resource_type: str,
+        endpoint: str,
+        page_size: int = 200,
+        max_concurrent_pages: int = 5,
+        filters: dict | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Delegate to export() — no single endpoint exists for memberships."""
+        async for record in self.export(filters=filters):
+            yield record
+
+
+class HostGroupMembershipExporter(ResourceExporter):
+    """Exporter for host-group membership relationships.
+
+    For each group, fetches groups/{id}/hosts/ and yields one record per
+    host-group pair. Allows group membership to be reconstructed on target.
+    """
+
+    async def get_count(self, endpoint: str, filters: dict | None = None) -> int:
+        logger.debug(
+            "host_group_memberships_count_deferred",
+            message="Count deferred to export phase (no single endpoint)",
+        )
+        return 1
+
+    async def export(
+        self,
+        filters: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Export host-group memberships.
+
+        For each group, exports all (group_id, host_id) pairs so that
+        group membership can be reconstructed during import.
+
+        Args:
+            filters: Optional query parameters for filtering (currently unused)
+
+        Yields:
+            Membership dictionaries with 'group_id', 'host_id', 'group_name',
+            'inventory_id', and 'host_name'.
+        """
+        logger.info(
+            "exporting_host_group_memberships",
+            message="Starting export of host-group relationships",
+        )
+
+        async for group in self.export_resources(
+            resource_type="groups",
+            endpoint="groups/",
+            page_size=200,
+        ):
+            group_id = group.get("id")
+            group_name = group.get("name", f"group_{group_id}")
+            inventory_id = group.get("inventory")
+
+            if not group_id:
+                continue
+
+            async for host in self.export_resources(
+                resource_type="hosts",
+                endpoint=f"groups/{group_id}/hosts/",
+                page_size=200,
+            ):
+                host_id = host.get("id")
+                if not host_id:
+                    continue
+                yield {
+                    "group_id": group_id,
+                    "host_id": host_id,
+                    "group_name": group_name,
+                    "inventory_id": inventory_id,
+                    "host_name": host.get("name", f"host_{host_id}"),
+                }
+
+        logger.info("host_group_memberships_export_complete")
+
+    async def export_parallel(
+        self,
+        resource_type: str,
+        endpoint: str,
+        page_size: int = 200,
+        max_concurrent_pages: int = 5,
+        filters: dict | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Delegate to export() — no single endpoint exists for group memberships."""
+        async for record in self.export(filters=filters):
+            yield record
 
 
 class CredentialExporter(ResourceExporter):
@@ -2571,6 +2735,7 @@ def create_exporter(
         "inventory_groups": InventoryGroupExporter,
         "hosts": HostExporter,
         "host_inventory_memberships": HostInventoryMembershipExporter,
+        "host_group_memberships": HostGroupMembershipExporter,
         "credentials": CredentialExporter,
         "credential_input_sources": CredentialInputSourceExporter,
         "projects": ProjectExporter,
