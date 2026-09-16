@@ -862,6 +862,10 @@ class InventoryGroupExporter(ResourceExporter):
     """Exporter for inventory group resources.
 
     Inventory groups can have nested hierarchies (parent-child relationships).
+    The AAP API does not include child group IDs in the group list response;
+    hierarchy is exposed only via the groups/{id}/children/ sub-endpoint.
+    This exporter fetches those IDs in _process_resource() so the importer's
+    _topological_sort_tiers() can reconstruct parent-child relationships.
     """
 
     async def export(
@@ -886,6 +890,76 @@ class InventoryGroupExporter(ResourceExporter):
             filters=filters,
         ):
             yield group
+
+    async def _process_resource(
+        self, resource: dict[str, Any], resource_type: str
+    ) -> dict[str, Any] | None:
+        """Process group resource: fetch and attach child group IDs.
+
+        The AAP API does not return a 'children' list of IDs in the group
+        response — only a URL in the 'related' field. We must explicitly call
+        groups/{id}/children/ to populate the 'children' field so the importer's
+        _topological_sort_tiers() can reconstruct the hierarchy.
+
+        This override is called by both export() (via export_resources) and
+        export_parallel(), ensuring children are always captured regardless
+        of which export path the migration pipeline uses.
+
+        Args:
+            resource: Raw group data from the API
+            resource_type: Type of resource
+
+        Returns:
+            Processed group with 'children' field, or None if skipped
+        """
+        processed = await super()._process_resource(resource, resource_type)
+        if processed and processed.get("id"):
+            children_ids = await self._fetch_children_ids(processed["id"])
+            if children_ids:
+                processed["children"] = children_ids
+                logger.debug(
+                    "group_children_fetched",
+                    group_id=processed["id"],
+                    group_name=processed.get("name"),
+                    children_count=len(children_ids),
+                    children_ids=children_ids,
+                )
+        return processed
+
+    async def _fetch_children_ids(self, group_id: int) -> list[int]:
+        """Fetch child group IDs for a given group via the children endpoint.
+
+        Paginates through groups/{id}/children/ and collects all child IDs.
+
+        Args:
+            group_id: The parent group ID
+
+        Returns:
+            List of child group IDs (empty if none or on error)
+        """
+        children_ids: list[int] = []
+        try:
+            page = 1
+            while True:
+                resp = await self.client.get(
+                    f"groups/{group_id}/children/",
+                    params={"page": page, "page_size": 200},
+                )
+                for child in resp.get("results", []):
+                    child_id = child.get("id")
+                    if child_id:
+                        children_ids.append(child_id)
+                if not resp.get("next"):
+                    break
+                page += 1
+        except Exception as e:
+            logger.warning(
+                "failed_to_fetch_group_children",
+                group_id=group_id,
+                error=str(e),
+                message="Could not fetch children for group; hierarchy may be incomplete",
+            )
+        return children_ids
 
 
 class InventorySourceExporter(ResourceExporter):

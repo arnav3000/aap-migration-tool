@@ -1734,9 +1734,12 @@ class InventoryGroupImporter(ResourceImporter):
         data: dict[str, Any],
         resolve_dependencies: bool = True,
     ) -> dict[str, Any] | None:
-        """Import inventory group with correct API endpoint.
+        """Import inventory group with correct API endpoint and parent-child linking.
 
         Overrides parent to use 'groups' endpoint instead of 'inventory_groups'.
+        After creating the group, establishes parent-child hierarchy via
+        POST groups/{parent_id}/children/ since the AAP API does not accept
+        a 'parent' field in the group creation payload.
         """
         # Use "groups" for API call but keep "inventory_groups" for state tracking
         api_resource_type = (
@@ -1759,6 +1762,11 @@ class InventoryGroupImporter(ResourceImporter):
             if resolve_dependencies:
                 data = await self._resolve_dependencies(resource_type, data)
 
+            # Pop parent before API call — the AAP API POST /groups/ does not
+            # accept a 'parent' field. Parent-child relationships are established
+            # separately via POST groups/{parent_id}/children/.
+            parent_target_id = data.pop("parent", None)
+
             # Use correct API endpoint
             result = await self.client.create_resource(
                 resource_type=api_resource_type,
@@ -1767,6 +1775,15 @@ class InventoryGroupImporter(ResourceImporter):
             )
 
             target_id = result.get("id")
+
+            # Establish parent-child relationship via children endpoint
+            if parent_target_id and target_id:
+                await self._link_parent_child(
+                    parent_target_id=parent_target_id,
+                    child_target_id=target_id,
+                    group_name=data.get("name", "unknown"),
+                )
+
             self.state.mark_completed(
                 resource_type=resource_type,
                 source_id=source_id,
@@ -1779,6 +1796,7 @@ class InventoryGroupImporter(ResourceImporter):
                 resource_type=resource_type,
                 source_id=source_id,
                 target_id=target_id,
+                parent_target_id=parent_target_id,
             )
 
             return result
@@ -1803,6 +1821,54 @@ class InventoryGroupImporter(ResourceImporter):
             )
 
             raise
+
+    async def _link_parent_child(
+        self,
+        parent_target_id: int,
+        child_target_id: int,
+        group_name: str = "unknown",
+    ) -> None:
+        """Establish parent-child relationship between two groups on the target.
+
+        Calls POST /api/v2/groups/{parent_id}/children/ with {"id": child_id}.
+        This is the same pattern used by HostGroupMembershipImporter for
+        groups/{id}/hosts/.
+
+        Args:
+            parent_target_id: Target ID of the parent group
+            child_target_id: Target ID of the child group
+            group_name: Name of the child group (for logging)
+        """
+        try:
+            await self.client.post(
+                f"groups/{parent_target_id}/children/",
+                json_data={"id": child_target_id},
+            )
+            logger.info(
+                "group_parent_child_linked",
+                parent_id=parent_target_id,
+                child_id=child_target_id,
+                child_name=group_name,
+                message=f"Linked group '{group_name}' as child of group {parent_target_id}",
+            )
+        except APIError as e:
+            if "already" in str(e).lower():
+                logger.debug(
+                    "group_parent_child_already_exists",
+                    parent_id=parent_target_id,
+                    child_id=child_target_id,
+                    child_name=group_name,
+                    message="Parent-child relationship already exists",
+                )
+            else:
+                logger.warning(
+                    "group_parent_child_link_failed",
+                    parent_id=parent_target_id,
+                    child_id=child_target_id,
+                    child_name=group_name,
+                    error=str(e),
+                    message="Failed to establish parent-child group relationship",
+                )
 
     async def import_inventory_groups(
         self,
@@ -3638,7 +3704,7 @@ class HostInventoryMembershipImporter(ResourceImporter):
                     membership_id,
                     source_name=f"{host_name} -> {inventory_name}",
                 )
-                self.state.mark_completed("host_inventory_memberships", membership_id)
+                self.state.mark_completed("host_inventory_memberships", membership_id, f"{target_host_id}_{target_inventory_id}", source_name=f"{host_name} -> {inventory_name}")
                 self.stats["skipped_count"] += 1
                 return {"status": "skipped", "reason": "already_primary_inventory"}
 
@@ -3660,7 +3726,7 @@ class HostInventoryMembershipImporter(ResourceImporter):
                     membership_id,
                     source_name=f"{host_name} -> {inventory_name}",
                 )
-                self.state.mark_completed("host_inventory_memberships", membership_id)
+                self.state.mark_completed("host_inventory_memberships", membership_id, f"{target_host_id}_{target_inventory_id}", source_name=f"{host_name} -> {inventory_name}")
                 self.stats["skipped_count"] += 1
                 return {"status": "skipped", "reason": "already_in_inventory"}
 
@@ -3684,7 +3750,7 @@ class HostInventoryMembershipImporter(ResourceImporter):
                 membership_id,
                 source_name=f"{host_name} -> {inventory_name}",
             )
-            self.state.mark_completed("host_inventory_memberships", membership_id)
+            self.state.mark_completed("host_inventory_memberships", membership_id, f"{target_host_id}_{target_inventory_id}", source_name=f"{host_name} -> {inventory_name}")
             self.stats["imported_count"] += 1
 
             logger.info(
@@ -3845,7 +3911,7 @@ class HostGroupMembershipImporter(ResourceImporter):
                     membership_id,
                     source_name=f"{host_name} -> {group_name}",
                 )
-                self.state.mark_completed("host_group_memberships", membership_id)
+                self.state.mark_completed("host_group_memberships", membership_id, f"{target_group_id}_{target_host_id}", source_name=f"{host_name} -> {group_name}")
                 self.stats["skipped_count"] += 1
                 return {"status": "skipped", "reason": "already_in_group"}
 
@@ -3867,7 +3933,7 @@ class HostGroupMembershipImporter(ResourceImporter):
                 membership_id,
                 source_name=f"{host_name} -> {group_name}",
             )
-            self.state.mark_completed("host_group_memberships", membership_id)
+            self.state.mark_completed("host_group_memberships", membership_id, f"{target_group_id}_{target_host_id}", source_name=f"{host_name} -> {group_name}")
             self.stats["imported_count"] += 1
 
             logger.info(
