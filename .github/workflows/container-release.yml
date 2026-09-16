@@ -38,6 +38,7 @@ jobs:
       - name: Build container image
         run: |
           docker build \
+            --build-arg BASE_IMAGE="registry.access.redhat.com/ubi9/ubi" \
             --build-arg AAP_BRIDGE_ZIP="${{ github.server_url }}/${{ github.repository }}/archive/refs/heads/release/v1.x.zip" \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
