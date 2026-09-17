@@ -2160,6 +2160,38 @@ def import_cmd(
                             # The wait_for_project_sync() function is still available
                             # for manual use if needed.
 
+                            # --- Post-phase: Deferred constructed inventory sync ---
+                            # Runs after host_group_memberships import so that hosts,
+                            # host-inventory memberships, and host-group memberships
+                            # are all fully established before the constructed inventory
+                            # plugin evaluates its input inventories.
+                            if rtype == "host_group_memberships":
+                                try:
+                                    inv_source_importer = create_importer(
+                                        "inventory_sources",
+                                        ctx.target_client,
+                                        ctx.migration_state,
+                                        ctx.config.performance,
+                                        ctx.config.resource_mappings,
+                                    )
+                                    deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs()
+                                    if deferred_results:
+                                        synced = sum(1 for r in deferred_results if r.get("status") == "synced")
+                                        failed_syncs = sum(1 for r in deferred_results if r.get("status") == "failed")
+                                        echo_info(
+                                            f"🔄 Constructed inventory sync: {synced} synced"
+                                            + (f", {failed_syncs} failed" if failed_syncs else "")
+                                        )
+                                except Exception as e:
+                                    logger.error(
+                                        "deferred_constructed_sync_error",
+                                        error=str(e),
+                                        message="Failed to trigger deferred constructed inventory syncs",
+                                    )
+                                    echo_warning(
+                                        f"⚠ Deferred constructed inventory sync failed: {e}"
+                                    )
+
                         elif rtype == "hosts":
                             # Hosts are imported using bulk API for performance
                             # Group hosts by inventory for bulk import
@@ -2255,37 +2287,6 @@ def import_cmd(
                             skipped_in_import = (
                                 total_skipped_hosts_bulk  # Update skipped count for this phase
                             )
-
-                            # Trigger deferred constructed inventory syncs.
-                            # Constructed inventory sources were imported earlier but
-                            # their sync was deferred until hosts are present in the
-                            # input inventories. Now that hosts are migrated, query
-                            # the DB for pending syncs and fire them.
-                            try:
-                                inv_source_importer = create_importer(
-                                    "inventory_sources",
-                                    ctx.target_client,
-                                    ctx.migration_state,
-                                    ctx.config.performance,
-                                    ctx.config.resource_mappings,
-                                )
-                                deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs()
-                                if deferred_results:
-                                    synced = sum(1 for r in deferred_results if r.get("status") == "synced")
-                                    failed_syncs = sum(1 for r in deferred_results if r.get("status") == "failed")
-                                    echo_info(
-                                        f"🔄 Constructed inventory sync: {synced} synced"
-                                        + (f", {failed_syncs} failed" if failed_syncs else "")
-                                    )
-                            except Exception as e:
-                                logger.error(
-                                    "deferred_constructed_sync_error",
-                                    error=str(e),
-                                    message="Failed to trigger deferred constructed inventory syncs",
-                                )
-                                echo_warning(
-                                    f"⚠ Deferred constructed inventory sync failed: {e}"
-                                )
 
                         else:
                             # No import method available for this resource type

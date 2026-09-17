@@ -2647,8 +2647,9 @@ class InventorySourceImporter(ResourceImporter):
 
             # Save ID mapping and mark completed
             # Flag auto-created sources for deferred constructed inventory sync.
-            # The sync must run AFTER hosts migration so the constructed inventory
-            # plugin evaluates against fully populated input inventories.
+            # The sync must run AFTER host-group memberships migration so the
+            # constructed inventory plugin evaluates against fully populated
+            # input inventories (hosts, memberships, and group associations).
             self.state.save_id_mapping(
                 resource_type=resource_type,
                 source_id=source_id,
@@ -2830,8 +2831,9 @@ class InventorySourceImporter(ResourceImporter):
 
         # Automatically trigger sync for successfully imported inventory sources.
         # Auto-created sources (constructed inventories) are DEFERRED — their sync
-        # must run after hosts migration so the constructed inventory plugin
-        # evaluates against fully populated input inventories.
+        # must run after host-group memberships migration so the constructed
+        # inventory plugin evaluates against fully populated input inventories
+        # (hosts, multi-inventory memberships, and group associations).
         if results:
             deferred_count = 0
             sync_count = 0
@@ -2846,7 +2848,7 @@ class InventorySourceImporter(ResourceImporter):
                 # Defer sync for auto-created constructed inventory sources.
                 # The needs_constructed_sync flag is already persisted to the DB
                 # by _handle_auto_created_source(); sync will be triggered after
-                # hosts migration via trigger_deferred_constructed_syncs().
+                # host-group memberships migration via trigger_deferred_constructed_syncs().
                 if inventory_source_name.startswith(self.AUTO_CREATED_SOURCE_PREFIX):
                     deferred_count += 1
                     logger.info(
@@ -2900,8 +2902,10 @@ class InventorySourceImporter(ResourceImporter):
         entirely from the database, so it works with a fresh importer instance
         — it does not depend on any state from the original import run.
 
-        Should be called AFTER hosts migration to ensure constructed inventories
-        compute membership against fully populated input inventories.
+        Should be called AFTER host-group memberships migration to ensure
+        constructed inventories compute membership against fully populated
+        input inventories (hosts, host-inventory memberships, and host-group
+        memberships must all be established).
 
         Returns:
             List of sync results (dicts with 'id', 'name', 'status').
