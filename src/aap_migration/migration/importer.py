@@ -2890,13 +2890,19 @@ class InventorySourceImporter(ResourceImporter):
 
         return results
 
-    async def trigger_deferred_constructed_syncs(self) -> list[dict[str, Any]]:
+    async def trigger_deferred_constructed_syncs(
+        self, *, force: bool = False
+    ) -> list[dict[str, Any]]:
         """Trigger sync for constructed inventory sources deferred during import.
 
         Queries the MigrationState DB for inventory sources flagged with
         needs_constructed_sync=True and fires POST /inventory_sources/{id}/update/
         for each. On success, clears the flag. On failure, leaves the flag
         as True so it will be retried on the next run.
+
+        When force=True (used after host_group_memberships), also re-syncs
+        migrated auto-created constructed sources whose flag was already
+        cleared — e.g. after a premature sync left groups without hosts.
 
         This method is safe to call multiple times (idempotent). It reads
         entirely from the database, so it works with a fresh importer instance
@@ -2910,21 +2916,22 @@ class InventorySourceImporter(ResourceImporter):
         Returns:
             List of sync results (dicts with 'id', 'name', 'status').
         """
-        pending = self.state.get_pending_constructed_syncs()
+        pending = self.state.get_pending_constructed_syncs(force=force)
 
         if not pending:
             logger.info(
                 "no_deferred_constructed_syncs",
                 message="No constructed inventory sources pending sync",
+                force=force,
             )
             return []
 
         logger.info(
             "triggering_deferred_constructed_syncs",
             total_pending=len(pending),
+            force=force,
             message="Triggering constructed inventory syncs (deferred until after hosts migration)",
         )
-
         sync_results = []
         success_count = 0
         failed_count = 0

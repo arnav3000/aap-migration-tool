@@ -82,7 +82,11 @@ async def _run_deferred_constructed_syncs(ctx: MigrationContext) -> None:
             ctx.config.performance,
             ctx.config.resource_mappings,
         )
-        deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs()
+        # force=True: re-sync even if needs_constructed_sync was cleared by an
+        # earlier premature sync (hosts present but group memberships empty).
+        deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs(
+            force=True
+        )
         if deferred_results:
             synced = sum(1 for r in deferred_results if r.get("status") == "synced")
             failed_syncs = sum(1 for r in deferred_results if r.get("status") == "failed")

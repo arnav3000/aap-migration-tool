@@ -1262,18 +1262,23 @@ class MigrationState:
                 )
                 raise StateError(f"Failed to get all mappings dict: {e}") from e
 
-    def get_pending_constructed_syncs(self) -> list[dict[str, Any]]:
-        """Get inventory sources flagged for deferred constructed inventory sync.
+    def get_pending_constructed_syncs(self, *, force: bool = False) -> list[dict[str, Any]]:
+        """Get inventory sources for deferred constructed inventory sync.
 
-        Returns inventory source mappings where mapping_metadata contains
-        needs_constructed_sync=True. These are auto-created sources for
-        constructed inventories whose sync was deferred until after hosts
-        migration.
+        By default returns mappings where mapping_metadata contains
+        needs_constructed_sync=True.
+
+        When force=True, also includes any migrated auto-created constructed
+        source (name prefix ``Auto-created source for: ``) even if the flag
+        was already cleared. Use force after host_group_memberships so a
+        premature earlier sync can be corrected.
 
         Returns:
             List of dicts with 'source_id', 'target_id', 'source_name',
             'target_name' for each pending sync.
         """
+        auto_prefix = "Auto-created source for: "
+
         with self._lock:
             try:
                 with get_session(self.database_url) as session:
@@ -1282,7 +1287,6 @@ class MigrationState:
                         .filter(
                             IDMapping.resource_type == "inventory_sources",
                             IDMapping.target_id.isnot(None),
-                            IDMapping.mapping_metadata.isnot(None),
                         )
                         .all()
                     )
@@ -1290,19 +1294,29 @@ class MigrationState:
                     # Filter in Python for cross-DB compatibility
                     # (avoids json_extract which is SQLite-specific)
                     results = []
+                    seen_target_ids: set[int] = set()
                     for m in mappings:
-                        meta = m.mapping_metadata
-                        if isinstance(meta, dict) and meta.get("needs_constructed_sync") is True:
-                            results.append({
-                                "source_id": m.source_id,
-                                "target_id": m.target_id,
-                                "source_name": m.source_name,
-                                "target_name": m.target_name,
-                            })
+                        meta = m.mapping_metadata if isinstance(m.mapping_metadata, dict) else {}
+                        flagged = meta.get("needs_constructed_sync") is True
+                        is_auto_created = bool(
+                            m.source_name and str(m.source_name).startswith(auto_prefix)
+                        )
+                        if not (flagged or (force and is_auto_created)):
+                            continue
+                        if m.target_id in seen_target_ids:
+                            continue
+                        seen_target_ids.add(m.target_id)
+                        results.append({
+                            "source_id": m.source_id,
+                            "target_id": m.target_id,
+                            "source_name": m.source_name,
+                            "target_name": m.target_name,
+                        })
 
                     logger.info(
                         "pending_constructed_syncs_found",
                         count=len(results),
+                        force=force,
                     )
                     return results
 
@@ -1312,7 +1326,6 @@ class MigrationState:
                     error=str(e),
                 )
                 raise StateError(f"Failed to get pending constructed syncs: {e}") from e
-
     def clear_constructed_sync_flag(
         self,
         source_id: int,
