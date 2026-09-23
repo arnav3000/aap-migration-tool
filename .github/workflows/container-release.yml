@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - 'release/v1.x'
-      - 'hotfix/releasev1.x/constructed-inv-sync'
   workflow_dispatch:
     inputs:
       tag_override:
