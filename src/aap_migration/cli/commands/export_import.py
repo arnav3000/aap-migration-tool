@@ -52,6 +52,58 @@ logger = get_logger(__name__)
 
 
 # ============================================
+# Deferred constructed inventory sync helpers
+# ============================================
+
+
+def should_trigger_deferred_constructed_syncs(
+    dry_run: bool, types_to_import: list[str]
+) -> bool:
+    """Return True when deferred constructed-inventory sync should run.
+
+    Sync is tied to host_group_memberships being part of this import request
+    (not to whether that phase had rows). Regular inventory sources still sync
+    during inventory_sources import; this only flushes needs_constructed_sync.
+    """
+    return not dry_run and "host_group_memberships" in types_to_import
+
+
+async def _run_deferred_constructed_syncs(ctx: MigrationContext) -> None:
+    """Trigger deferred constructed-inventory syncs after host_group_memberships.
+
+    Safe to call when memberships were empty or the phase was filtered out
+    (count == 0). No-ops if nothing is pending in MigrationState.
+    """
+    try:
+        inv_source_importer = create_importer(
+            "inventory_sources",
+            ctx.target_client,
+            ctx.migration_state,
+            ctx.config.performance,
+            ctx.config.resource_mappings,
+        )
+        # force=True: re-sync even if needs_constructed_sync was cleared by an
+        # earlier premature sync (hosts present but group memberships empty).
+        deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs(
+            force=True
+        )
+        if deferred_results:
+            synced = sum(1 for r in deferred_results if r.get("status") == "synced")
+            failed_syncs = sum(1 for r in deferred_results if r.get("status") == "failed")
+            echo_info(
+                f"🔄 Constructed inventory sync: {synced} synced"
+                + (f", {failed_syncs} failed" if failed_syncs else "")
+            )
+    except Exception as e:
+        logger.error(
+            "deferred_constructed_sync_error",
+            error=str(e),
+            message="Failed to trigger deferred constructed inventory syncs",
+        )
+        echo_warning(f"⚠ Deferred constructed inventory sync failed: {e}")
+
+
+# ============================================
 # Auto-Dependency Resolution Helper Functions
 # ============================================
 
@@ -2159,6 +2211,10 @@ def import_cmd(
                             # then manually wait for project sync, then run phase2.
                             # The wait_for_project_sync() function is still available
                             # for manual use if needed.
+                            #
+                            # Deferred constructed inventory sync runs AFTER the phases
+                            # loop (see should_trigger_deferred_constructed_syncs) so it
+                            # still fires when host_group_memberships has count 0 / no data.
 
                         elif rtype == "hosts":
                             # Hosts are imported using bulk API for performance
@@ -2256,37 +2312,6 @@ def import_cmd(
                                 total_skipped_hosts_bulk  # Update skipped count for this phase
                             )
 
-                            # Trigger deferred constructed inventory syncs.
-                            # Constructed inventory sources were imported earlier but
-                            # their sync was deferred until hosts are present in the
-                            # input inventories. Now that hosts are migrated, query
-                            # the DB for pending syncs and fire them.
-                            try:
-                                inv_source_importer = create_importer(
-                                    "inventory_sources",
-                                    ctx.target_client,
-                                    ctx.migration_state,
-                                    ctx.config.performance,
-                                    ctx.config.resource_mappings,
-                                )
-                                deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs()
-                                if deferred_results:
-                                    synced = sum(1 for r in deferred_results if r.get("status") == "synced")
-                                    failed_syncs = sum(1 for r in deferred_results if r.get("status") == "failed")
-                                    echo_info(
-                                        f"🔄 Constructed inventory sync: {synced} synced"
-                                        + (f", {failed_syncs} failed" if failed_syncs else "")
-                                    )
-                            except Exception as e:
-                                logger.error(
-                                    "deferred_constructed_sync_error",
-                                    error=str(e),
-                                    message="Failed to trigger deferred constructed inventory syncs",
-                                )
-                                echo_warning(
-                                    f"⚠ Deferred constructed inventory sync failed: {e}"
-                                )
-
                         else:
                             # No import method available for this resource type
                             logger.info(
@@ -2335,6 +2360,14 @@ def import_cmd(
 
                     # Complete this phase
                     progress.complete_phase(phase_id)
+
+            # Deferred constructed inventory sync:
+            # Run whenever host_group_memberships was part of this import request,
+            # even if the phase was filtered out (count == 0) or had no data.
+            # Regular inventory sources still sync during inventory_sources import;
+            # this only flushes needs_constructed_sync flags.
+            if should_trigger_deferred_constructed_syncs(dry_run, types_to_import):
+                await _run_deferred_constructed_syncs(ctx)
 
             click.echo()
             if dry_run:

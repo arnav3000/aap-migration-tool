@@ -1,6 +1,6 @@
 # AAP Bridge
 # Base: Universal Base Image (UBI) 9
-FROM ubi9/ubi
+FROM registry.access.redhat.com/ubi9/ubi
 
 # Labels (OCI standard)
 LABEL org.opencontainers.image.title="aap-bridge" \

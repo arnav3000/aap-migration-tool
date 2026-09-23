@@ -2647,8 +2647,9 @@ class InventorySourceImporter(ResourceImporter):
 
             # Save ID mapping and mark completed
             # Flag auto-created sources for deferred constructed inventory sync.
-            # The sync must run AFTER hosts migration so the constructed inventory
-            # plugin evaluates against fully populated input inventories.
+            # The sync must run AFTER host-group memberships migration so the
+            # constructed inventory plugin evaluates against fully populated
+            # input inventories (hosts, memberships, and group associations).
             self.state.save_id_mapping(
                 resource_type=resource_type,
                 source_id=source_id,
@@ -2830,8 +2831,9 @@ class InventorySourceImporter(ResourceImporter):
 
         # Automatically trigger sync for successfully imported inventory sources.
         # Auto-created sources (constructed inventories) are DEFERRED — their sync
-        # must run after hosts migration so the constructed inventory plugin
-        # evaluates against fully populated input inventories.
+        # must run after host-group memberships migration so the constructed
+        # inventory plugin evaluates against fully populated input inventories
+        # (hosts, multi-inventory memberships, and group associations).
         if results:
             deferred_count = 0
             sync_count = 0
@@ -2846,7 +2848,7 @@ class InventorySourceImporter(ResourceImporter):
                 # Defer sync for auto-created constructed inventory sources.
                 # The needs_constructed_sync flag is already persisted to the DB
                 # by _handle_auto_created_source(); sync will be triggered after
-                # hosts migration via trigger_deferred_constructed_syncs().
+                # host-group memberships migration via trigger_deferred_constructed_syncs().
                 if inventory_source_name.startswith(self.AUTO_CREATED_SOURCE_PREFIX):
                     deferred_count += 1
                     logger.info(
@@ -2888,7 +2890,9 @@ class InventorySourceImporter(ResourceImporter):
 
         return results
 
-    async def trigger_deferred_constructed_syncs(self) -> list[dict[str, Any]]:
+    async def trigger_deferred_constructed_syncs(
+        self, *, force: bool = False
+    ) -> list[dict[str, Any]]:
         """Trigger sync for constructed inventory sources deferred during import.
 
         Queries the MigrationState DB for inventory sources flagged with
@@ -2896,31 +2900,38 @@ class InventorySourceImporter(ResourceImporter):
         for each. On success, clears the flag. On failure, leaves the flag
         as True so it will be retried on the next run.
 
+        When force=True (used after host_group_memberships), also re-syncs
+        migrated auto-created constructed sources whose flag was already
+        cleared — e.g. after a premature sync left groups without hosts.
+
         This method is safe to call multiple times (idempotent). It reads
         entirely from the database, so it works with a fresh importer instance
         — it does not depend on any state from the original import run.
 
-        Should be called AFTER hosts migration to ensure constructed inventories
-        compute membership against fully populated input inventories.
+        Should be called AFTER host-group memberships migration to ensure
+        constructed inventories compute membership against fully populated
+        input inventories (hosts, host-inventory memberships, and host-group
+        memberships must all be established).
 
         Returns:
             List of sync results (dicts with 'id', 'name', 'status').
         """
-        pending = self.state.get_pending_constructed_syncs()
+        pending = self.state.get_pending_constructed_syncs(force=force)
 
         if not pending:
             logger.info(
                 "no_deferred_constructed_syncs",
                 message="No constructed inventory sources pending sync",
+                force=force,
             )
             return []
 
         logger.info(
             "triggering_deferred_constructed_syncs",
             total_pending=len(pending),
+            force=force,
             message="Triggering constructed inventory syncs (deferred until after hosts migration)",
         )
-
         sync_results = []
         success_count = 0
         failed_count = 0
@@ -4437,6 +4448,14 @@ class HostInventoryMembershipImporter(ResourceImporter):
             self.stats["skipped_count"] += 1
             return {"status": "skipped", "reason": "inventory_not_found"}
 
+        source_label = f"{host_name} -> {inventory_name}"
+        self.state.mark_in_progress(
+            resource_type="host_inventory_memberships",
+            source_id=membership_id,
+            source_name=source_label,
+            phase="import",
+        )
+
         # Check if host is already in this inventory
         try:
             # Get host details to check current inventory
@@ -4454,9 +4473,9 @@ class HostInventoryMembershipImporter(ResourceImporter):
                 self.state.create_source_mapping(
                     "host_inventory_memberships",
                     membership_id,
-                    source_name=f"{host_name} -> {inventory_name}",
+                    source_name=source_label,
                 )
-                self.state.mark_completed("host_inventory_memberships", membership_id, f"{target_host_id}_{target_inventory_id}", source_name=f"{host_name} -> {inventory_name}")
+                self.state.mark_completed("host_inventory_memberships", membership_id, f"{target_host_id}_{target_inventory_id}", source_name=source_label)
                 self.stats["skipped_count"] += 1
                 return {"status": "skipped", "reason": "already_primary_inventory"}
 
@@ -4476,9 +4495,9 @@ class HostInventoryMembershipImporter(ResourceImporter):
                 self.state.create_source_mapping(
                     "host_inventory_memberships",
                     membership_id,
-                    source_name=f"{host_name} -> {inventory_name}",
+                    source_name=source_label,
                 )
-                self.state.mark_completed("host_inventory_memberships", membership_id, f"{target_host_id}_{target_inventory_id}", source_name=f"{host_name} -> {inventory_name}")
+                self.state.mark_completed("host_inventory_memberships", membership_id, f"{target_host_id}_{target_inventory_id}", source_name=source_label)
                 self.stats["skipped_count"] += 1
                 return {"status": "skipped", "reason": "already_in_inventory"}
 
@@ -4500,9 +4519,9 @@ class HostInventoryMembershipImporter(ResourceImporter):
             self.state.create_source_mapping(
                 "host_inventory_memberships",
                 membership_id,
-                source_name=f"{host_name} -> {inventory_name}",
+                source_name=source_label,
             )
-            self.state.mark_completed("host_inventory_memberships", membership_id, f"{target_host_id}_{target_inventory_id}", source_name=f"{host_name} -> {inventory_name}")
+            self.state.mark_completed("host_inventory_memberships", membership_id, f"{target_host_id}_{target_inventory_id}", source_name=source_label)
             self.stats["imported_count"] += 1
 
             logger.info(
@@ -4526,16 +4545,29 @@ class HostInventoryMembershipImporter(ResourceImporter):
             self.state.create_source_mapping(
                 "host_inventory_memberships",
                 membership_id,
-                source_name=f"{host_name} -> {inventory_name}",
+                source_name=source_label,
             )
-            self.state.mark_failed("host_inventory_memberships", membership_id, error_msg)
+            try:
+                self.state.mark_failed(
+                    "host_inventory_memberships",
+                    membership_id,
+                    error_msg,
+                    source_name=source_label,
+                )
+            except Exception as state_error:
+                logger.error(
+                    "mark_failed_state_error",
+                    resource_type="host_inventory_memberships",
+                    source_id=membership_id,
+                    error=str(state_error),
+                )
             self.stats["error_count"] += 1
 
             self.import_errors.append(
                 {
                     "resource_type": "host_inventory_memberships",
                     "source_id": membership_id,
-                    "name": f"{host_name} -> {inventory_name}",
+                    "name": source_label,
                     "error": error_msg,
                     "error_type": type(e).__name__,
                 }
@@ -4564,7 +4596,17 @@ class HostInventoryMembershipImporter(ResourceImporter):
         success, failed, skipped = 0, 0, 0
 
         for membership in memberships:
-            result = await self.import_resource(membership)
+            try:
+                result = await self.import_resource(membership)
+            except Exception as e:
+                logger.error(
+                    "membership_import_unexpected_error",
+                    resource_type="host_inventory_memberships",
+                    host_id=membership.get("host_id"),
+                    inventory_id=membership.get("inventory_id"),
+                    error=str(e),
+                )
+                result = {"status": "failed", "error": str(e)}
             results.append(result)
 
             status = result.get("status", "failed")
@@ -4646,6 +4688,14 @@ class HostGroupMembershipImporter(ResourceImporter):
             self.stats["skipped_count"] += 1
             return {"status": "skipped", "reason": "host_not_found"}
 
+        source_label = f"{host_name} -> {group_name}"
+        self.state.mark_in_progress(
+            resource_type="host_group_memberships",
+            source_id=membership_id,
+            source_name=source_label,
+            phase="import",
+        )
+
         try:
             existing = await self.client.get(
                 f"groups/{target_group_id}/hosts/",
@@ -4661,11 +4711,79 @@ class HostGroupMembershipImporter(ResourceImporter):
                 self.state.create_source_mapping(
                     "host_group_memberships",
                     membership_id,
-                    source_name=f"{host_name} -> {group_name}",
+                    source_name=source_label,
                 )
-                self.state.mark_completed("host_group_memberships", membership_id, f"{target_group_id}_{target_host_id}", source_name=f"{host_name} -> {group_name}")
+                self.state.mark_completed("host_group_memberships", membership_id, f"{target_group_id}_{target_host_id}", source_name=source_label)
                 self.stats["skipped_count"] += 1
                 return {"status": "skipped", "reason": "already_in_group"}
+
+            # Verify host is in the group's inventory before POSTing membership.
+            # AWX returns 400 "Host matching query does not exist" otherwise.
+            group_inventory_id = None
+            source_inventory_id = resource.get("inventory_id")
+            if source_inventory_id:
+                group_inventory_id = self.state.get_mapped_id(
+                    "inventories", source_inventory_id
+                )
+            if not group_inventory_id:
+                group_data = await self.client.get(f"groups/{target_group_id}/")
+                group_inventory_id = group_data.get("inventory")
+
+            host_in_inventory = False
+            if group_inventory_id:
+                host_data = await self.client.get(f"hosts/{target_host_id}/")
+                if host_data.get("inventory") == group_inventory_id:
+                    host_in_inventory = True
+                else:
+                    inv_hosts = await self.client.get(
+                        f"inventories/{group_inventory_id}/hosts/",
+                        params={"id": target_host_id, "page_size": 1},
+                    )
+                    host_in_inventory = inv_hosts.get("count", 0) > 0
+
+            if not host_in_inventory:
+                error_msg = (
+                    "host_not_in_group_inventory: host is not a member of the "
+                    f"group's inventory (group_inventory_id={group_inventory_id}, "
+                    f"host_id={target_host_id})"
+                )
+                logger.warning(
+                    "group_membership_host_not_in_inventory",
+                    host_id=target_host_id,
+                    host_name=host_name,
+                    group_id=target_group_id,
+                    group_name=group_name,
+                    group_inventory_id=group_inventory_id,
+                    message=error_msg,
+                )
+                self.state.create_source_mapping(
+                    "host_group_memberships",
+                    membership_id,
+                    source_name=source_label,
+                )
+                try:
+                    self.state.mark_failed(
+                        "host_group_memberships",
+                        membership_id,
+                        error_msg,
+                        source_name=source_label,
+                    )
+                except Exception as state_error:
+                    logger.error(
+                        "mark_failed_state_error",
+                        resource_type="host_group_memberships",
+                        source_id=membership_id,
+                        error=str(state_error),
+                    )
+                self.stats["error_count"] += 1
+                self.import_errors.append({
+                    "resource_type": "host_group_memberships",
+                    "source_id": membership_id,
+                    "name": source_label,
+                    "error": error_msg,
+                    "error_type": "host_not_in_group_inventory",
+                })
+                return {"status": "failed", "error": error_msg, "reason": "host_not_in_group_inventory"}
 
             logger.info(
                 "adding_host_to_group",
@@ -4683,9 +4801,9 @@ class HostGroupMembershipImporter(ResourceImporter):
             self.state.create_source_mapping(
                 "host_group_memberships",
                 membership_id,
-                source_name=f"{host_name} -> {group_name}",
+                source_name=source_label,
             )
-            self.state.mark_completed("host_group_memberships", membership_id, f"{target_group_id}_{target_host_id}", source_name=f"{host_name} -> {group_name}")
+            self.state.mark_completed("host_group_memberships", membership_id, f"{target_group_id}_{target_host_id}", source_name=source_label)
             self.stats["imported_count"] += 1
 
             logger.info(
@@ -4709,14 +4827,27 @@ class HostGroupMembershipImporter(ResourceImporter):
             self.state.create_source_mapping(
                 "host_group_memberships",
                 membership_id,
-                source_name=f"{host_name} -> {group_name}",
+                source_name=source_label,
             )
-            self.state.mark_failed("host_group_memberships", membership_id, error_msg)
+            try:
+                self.state.mark_failed(
+                    "host_group_memberships",
+                    membership_id,
+                    error_msg,
+                    source_name=source_label,
+                )
+            except Exception as state_error:
+                logger.error(
+                    "mark_failed_state_error",
+                    resource_type="host_group_memberships",
+                    source_id=membership_id,
+                    error=str(state_error),
+                )
             self.stats["error_count"] += 1
             self.import_errors.append({
                 "resource_type": "host_group_memberships",
                 "source_id": membership_id,
-                "name": f"{host_name} -> {group_name}",
+                "name": source_label,
                 "error": error_msg,
                 "error_type": type(e).__name__,
             })
@@ -4743,7 +4874,17 @@ class HostGroupMembershipImporter(ResourceImporter):
         success, failed, skipped = 0, 0, 0
 
         for membership in memberships:
-            result = await self.import_resource(membership)
+            try:
+                result = await self.import_resource(membership)
+            except Exception as e:
+                logger.error(
+                    "membership_import_unexpected_error",
+                    resource_type="host_group_memberships",
+                    group_id=membership.get("group_id"),
+                    host_id=membership.get("host_id"),
+                    error=str(e),
+                )
+                result = {"status": "failed", "error": str(e)}
             results.append(result)
 
             status = result.get("status", "failed")
