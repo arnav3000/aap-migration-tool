@@ -133,6 +133,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
         resources,
         settings,
         sizing,
+        validate,
     )
 
     app.include_router(connections.router, prefix="/api", tags=["connections"])
@@ -143,6 +144,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
     app.include_router(jobs.router, prefix="/api", tags=["jobs"])
     app.include_router(analysis.router, prefix="/api", tags=["analysis"])
     app.include_router(iam.router, prefix="/api", tags=["iam"])
+    app.include_router(validate.router, prefix="/api", tags=["validate"])
     app.include_router(sizing.router, prefix="/api", tags=["sizing"])
     app.include_router(settings.router, prefix="/api", tags=["settings"])
     app.include_router(websocket.router)

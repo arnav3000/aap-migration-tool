@@ -13,14 +13,21 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 
-from aap_migration.api.dependencies import get_db, get_job_service
+from aap_migration.api.dependencies import get_db, get_db_url, get_job_service
 from aap_migration.api.schemas import (
     IAMAnalyseRequest,
+    IAMAuditRequest,
     IAMBenchmarkRequest,
+    IAMBenchmarkSyncRequest,
+    IAMMigrateRequest,
     IAMReportRequest,
     JobStartResponse,
 )
 from aap_migration.api.services.connection_service import ConnectionService
+from aap_migration.api.services.iam_service import (
+    iam_audit_job_coro_factory,
+    iam_migrate_job_coro_factory,
+)
 from aap_migration.api.services.job_service import Job, JobStatus
 
 router = APIRouter()
@@ -251,3 +258,122 @@ def export_iam_json(job_id: str) -> Response:
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="iam-{job_id}.json"'},
     )
+
+
+@router.post("/iam/audit", response_model=JobStartResponse)
+async def iam_audit(body: IAMAuditRequest, db: Session = Depends(get_db)) -> JobStartResponse:
+    """Read-only IAM scan using connection IDs (web UI)."""
+    source = ConnectionService.get(db, body.source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source connection not found")
+
+    if body.scan_strategy not in ("resource", "principal"):
+        raise HTTPException(
+            status_code=400, detail="scan_strategy must be 'resource' or 'principal'"
+        )
+
+    svc = get_job_service()
+    coro_factory = iam_audit_job_coro_factory(
+        source,
+        verify_ssl=body.verify_ssl,
+        timeout=body.timeout,
+        workers=body.workers,
+        scan_strategy=body.scan_strategy,
+        resume=body.resume,
+        checkpoint_dir=body.checkpoint_dir,
+    )
+    job_name = f"IAM audit {source.name} ({body.scan_strategy}, {body.workers}w)"
+    job_id = svc.start_job(job_name, "iam-audit", coro_factory)
+    return JobStartResponse(job_id=job_id)
+
+
+@router.post("/iam/migrate", response_model=JobStartResponse)
+async def iam_migrate(body: IAMMigrateRequest, db: Session = Depends(get_db)) -> JobStartResponse:
+    """Migrate IAM permissions to the target AAP instance."""
+    source = ConnectionService.get(db, body.source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source connection not found")
+
+    target = ConnectionService.get(db, body.destination_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Destination connection not found")
+
+    if body.skip_user_roles and body.users_only:
+        raise HTTPException(
+            status_code=400, detail="--skip-user-roles and --users-only are mutually exclusive"
+        )
+
+    if body.scan_strategy not in ("resource", "principal"):
+        raise HTTPException(
+            status_code=400, detail="scan_strategy must be 'resource' or 'principal'"
+        )
+
+    svc = get_job_service()
+    db_url = get_db_url()
+    try:
+        bind_url = str(db.get_bind().url)
+        if bind_url.startswith("sqlite") and db_url.startswith("postgresql://"):
+            db_url = bind_url
+    except Exception:  # nosec B110
+        pass
+
+    coro_factory = iam_migrate_job_coro_factory(
+        source,
+        target,
+        state_db_path=body.state_db_path,
+        db_url=db_url,
+        verify_ssl=body.verify_ssl,
+        timeout=body.timeout,
+        workers=body.workers,
+        scan_strategy=body.scan_strategy,
+        dry_run=body.dry_run,
+        skip_user_roles=body.skip_user_roles,
+        users_only=body.users_only,
+        resume=body.resume,
+        checkpoint_dir=body.checkpoint_dir,
+    )
+
+    label = "dry-run" if body.dry_run else "migrate"
+    if body.skip_user_roles:
+        label += " teams-only"
+    elif body.users_only:
+        label += " users-only"
+    job_name = f"IAM {label} {source.name} -> {target.name}"
+    job_id = svc.start_job(job_name, "iam-migrate", coro_factory)
+    return JobStartResponse(job_id=job_id)
+
+
+@router.post("/iam/benchmark-sync")
+async def iam_benchmark_sync(
+    body: IAMBenchmarkSyncRequest, db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """Run IAM benchmark synchronously and return captured output."""
+    source = ConnectionService.get(db, body.source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source connection not found")
+
+    token, verify_ssl = _connection_token_and_ssl(source, body.verify_ssl)
+    inst_config = ConnectionService.build_instance_config(source)
+    worker_counts = body.workers if body.workers else [1, 10, 20]
+    buffer = io.StringIO()
+
+    def _run() -> None:
+        from aap_migration.iam.benchmark import run_benchmark
+
+        with redirect_stdout(buffer):
+            run_benchmark(
+                source_url=inst_config.url,
+                source_token=token,
+                verify_ssl=verify_ssl,
+                sample_size=body.sample_size,
+                worker_counts=worker_counts,
+            )
+
+    await asyncio.to_thread(_run)
+    output = buffer.getvalue()
+    return {
+        "source_id": body.source_id,
+        "sample_size": body.sample_size,
+        "worker_counts": worker_counts,
+        "output": output,
+    }

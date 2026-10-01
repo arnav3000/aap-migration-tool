@@ -75,6 +75,8 @@ function useTheme() {
 }
 import { Dashboard } from './pages/Dashboard';
 import { Operations } from './pages/Operations';
+import { Validate } from './pages/Validate';
+import { IAM } from './pages/IAM';
 import { Migrate } from './pages/Migrate';
 import { ObjectBrowser } from './pages/ObjectBrowser';
 import { Jobs } from './pages/Jobs';
@@ -137,7 +139,13 @@ function AppNav() {
           title="Migration"
           isExpanded={migrationOpen}
           onExpand={toggleMigration}
-          isActive={isActive('/migrate') || isActive('/operations') || isActive('/planner')}
+          isActive={
+            isActive('/migrate') ||
+            isActive('/operations') ||
+            isActive('/planner') ||
+            isActive('/validate') ||
+            isActive('/iam')
+          }
         >
           <NavItem isActive={isActive('/planner')}>
             <NavLink to="/planner">Migration Planner</NavLink>
@@ -147,6 +155,12 @@ function AppNav() {
           </NavItem>
           <NavItem isActive={isActive('/operations')}>
             <NavLink to="/operations">Operations</NavLink>
+          </NavItem>
+          <NavItem isActive={isActive('/validate')}>
+            <NavLink to="/validate">Validate</NavLink>
+          </NavItem>
+          <NavItem isActive={isActive('/iam')}>
+            <NavLink to="/iam">IAM</NavLink>
           </NavItem>
         </NavExpandable>
 
@@ -248,6 +262,8 @@ export function App() {
               <Route path="/planner/:id" element={<PlanDetail />} />
               <Route path="/migrate" element={<Migrate />} />
               <Route path="/operations" element={<Operations />} />
+              <Route path="/validate" element={<Validate />} />
+              <Route path="/iam" element={<IAM />} />
               <Route path="/settings" element={<Dashboard />} />
             </Routes>
           </PageSection>

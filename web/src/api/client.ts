@@ -121,6 +121,48 @@ export const api = {
 
   listMigratableResourceTypes: () =>
     request<{ name: string; description: string; migration_order: number; dependencies: string[] }[]>('GET', '/api/resource-types'),
+
+  runValidate: (params: {
+    live?: boolean;
+    resource_type?: string;
+    skip_hosts?: boolean;
+    organizations?: string[];
+    source_id?: string;
+    destination_id?: string;
+    output_dir?: string;
+  }) => request<{ job_id: string }>('POST', '/api/validate/run', params),
+  getValidateResult: (jobId: string) => request<unknown>('GET', `/api/validate/${jobId}`),
+  exportValidateJson: (jobId: string) => `/api/validate/${jobId}/export/json`,
+  exportValidateHtml: (jobId: string) => `/api/validate/${jobId}/export/html`,
+
+  iamAudit: (params: {
+    source_id: string;
+    verify_ssl?: boolean;
+    timeout?: number;
+    workers?: number;
+    scan_strategy?: 'resource' | 'principal';
+    resume?: boolean;
+    checkpoint_dir?: string;
+  }) => request<{ job_id: string }>('POST', '/api/iam/audit', params),
+  iamMigrate: (params: {
+    source_id: string;
+    destination_id: string;
+    state_db_path?: string;
+    verify_ssl?: boolean;
+    timeout?: number;
+    workers?: number;
+    scan_strategy?: 'resource' | 'principal';
+    dry_run?: boolean;
+    skip_user_roles?: boolean;
+    users_only?: boolean;
+    resume?: boolean;
+    checkpoint_dir?: string;
+  }) => request<{ job_id: string }>('POST', '/api/iam/migrate', params),
+  iamBenchmark: (params: { source_id: string; verify_ssl?: boolean; sample_size?: number; workers?: number[] }) =>
+    request<{ source_id: string; output: string }>('POST', '/api/iam/benchmark-sync', params),
+  getIamResult: (jobId: string) => request<unknown>('GET', `/api/iam/${jobId}`),
+  exportIamJson: (jobId: string) => `/api/iam/${jobId}/export/json`,
+  exportIamHtml: (jobId: string) => `/api/iam/${jobId}/export/html`,
 };
 
 export function createJobLogSocket(jobId: string, onMessage: (line: string) => void, onClose?: (status: string) => void): WebSocket {

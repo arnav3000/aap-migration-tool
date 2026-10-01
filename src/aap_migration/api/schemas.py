@@ -297,6 +297,58 @@ class IAMReportRequest(BaseModel):
         return self
 
 
+class IAMAuditRequest(BaseModel):
+    """Read-only IAM scan — reuses ``iam/analyser.py:IAMAnalyser.audit``."""
+
+    source_id: str
+    verify_ssl: bool = True
+    timeout: int = Field(default=60, ge=1, le=1200)
+    workers: int = Field(default=1, ge=1, le=50)
+    scan_strategy: str = Field(default="resource", pattern="^(resource|principal)$")
+    resume: bool = False
+    checkpoint_dir: str | None = None
+    output_dir: str | None = None
+
+
+class IAMMigrateRequest(BaseModel):
+    """IAM permission migration — reuses ``IAMAnalyser.migrate``."""
+
+    source_id: str
+    destination_id: str
+    state_db_path: str | None = None
+    verify_ssl: bool = True
+    timeout: int = Field(default=60, ge=1, le=1200)
+    workers: int = Field(default=1, ge=1, le=50)
+    scan_strategy: str = Field(default="resource", pattern="^(resource|principal)$")
+    dry_run: bool = False
+    skip_user_roles: bool = False
+    users_only: bool = False
+    resume: bool = False
+    checkpoint_dir: str | None = None
+    output_dir: str | None = None
+
+
+class IAMBenchmarkSyncRequest(BaseModel):
+    """Synchronous IAM benchmark for the web UI."""
+
+    source_id: str
+    verify_ssl: bool = True
+    sample_size: int = Field(default=50, ge=1, le=500)
+    workers: list[int] | None = None
+
+
+class ValidateRunRequest(BaseModel):
+    """Request to run post-migration validation."""
+
+    live: bool = False
+    resource_type: str | None = None
+    skip_hosts: bool = False
+    organizations: list[str] | None = None
+    source_id: str | None = None
+    destination_id: str | None = None
+    output_dir: str | None = None
+
+
 # --- Discrete ETL API Schemas ---
 
 

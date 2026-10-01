@@ -170,6 +170,7 @@ skips = [
     "B112",  # try_except_continue - intentional in migration batch paths
     "B603",  # subprocess - CLI invokes trusted local patch-projects command
     "B311",  # random.sample - statistical sampling in IAM benchmark, not crypto
+    "B608",  # false positive on large HTML report f-strings in validate/report.py
 ]
 # Security severity levels: LOW, MEDIUM, HIGH
 # Confidence levels: LOW, MEDIUM, HIGH
