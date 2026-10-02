@@ -405,7 +405,7 @@ def call_command(cmd_name: str, ctx: MigrationContext, **kwargs: Any) -> Any:
     registry = _service_command_registry()
     if cmd_name not in registry:
         raise ValueError(
-            f"Unknown service command {cmd_name!r}. " f"Available: {', '.join(sorted(registry))}"
+            f"Unknown service command {cmd_name!r}. Available: {', '.join(sorted(registry))}"
         )
     if not isinstance(ctx, MigrationContext):
         raise TypeError(f"ctx must be MigrationContext, got {type(ctx).__name__}")

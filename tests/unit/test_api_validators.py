@@ -798,10 +798,11 @@ class TestReviewHardening:
         # set_active with a wrong-kind id is a 400.
         wrong = client.post("/api/v1/connections/active", json={"source_id": tgt["id"]})
         assert wrong.status_code == 400, wrong.text
-        # Unknown job status narrows loudly.
+        # Unknown job status narrows loudly (500-class, never client 400).
         import pytest
 
+        from aap_migration.api.jobs._records import InternalStatusError
         from aap_migration.api.routers._common import _narrow_status
 
-        with pytest.raises(ValueError, match="Unknown job status"):
+        with pytest.raises(InternalStatusError, match="Unknown job status"):
             _narrow_status("nope")

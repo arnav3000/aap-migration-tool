@@ -258,10 +258,13 @@ def cancel_job(job_id: str) -> dict:
         raise HTTPException(status_code=404, detail=_key_detail(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    # One shape always: cancel_pending is True only while the worker still
-    # owns the job (running); queued cancels settle to cancelled immediately
-    # (False), so clients never KeyError on the common path.
-    return {"job_id": job_id, "status": job["status"], "cancel_pending": job["status"] == "running"}
+    # Narrow through the same literal poll uses so a future manager status
+    # fails loudly as 500 here too instead of leaking a raw string.
+    return {
+        "job_id": job_id,
+        "status": _narrow_status(job["status"]),
+        "cancel_pending": job["status"] == "running",
+    }
 
 
 @router.delete("/jobs/{job_id}")

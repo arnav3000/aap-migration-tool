@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from aap_migration import __version__
-from aap_migration.api.jobs import API_V1_PREFIX
+from aap_migration.api._paths import API_V1_PREFIX
 from aap_migration.api.models import init_api_db
 from aap_migration.api.routers import (
     analysis,
@@ -179,6 +179,12 @@ def create_app() -> FastAPI:
     @app.exception_handler(ValueError)
     async def _value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
         # Single error envelope: {"detail": "<message>"} (string detail).
+        # ConflictError subclasses ValueError but is handled by routers
+        # before reaching here; any stray ConflictError is still a 409.
+        from aap_migration.api.jobs._records import ConflictError
+
+        if isinstance(exc, ConflictError):
+            return JSONResponse(status_code=409, content={"detail": str(exc)})
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     @app.exception_handler(KeyError)
@@ -186,6 +192,22 @@ def create_app() -> FastAPI:
         args = getattr(exc, "args", ())
         detail = args[0] if args and isinstance(args[0], str) else str(exc).strip("'\"")
         return JSONResponse(status_code=404, content={"detail": detail})
+
+    @app.exception_handler(RuntimeError)
+    async def _runtime_error_handler(request: Request, exc: RuntimeError) -> JSONResponse:
+        # Internal invariant violations (unknown job status, queue/storage
+        # state) are server faults, never client 400s.
+        from aap_migration.api.jobs._records import (
+            InternalStatusError,
+            ServerShuttingDownError,
+            StorageUnhealthyError,
+        )
+
+        if isinstance(exc, StorageUnhealthyError | ServerShuttingDownError):
+            return JSONResponse(status_code=503, content={"detail": str(exc)})
+        if isinstance(exc, InternalStatusError):
+            return JSONResponse(status_code=500, content={"detail": str(exc)})
+        raise exc
 
     @app.get("/api/v1/docs", dependencies=auth, include_in_schema=False)
     async def _docs_v1(request: Request) -> HTMLResponse:

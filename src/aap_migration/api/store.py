@@ -31,6 +31,10 @@ SNAPSHOT_FP = "_snapshot_fp"
 SNAPSHOT_NEED = "_snapshot_need"
 SNAPSHOT_FERNET_FP = "_snapshot_fernet_fp"
 
+# Job types that never touch connections (no selectors, no snapshot pins
+# by construction): they must never veto connection admin.
+CONNECTIONLESS_JOB_TYPES = frozenset({"iam-report", "state-export"})
+
 
 def needs_target(need: NeedScope) -> bool:
     """True when the connection scope includes the target side.
@@ -204,21 +208,46 @@ def update_connection(
         return _to_dict(conn)
 
 
+def _pending_refs() -> list[dict[str, Any]]:
+    """Non-terminal ``{"job_type", "params"}`` refs, manager-unavailable safe."""
+    try:
+        from aap_migration.api.jobs import get_job_manager
+
+        return get_job_manager().non_terminal_refs()
+    except Exception:
+        return []
+
+
+def _is_connectionless(ref: dict[str, Any]) -> bool:
+    """True when the ref is a connectionless job by construction.
+
+    Connection-bearing submits are always pinned with snapshot ids
+    (``submit_chained`` raises before enqueue otherwise), so a job type in
+    ``CONNECTIONLESS_JOB_TYPES`` plus id-less params is connectionless by
+    construction. Unknown types with id-less params are treated as legacy
+    active-followers (veto) rather than silently skipped.
+    """
+    if ref.get("job_type") in CONNECTIONLESS_JOB_TYPES:
+        return True
+    params = ref.get("params") or {}
+    if params.get(SNAPSHOT_NEED) == "none":
+        return True
+    return False
+
+
 def _reject_if_connection_referenced(conn_id: str, session: Session) -> None:
     """Raise ConflictError when non-terminal jobs depend on *conn_id*."""
     from aap_migration.api.jobs._records import ConflictError
 
-    try:
-        from aap_migration.api.jobs import get_job_manager
-
-        pending = get_job_manager().non_terminal_params()
-    except Exception:
-        return
+    refs = _pending_refs()
     active = session.get(ApiActiveConfig, 1)
     active_src = active.source_id if active is not None else None
     active_tgt = active.target_id if active is not None else None
     matches = 0
-    for params in pending:
+    for ref in refs:
+        if _is_connectionless(ref):
+            continue
+        params = ref.get("params") or {}
         explicit = (params.get("source_id"), params.get("target_id"))
         snapshot = (params.get(SNAPSHOT_SOURCE_ID), params.get(SNAPSHOT_TARGET_ID))
         if conn_id in explicit or conn_id in snapshot:
@@ -228,18 +257,76 @@ def _reject_if_connection_referenced(conn_id: str, session: Session) -> None:
             f"Connection '{conn_id}' is referenced by {matches} queued/running job(s); "
             "wait for it to finish or cancel it before deleting."
         )
-    # Active-fallback jobs (no explicit or snapshot ids) follow the
-    # active pair, so deleting an active id strands them too.
+    # Legacy active-followers (no explicit or snapshot ids at all, not
+    # connectionless): they resolve via the active pair at execution, so
+    # deleting an active id strands them too.
     fallback_matches = sum(
         1
-        for params in pending
-        if not any((params.get("source_id"), params.get("target_id")))
-        and not any((params.get(SNAPSHOT_SOURCE_ID), params.get(SNAPSHOT_TARGET_ID)))
+        for ref in refs
+        if not _is_connectionless(ref)
+        and not any(
+            (
+                (ref.get("params") or {}).get("source_id"),
+                (ref.get("params") or {}).get("target_id"),
+            )
+        )
+        and not any(
+            (
+                (ref.get("params") or {}).get(SNAPSHOT_SOURCE_ID),
+                (ref.get("params") or {}).get(SNAPSHOT_TARGET_ID),
+            )
+        )
     )
     if fallback_matches and conn_id in (active_src, active_tgt):
         raise ConflictError(
             f"Connection '{conn_id}' is the active connection used by "
             f"{fallback_matches} queued/running job(s); wait for it to finish "
+            "or cancel it first."
+        )
+
+
+def _reject_if_active_referenced(conn_id: str, session: Session) -> None:
+    """Veto an active-pair move only for active-following jobs.
+
+    Unlike :func:`_reject_if_connection_referenced` (update/delete: any
+    explicit or snapshot pin vetoes), moving the active pair only affects
+    jobs that resolve via the active config -- those with no explicit id
+    for the moving side. Jobs with explicit ids (even pinned) and
+    connectionless jobs never consult the active pair, so unrelated
+    explicit-id work must not veto an active-pair move.
+    """
+    from aap_migration.api.jobs._records import ConflictError
+
+    refs = _pending_refs()
+    active = session.get(ApiActiveConfig, 1)
+    active_src = active.source_id if active is not None else None
+    active_tgt = active.target_id if active is not None else None
+    side: str | None = None
+    if conn_id == active_src:
+        side = "source"
+    elif conn_id == active_tgt:
+        side = "target"
+    else:
+        return
+    snap_key = SNAPSHOT_SOURCE_ID if side == "source" else SNAPSHOT_TARGET_ID
+    explicit_key = "source_id" if side == "source" else "target_id"
+    followers = 0
+    for ref in refs:
+        if _is_connectionless(ref):
+            continue
+        params = ref.get("params") or {}
+        if params.get(explicit_key):
+            continue  # explicit id: does not follow the active pair
+        snap = params.get(snap_key)
+        if snap is not None:
+            if snap == conn_id:
+                followers += 1
+        else:
+            followers += 1  # legacy pinless follower of the active pair
+    if followers:
+        raise ConflictError(
+            f"Connection '{conn_id}' is the active {side} connection used by "
+            f"{followers} queued/running job(s); wait for it to finish "
             "or cancel it first."
         )
 
@@ -306,9 +393,9 @@ def set_active(
         src_changing = clear_source or (source_id is not None and source_id != old_src)
         tgt_changing = clear_target or (target_id is not None and target_id != old_tgt)
         if src_changing and old_src:
-            _reject_if_connection_referenced(old_src, session)
+            _reject_if_active_referenced(old_src, session)
         if tgt_changing and old_tgt:
-            _reject_if_connection_referenced(old_tgt, session)
+            _reject_if_active_referenced(old_tgt, session)
         if clear_source:
             active.source_id = None
         elif source_id is not None:

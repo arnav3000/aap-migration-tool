@@ -11,7 +11,8 @@ import ...`` keeps working unchanged:
 - :mod:`aap_migration.api.jobs._fences` -- orphan-fence tracking (see FenceTracker)
 - :mod:`aap_migration.api.jobs._index` -- restart-durable terminal index
 - :mod:`aap_migration.api.jobs._retention` -- MAX_JOBS eviction + dir removal
-- :mod:`aap_migration.api.jobs.manager` -- FIFO :class:`JobManager` (queue/transition orchestration)
+- :mod:`aap_migration.api.jobs.manager` -- FIFO :class:`JobManager` (queue/transition facade)
+- :mod:`aap_migration.api.jobs._worker` -- worker loop + fence/park orchestration mixin
 
 Public records never expose server-local filesystem paths; the internal
 record keeps ``job_dir`` for workers only. Error strings returned to callers
@@ -46,11 +47,15 @@ from aap_migration.api.jobs._records import (
     API_V1_PREFIX,
     TERMINAL_STATUSES,
     ConflictError,
+    InternalStatusError,
     JobRecord,
     QueueFullError,
+    ServerShuttingDownError,
+    StorageUnhealthyError,
     UnknownJobError,
     _normalize_result,
     _utcnow,
+    public_job_params,
 )
 from aap_migration.api.jobs._scrub import _scrub_output as _scrub_output  # noqa: F401
 from aap_migration.api.jobs.manager import JobManager
@@ -66,10 +71,14 @@ __all__ = [
     "ACTIVE_STATUSES",
     "TERMINAL_STATUSES",
     "ConflictError",
+    "InternalStatusError",
     "UnknownJobError",
     "JobManager",
     "JobRecord",
     "QueueFullError",
+    "ServerShuttingDownError",
+    "StorageUnhealthyError",
+    "public_job_params",
     "_ThreadLocalProxy",
     "_bounded_output",
     "_console_tail",

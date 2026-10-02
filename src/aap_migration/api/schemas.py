@@ -201,6 +201,14 @@ def _normalize_phase_value(value: Any) -> Any:
     return value
 
 
+def _lowercase_phase(data: Any) -> Any:
+    """Shared before-validator: lowercase ``phase`` when present."""
+    if isinstance(data, dict) and "phase" in data:
+        data = dict(data)
+        data["phase"] = _normalize_phase_value(data["phase"])
+    return data
+
+
 class MigrateRequest(ChainedRequest):
     resource_types: list[str] | None = Field(
         default=None,
@@ -214,10 +222,7 @@ class MigrateRequest(ChainedRequest):
     @model_validator(mode="before")
     @classmethod
     def _normalize_phase(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "phase" in data:
-            data = dict(data)
-            data["phase"] = _normalize_phase_value(data["phase"])
-        return data
+        return _lowercase_phase(data)
 
     @model_validator(mode="after")
     def _check_phase(self) -> MigrateRequest:
@@ -232,6 +237,30 @@ class MigrateResumeRequest(ChainedRequest):
     from_phase: str | None = None
     disable_progress: bool = False
     quiet: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_from_phase(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "from_phase" in data:
+            data = dict(data)
+            if data["from_phase"] is not None:
+                data["from_phase"] = _normalize_phase_value(data["from_phase"])
+        return data
+
+    @model_validator(mode="after")
+    def _check_from_phase(self) -> MigrateResumeRequest:
+        # Value-domain rejection lives in the schema so it is 422 by
+        # construction (same dialect as automatic validation), not a
+        # hand-raised router 422 beside 400/409 siblings.
+        if self.from_phase is not None:
+            from aap_migration.resources import ALL_RESOURCE_TYPES
+
+            lowered = {str(p).lower(): str(p) for p in ALL_RESOURCE_TYPES}
+            canonical = lowered.get(str(self.from_phase).lower())
+            if canonical is None:
+                raise ValueError(f"Unknown phase '{self.from_phase}'")
+            object.__setattr__(self, "from_phase", canonical)
+        return self
 
 
 class ExportRequest(ChainedRequest):
@@ -274,10 +303,7 @@ class ImportRequest(ChainedRequest):
     @model_validator(mode="before")
     @classmethod
     def _normalize_phase(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "phase" in data:
-            data = dict(data)
-            data["phase"] = _normalize_phase_value(data["phase"])
-        return data
+        return _lowercase_phase(data)
 
 
 class PatchProjectsRequest(ChainedRequest):
@@ -439,7 +465,10 @@ class PayloadCheckRequest(BaseModel):
 
 # -- analysis -----------------------------------------------------------------
 class AnalyzeDependenciesRequest(ChainedRequest):
-    organizations: list[str] = Field(default_factory=list)
+    organizations: list[str] | None = Field(
+        default=None,
+        description="None (omitted) means all via analyze_all; explicit [] is a no-op selecting none.",
+    )
     analyze_all: bool = False
     verbose: bool = False
     # Legacy spellings accepted at the boundary; canonicalized via
@@ -600,6 +629,33 @@ class JobListOut(BaseModel):
     offset: int = 0
 
 
+class MappingsListOut(BaseModel):
+    """GET /state/mappings envelope.
+
+    Uses the resource-named ``mappings`` key (not ``items``): the envelope
+    is otherwise identical (``limit``/``offset``/``total``) and OpenAPI pins
+    it here, so typed clients reuse one pager with a per-route key.
+    """
+
+    model_config = {"extra": "allow"}
+
+    mappings: list[Any] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 50
+    offset: int = 0
+
+
+class CheckpointsListOut(BaseModel):
+    """GET /checkpoints envelope (resource-named ``checkpoints`` key)."""
+
+    model_config = {"extra": "allow"}
+
+    checkpoints: list[Any] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 50
+    offset: int = 0
+
+
 class ResourcesOut(BaseModel):
     """GET /resources catalog shape."""
 
@@ -613,19 +669,18 @@ class ResourcesOut(BaseModel):
 
 
 class PrepSchemasOut(BaseModel):
-    """GET /prep/schemas shape (canonical errors_by_file dict)."""
+    """GET /prep/schemas shape (canonical errors_by_file dict).
+
+    Only ``errors_by_file`` (dict) is served here. Validation results
+    elsewhere use ``errors`` as list[str] under their own response models;
+    the names no longer collide on one route, so a shared ``errors`` parser
+    cannot mis-decode. Removed in v2: none (the old ``errors`` dict alias
+    was removed; read ``errors_by_file``).
+    """
 
     model_config = {"extra": "allow"}
 
     errors_by_file: dict[str, str] = Field(default_factory=dict)
-    # Deprecated alias of errors_by_file (dict); removed in v2. New clients
-    # must read errors_by_file. Validation results elsewhere use errors as
-    # list[str] -- names diverge on purpose and OpenAPI pins each route.
-    errors: dict[str, str] = Field(
-        default_factory=dict,
-        deprecated=True,
-        description="Deprecated alias of errors_by_file; removed in v2.",
-    )
 
 
 class JobArtifactsOut(BaseModel):

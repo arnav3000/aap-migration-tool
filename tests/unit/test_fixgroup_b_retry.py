@@ -101,7 +101,10 @@ def test_retry_failed_timeout_kills_child_and_continues(tmp_path: Any, monkeypat
     monkeypatch.setattr(retry_mod.subprocess, "run", fake_run)
 
     raw = _unwrap_callback(retry_mod.retry_failed)
-    raw(ctx, resource_type=(), input_dir=None, dry_run=False, yes=True)
+    # The timed-out type is re-marked failed and the command exits nonzero
+    # naming it, instead of printing unconditional success.
+    with pytest.raises(Exception, match="credentials"):
+        raw(ctx, resource_type=(), input_dir=None, dry_run=False, yes=True)
 
     assert [c["cmd"][c["cmd"].index("-r") + 1] for c in calls] == [
         "credentials",

@@ -213,6 +213,7 @@ def retry_failed(
     # Note: grandchildren detached by the child may outlive the kill; each
     # resource kind is independent, so the loop continues with the next one.
     child_timeout = _retry_child_timeout_secs()
+    failed_types: list[str] = []
     for rtype in grouped.keys():
         echo_info(f"Retrying {rtype}... (timeout {child_timeout:g}s)")
 
@@ -241,20 +242,57 @@ def retry_failed(
                 echo_success(f"  ✓ {rtype} retry completed")
             else:
                 echo_warning(f"  ⚠ {rtype} retry finished with errors")
+                failed_types.append(rtype)
+                _mark_type_failed(state, rtype)
 
         except subprocess.TimeoutExpired:
             echo_error(
                 f"Retry of {rtype} timed out after {child_timeout:g}s; "
                 "child process killed, continuing with next type"
             )
+            failed_types.append(rtype)
+            _mark_type_failed(state, rtype, note="timeout")
             continue
         except Exception as e:
             echo_error(f"Failed to retry {rtype}: {e}")
+            failed_types.append(rtype)
+            _mark_type_failed(state, rtype, note=str(e))
             continue
 
     click.echo()
+    if failed_types:
+        from click import ClickException
+
+        raise ClickException(
+            f"Retry failed for: {', '.join(failed_types)}. "
+            "Their rows were re-marked 'failed'; fix the cause and retry again."
+        )
     echo_success("Retry complete!")
     echo_info("Run 'aap-bridge retry status' to see updated progress")
+
+
+def _mark_type_failed(state: Any, rtype: str, note: str | None = None) -> None:
+    """Re-mark still-pending rows of *rtype* as failed (best-effort).
+
+    Rows were flipped to pending before the child ran; a timeout, spawn
+    error, or nonzero exit leaves them pending behind a success message.
+    Flip them back so the next status/retry sees the truth.
+    """
+    try:
+        from aap_migration.migration.database import get_session
+        from aap_migration.migration.models import MigrationProgress
+
+        with get_session(state.database_url) as session:
+            rows = (
+                session.query(MigrationProgress)
+                .filter_by(resource_type=rtype, status="pending")
+                .all()
+            )
+            for row in rows:
+                row.status = "failed"
+            session.commit()
+    except Exception:
+        pass
 
 
 @retry_group.command(name="status")

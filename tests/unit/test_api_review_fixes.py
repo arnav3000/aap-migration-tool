@@ -624,6 +624,51 @@ class TestBurstBackoff:
         assert manager.worker_alive()
 
 
+class TestRelativize:
+    """#8: _relativize keeps server-local paths out of public payloads."""
+
+    def test_under_workdir_becomes_relative(self, tmp_path: Any) -> None:
+        from aap_migration.api.services._core import _relativize
+
+        workdir = tmp_path / "job"
+        workdir.mkdir()
+        target = str(workdir / "reports" / "out.md")
+        assert _relativize(target, workdir) == "reports/out.md"
+
+    def test_outside_workdir_unchanged(self, tmp_path: Any) -> None:
+        from aap_migration.api.services._core import _relativize
+
+        workdir = tmp_path / "job"
+        workdir.mkdir()
+        assert _relativize("/etc/passwd", workdir) == "/etc/passwd"
+        assert _relativize("relative/path", workdir) == "relative/path"
+
+    def test_nested_structures_and_passthrough(self, tmp_path: Any) -> None:
+        from aap_migration.api.services._core import _relativize
+
+        workdir = tmp_path / "job"
+        workdir.mkdir()
+        inner = str(workdir / "a.txt")
+        payload = {"p": inner, "lst": [inner, 42, None], "n": {"x": inner}}
+        out = _relativize(payload, workdir)
+        assert out == {"p": "a.txt", "lst": ["a.txt", 42, None], "n": {"x": "a.txt"}}
+        assert _relativize(123, workdir) == 123
+        assert _relativize(None, workdir) is None
+
+    def test_credential_compare_carries_no_absolute_paths(
+        self, pair: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        import json as _json
+
+        from aap_migration.api.jobs import get_job_manager
+
+        _fake_success(monkeypatch, "run_export")
+        job = _wait(client, client.post("/api/v1/exports", json={}).json()["job_id"])
+        ref = get_job_manager().get_internal(job["job_id"])
+        blob = _json.dumps(job.get("result") or {})
+        assert str(ref["job_dir"]) not in blob
+
+
 class TestScopeSemantics:
     """#7: omitted resource_types means all, explicit [] is a no-op."""
 
@@ -635,6 +680,35 @@ class TestScopeSemantics:
         assert job["status"] == "succeeded", job.get("error")
         assert job["result"]["artifacts"] == []
         assert "nothing to do" in job["result"]["message"]
+
+    def test_explicit_empty_noop_real_worker(
+        self, pair: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """Real run_export (only chained_ctx stubbed) honors the no-op guard."""
+        import aap_migration.api.services.etl as etl_mod
+        from aap_migration.api.services._core import noop_result
+
+        def _fake_ctx(job: Any) -> Any:
+            import contextlib
+            from pathlib import Path
+
+            workdir = Path(job["job_dir"]).resolve()
+
+            @contextlib.contextmanager
+            def _cm() -> Any:
+                yield (None, None, workdir, job.get("params", {}))
+
+            return _cm()
+
+        # Patch where it is looked up (etl imports the name directly).
+        monkeypatch.setattr(etl_mod, "chained_ctx", _fake_ctx)
+        rec = client.post("/api/v1/exports", json={"resource_types": []})
+        assert rec.status_code == 202, rec.text
+        job = _wait(client, rec.json()["job_id"])
+        assert job["status"] == "succeeded", job.get("error")
+        assert job["result"]["artifacts"] == []
+        assert "nothing to do" in job["result"]["message"]
+        assert noop_result()["message"] in job["result"]["message"]
 
     def test_omitted_means_all(self, pair: Any, client: TestClient, monkeypatch: Any) -> None:
         _fake_success(monkeypatch, "run_export")

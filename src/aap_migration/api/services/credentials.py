@@ -66,9 +66,12 @@ def run_credential_migrate(job: JobRecord) -> dict[str, Any]:
 
         result: dict[str, Any] = asyncio.run(_main())
         result = cast(dict[str, Any], _relativize(result, workdir))
-        result.setdefault("message", "Credential migration complete")
-        result.setdefault("artifacts", _artifacts(workdir, "reports"))
-        # Ensure the no_action_needed branch also carries the envelope.
+        # No-action branch wins over the generic default (setdefault never
+        # overwrites): check the specific status first so a no-op run
+        # reports "No credential action needed", not "complete".
         if result.get("status") == "no_action_needed":
             result.setdefault("message", "No credential action needed")
+        else:
+            result.setdefault("message", "Credential migration complete")
+        result.setdefault("artifacts", _artifacts(workdir, "reports"))
         return result

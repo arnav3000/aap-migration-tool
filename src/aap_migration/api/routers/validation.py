@@ -6,7 +6,7 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from aap_migration.api import services
 from aap_migration.api.context import build_ephemeral_context
@@ -42,10 +42,12 @@ def _redacted_dir(path: str) -> str:
 
 
 @router.post("/validations", response_model=JobCreated, status_code=202)
-def start_validation(body: ValidateRequest) -> JobCreated:
+def start_validation(body: ValidateRequest, request: Request) -> JobCreated:
     """Post-migration validation (database mode default, ``live`` optional)."""
     # skip_hosts/hosts exclusion lives in ValidateRequest (single home).
-    return submit_chained("validate", body, services.run_validate)
+    return submit_chained(
+        "validate", body, services.run_validate, root_path=request.scope.get("root_path", "")
+    )
 
 
 @router.post("/validations/dependencies", response_model=ValidationDependencyOut)

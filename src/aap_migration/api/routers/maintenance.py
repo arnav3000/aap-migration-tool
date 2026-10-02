@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from aap_migration.api import services
 from aap_migration.api.jobs import get_job_manager
@@ -22,9 +22,11 @@ router = APIRouter(tags=["maintenance"])
 
 
 @router.post("/prep", response_model=JobCreated, status_code=202)
-def start_prep(body: PrepRequest) -> JobCreated:
+def start_prep(body: PrepRequest, request: Request) -> JobCreated:
     """Discover endpoints + generate schemas (mirrors ``prep``)."""
-    return submit_chained("prep", body, services.run_prep)
+    return submit_chained(
+        "prep", body, services.run_prep, root_path=request.scope.get("root_path", "")
+    )
 
 
 @router.get("/prep/schemas", response_model=PrepSchemasOut)
@@ -34,12 +36,10 @@ def get_prep_schemas() -> dict:
     Always HTTP 200. Each artifact value is the parsed payload or null
     when missing/unreadable; per-file failures are surfaced in the
     top-level ``"errors_by_file": {name: message}`` map (never as
-    ``{"error": ...}`` sentinels inside the values). ``"errors"`` is
-    kept as a deprecated alias of ``errors_by_file`` for back-compat
-    (deprecated=True in OpenAPI; removed in v2); new clients should read
-    ``errors_by_file``. Validation results elsewhere use ``errors`` as a
-    list of strings -- the names diverge on purpose and OpenAPI pins each
-    route separately (see ``PrepSchemasOut``).
+    ``{"error": ...}`` sentinels inside the values). Validation results
+    elsewhere use ``errors`` as a list of strings under their own models;
+    this route serves only ``errors_by_file`` so one key never carries two
+    wire types.
     """
     startup_cwd = Path(os.environ.get("AAP_BRIDGE_STARTUP_CWD", os.getcwd())).resolve()
     base = get_job_manager().base_dir
@@ -71,12 +71,12 @@ def get_prep_schemas() -> dict:
                 break
         out[name] = payload
     out["errors_by_file"] = errors
-    # Deprecated alias (deprecated=True in PrepSchemasOut; removed in v2).
-    out["errors"] = errors
     return out
 
 
 @router.post("/cleanup", response_model=JobCreated, status_code=202)
-def start_cleanup(body: CleanupRequest) -> JobCreated:
+def start_cleanup(body: CleanupRequest, request: Request) -> JobCreated:
     """Delete migrated resources + reset state (mirrors ``cleanup``)."""
-    return submit_chained("cleanup", body, services.run_cleanup)
+    return submit_chained(
+        "cleanup", body, services.run_cleanup, root_path=request.scope.get("root_path", "")
+    )

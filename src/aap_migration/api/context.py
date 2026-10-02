@@ -449,11 +449,18 @@ def check_pair_switch(
     opt-in, so implicit active-pair changes cannot silently switch pipelines.
     """
     allow = bool(params.get("allow_pair_switch", False))
+    _snap_key = {"source_id": SNAPSHOT_SOURCE_ID, "target_id": SNAPSHOT_TARGET_ID}
     for key in ("source_id", "target_id"):
         new = params.get(key)
         if not new:
             continue
-        old = ref_params.get(key)
+        # Compare against the referenced job's effective id (snapshot pin
+        # falling back to the explicit id, mirroring the snapshot branch
+        # below): passing the same effective pair explicitly must pass
+        # like the all-fallback case instead of demanding opt-in.
+        old = ref_params.get(_snap_key[key])
+        if old is None:
+            old = ref_params.get(key)
         if (old is None or new != old) and not allow:
             raise ValueError(
                 f"Chained job overrides {key} ({old} -> {new}); "

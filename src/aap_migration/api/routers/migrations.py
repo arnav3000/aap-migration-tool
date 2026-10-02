@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import tempfile
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from aap_migration.api import services
 from aap_migration.api.context import build_ephemeral_context
@@ -34,15 +34,15 @@ router = APIRouter(tags=["migrations"])
 
 
 @router.post("/migrations", response_model=JobCreated, status_code=202)
-def start_migration(body: MigrateRequest) -> JobCreated:
+def start_migration(body: MigrateRequest, request: Request) -> JobCreated:
     """Run the full workflow: prep -> export -> transform -> import."""
-    return submit_chained("migrate", body, services.run_migrate)
+    return submit_chained(
+        "migrate", body, services.run_migrate, root_path=request.scope.get("root_path", "")
+    )
 
 
 @router.get("/migrations/status", response_model=MigrationStatusOut)
 def migration_status(
-    source_id: str | None = None,
-    target_id: str | None = None,
     job_id: str | None = Query(
         default=None, description="When set, read the chained job's state DB"
     ),
@@ -52,6 +52,11 @@ def migration_status(
     ),
 ) -> dict:
     """Show migration status (mirrors ``migrate status``).
+
+    The read is scoped by ``job_id`` or the server-default DB: connection
+    ids are resolved at submit time via snapshot pins, so per-request
+    ``source_id``/``target_id`` scoping is not supported here (removed;
+    pass ``job_id`` to read a chained job's DB).
 
     By default (CLI parity) a missing DB returns 200 with a ``warning`` key,
     matching the state/mappings/retry/checkpoint readers. Pass
@@ -130,45 +135,39 @@ def migration_status(
 
 
 @router.post("/migrations/resume", response_model=JobCreated, status_code=202)
-def resume_migration(body: MigrateResumeRequest) -> JobCreated:
+def resume_migration(body: MigrateResumeRequest, request: Request) -> JobCreated:
     """Resume from the last checkpoint (mirrors ``migrate resume``).
 
     Unlike other ETL phases, resume chains onto ``failed`` and ``cancelled``
     jobs (the ones that need resuming) as well as ``succeeded`` ones; only
     ``queued``/``running`` references are rejected with 409. The
-    ``from_phase`` typo check returns 422 (request validation) with the
-    CLI-parity message and normalized spelling.
+    ``from_phase`` value-domain check lives in the schema (422 by
+    construction); lifecycle conflicts stay 409 and missing prerequisites
+    stay 400, so each failure class has one code.
     """
-    from aap_migration.resources import ALL_RESOURCE_TYPES
-
-    # CLI parity: --from-phase accepts any case (case_sensitive=False), so
-    # normalize at the boundary and forward the canonical spelling; the
-    # worker's MIGRATION_PHASES.index() is exact-case.
-    canonical = None
-    if body.from_phase:
-        lowered = {str(p).lower(): str(p) for p in ALL_RESOURCE_TYPES}
-        canonical = lowered.get(str(body.from_phase).lower())
-        if canonical is None:
-            raise HTTPException(status_code=422, detail=f"Unknown phase '{body.from_phase}'")
-        body = body.model_copy(update={"from_phase": canonical})
     return submit_chained(
         "migrate-resume",
         body,
         services.run_migrate_resume,
         allow_statuses=TERMINAL_STATUSES,
+        root_path=request.scope.get("root_path", ""),
     )
 
 
 @router.post("/exports", response_model=JobCreated, status_code=202)
-def start_export(body: ExportRequest) -> JobCreated:
+def start_export(body: ExportRequest, request: Request) -> JobCreated:
     """Export RAW resources from source AAP (mirrors ``export``)."""
-    return submit_chained("export", body, services.run_export)
+    return submit_chained(
+        "export", body, services.run_export, root_path=request.scope.get("root_path", "")
+    )
 
 
 @router.post("/transforms", response_model=JobCreated, status_code=202)
-def start_transform(body: TransformRequest) -> JobCreated:
+def start_transform(body: TransformRequest, request: Request) -> JobCreated:
     """Transform RAW exports (mirrors ``transform``)."""
-    return submit_chained("transform", body, services.run_transform)
+    return submit_chained(
+        "transform", body, services.run_transform, root_path=request.scope.get("root_path", "")
+    )
 
 
 @router.post("/transforms/preview")
@@ -232,9 +231,11 @@ def preview_transform(body: PayloadCheckRequest) -> dict:
 
 
 @router.post("/imports", response_model=JobCreated, status_code=202)
-def start_import(body: ImportRequest) -> JobCreated:
+def start_import(body: ImportRequest, request: Request) -> JobCreated:
     """Import transformed resources to target AAP (mirrors ``import``)."""
-    return submit_chained("import", body, services.run_import)
+    return submit_chained(
+        "import", body, services.run_import, root_path=request.scope.get("root_path", "")
+    )
 
 
 @router.post("/imports/check-dependencies")
@@ -319,12 +320,22 @@ def check_import_dependencies(body: ImportDependencyCheckRequest) -> dict:
 
 
 @router.post("/imports/patch-projects", response_model=JobCreated, status_code=202)
-def start_patch_projects(body: PatchProjectsRequest) -> JobCreated:
+def start_patch_projects(body: PatchProjectsRequest, request: Request) -> JobCreated:
     """Patch project SCM details, Phase 2 (mirrors ``patch-projects``)."""
-    return submit_chained("patch-projects", body, services.run_patch_projects)
+    return submit_chained(
+        "patch-projects",
+        body,
+        services.run_patch_projects,
+        root_path=request.scope.get("root_path", ""),
+    )
 
 
 @router.post("/imports/granular", response_model=JobCreated, status_code=202)
-def start_granular_import(body: GranularImportRequest) -> JobCreated:
+def start_granular_import(body: GranularImportRequest, request: Request) -> JobCreated:
     """Import micro-phase steps in order (mirrors the granular import menu)."""
-    return submit_chained("granular-import", body, services.run_granular_import)
+    return submit_chained(
+        "granular-import",
+        body,
+        services.run_granular_import,
+        root_path=request.scope.get("root_path", ""),
+    )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from aap_migration.api import services
 from aap_migration.api.routers._common import submit_chained
@@ -17,18 +17,33 @@ router = APIRouter(tags=["credentials"])
 
 
 @router.post("/credentials/compare", response_model=JobCreated, status_code=202)
-def compare_credentials(body: CredentialCompareRequest) -> JobCreated:
+def compare_credentials(body: CredentialCompareRequest, request: Request) -> JobCreated:
     """Compare source/target credentials and write a comparison report."""
-    return submit_chained("credentials-compare", body, services.run_credential_compare)
+    return submit_chained(
+        "credentials-compare",
+        body,
+        services.run_credential_compare,
+        root_path=request.scope.get("root_path", ""),
+    )
 
 
 @router.post("/credentials/migrate", response_model=JobCreated, status_code=202)
-def migrate_credentials(body: CredentialMigrateRequest) -> JobCreated:
+def migrate_credentials(body: CredentialMigrateRequest, request: Request) -> JobCreated:
     """Migrate missing credentials (+ org/credential-type deps)."""
-    return submit_chained("credentials-migrate", body, services.run_credential_migrate)
+    return submit_chained(
+        "credentials-migrate",
+        body,
+        services.run_credential_migrate,
+        root_path=request.scope.get("root_path", ""),
+    )
 
 
 @router.post("/credentials/report", response_model=JobCreated, status_code=202)
-def credential_report(body: CredentialReportRequest) -> JobCreated:
+def credential_report(body: CredentialReportRequest, request: Request) -> JobCreated:
     """Generate a credential status report (same worker as compare)."""
-    return submit_chained("credentials-report", body, services.run_credential_compare)
+    return submit_chained(
+        "credentials-report",
+        body,
+        services.run_credential_compare,
+        root_path=request.scope.get("root_path", ""),
+    )

@@ -231,6 +231,8 @@ class TestConnectionMutationGuards:
     ) -> None:
         import time
 
+        from aap_migration.api import store as store_mod
+
         manager, _e, release = self._blocker_job(pair, client, monkeypatch)
         src, tgt = pair
         other = client.post(
@@ -243,8 +245,27 @@ class TestConnectionMutationGuards:
             },
         ).json()
         try:
+            # Explicit-id jobs do not follow the active pair, so an
+            # unrelated explicit-id blocker must NOT veto the move (200).
             resp = client.post("/api/v1/connections/active", json={"source_id": other["id"]})
-            assert resp.status_code == 409, resp.text
+            assert resp.status_code == 200, resp.text
+            # Restore, then prove an active-following job still vetoes (409):
+            # a pending job with snapshot pins to src but no explicit ids.
+            back = client.post("/api/v1/connections/active", json={"source_id": src["id"]})
+            assert back.status_code == 200, back.text
+            snap = store_mod.pair_fingerprint(None, None, need="both")
+            manager.submit(
+                "follower",
+                {
+                    store_mod.SNAPSHOT_SOURCE_ID: snap["source_id"],
+                    store_mod.SNAPSHOT_TARGET_ID: snap["target_id"],
+                    store_mod.SNAPSHOT_FP: snap["fp"],
+                    store_mod.SNAPSHOT_NEED: "both",
+                },
+                lambda job: {"message": "follower"},
+            )
+            veto = client.post("/api/v1/connections/active", json={"source_id": other["id"]})
+            assert veto.status_code == 409, veto.text
         finally:
             release.set()
         deadline = time.time() + 30

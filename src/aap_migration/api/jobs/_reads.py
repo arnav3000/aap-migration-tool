@@ -100,6 +100,22 @@ class JobReadMixin:
                 if job.get("status") not in TERMINAL_STATUSES
             ]
 
+    def non_terminal_refs(self) -> list[dict[str, Any]]:
+        """Return ``{"job_type", "params"}`` for every non-terminal job.
+
+        Lifecycle guards that must tell connectionless jobs (iam-report,
+        state-export: no selectors, no pins by construction) apart from
+        active-following jobs use this instead of ``non_terminal_params``.
+        """
+        from aap_migration.api.jobs._records import TERMINAL_STATUSES
+
+        with self._lock:
+            return [
+                {"job_type": job.get("job_type"), "params": dict(job.get("params") or {})}
+                for job in self._jobs.values()
+                if job.get("status") not in TERMINAL_STATUSES
+            ]
+
     def worker_alive(self) -> bool:
         """Return True when the FIFO worker thread is alive."""
         worker = getattr(self, "_worker", None)

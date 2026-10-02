@@ -7,11 +7,14 @@ from typing import Any, Literal, cast
 
 from fastapi import HTTPException
 
+from aap_migration.api._paths import API_V1_PREFIX
 from aap_migration.api.jobs import (
-    API_V1_PREFIX,
     ConflictError,
+    InternalStatusError,
     JobRecord,
     QueueFullError,
+    ServerShuttingDownError,
+    StorageUnhealthyError,
     UnknownJobError,
     get_job_manager,
 )
@@ -34,14 +37,14 @@ from aap_migration.api.store import (
 def _narrow_status(value: str) -> JobStatusValue:
     """Narrow an internal status string to the public literal (fail loudly).
 
-    A future manager status (or a typo) surfaces here as a greppable
-    ValueError (400) instead of an unchecked cast that blows up later as a
-    response-validation 500.
+    An unknown manager status is a server invariant violation: it raises
+    InternalStatusError (500), never a client 400, so operators alerting
+    on 5xx see it instead of clients retrying identical requests forever.
     """
     from typing import get_args
 
     if value not in get_args(JobStatusValue):
-        raise ValueError(f"Unknown job status '{value}'")
+        raise InternalStatusError(f"Unknown job status '{value}'")
     return cast(JobStatusValue, value)
 
 
@@ -54,7 +57,15 @@ def public_params(params: dict[str, Any]) -> dict[str, Any]:
     polling. Single home for the rule (mirrors the manager's ``_public``
     stripping) so every public job-params view filters the same way.
     """
-    return {k: v for k, v in params.items() if not k.startswith("_")}
+    from aap_migration.api.jobs._records import public_job_params
+
+    return public_job_params(params)
+
+
+def _poll_url(job_id: str, root_path: str = "") -> str:
+    """Build a root_path-aware poll URL for subpath-mounted deployments."""
+    prefix = (root_path or "").rstrip("/")
+    return f"{prefix}{API_V1_PREFIX}/jobs/{job_id}"
 
 
 def submit_job(
@@ -62,6 +73,7 @@ def submit_job(
     params: dict[str, Any],
     func: Callable[[JobRecord], dict[str, Any]],
     job_dir: str | None = None,
+    root_path: str = "",
 ) -> JobCreated:
     """Enqueue a background job and build the response model."""
     try:
@@ -78,7 +90,7 @@ def submit_job(
         job_id=job["job_id"],
         job_type=job["job_type"],
         status=_narrow_status(job["status"]),
-        poll_url=f"{API_V1_PREFIX}/jobs/{job['job_id']}",
+        poll_url=_poll_url(job["job_id"], root_path),
         chained_from_status=chained_from,
     )
 
@@ -98,16 +110,21 @@ def _key_detail(exc: BaseException) -> str:
 
 
 def _store_http_error(exc: Exception) -> HTTPException:
-    """Single home for store/manager error -> HTTP mapping (type-based)."""
+    """Single home for store/manager error -> HTTP mapping (type-based).
+
+    Codes come from exception types only, never message text: rewording a
+    message cannot flip the wire contract.
+    """
     if isinstance(exc, UnknownJobError) or isinstance(exc, KeyError):
         return HTTPException(status_code=404, detail=_key_detail(exc))
     if isinstance(exc, ConflictError):
         return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, StorageUnhealthyError | ServerShuttingDownError):
+        return HTTPException(status_code=503, detail=str(exc))
     if isinstance(exc, QueueFullError):
-        message = str(exc)
-        if message.startswith(("Server storage unhealthy", "Server is shutting down")):
-            return HTTPException(status_code=503, detail=message)
-        return HTTPException(status_code=429, detail=message)
+        return HTTPException(status_code=429, detail=str(exc))
+    if isinstance(exc, InternalStatusError):
+        return HTTPException(status_code=500, detail=str(exc))
     if isinstance(exc, ValueError):
         return HTTPException(status_code=400, detail=str(exc))
     raise exc  # pragma: no cover
@@ -117,7 +134,7 @@ def handle_store_errors(func: Callable, *args: Any, **kwargs: Any) -> Any:
     """Map store-layer errors to HTTP errors (single home, type-based)."""
     try:
         return func(*args, **kwargs)
-    except (KeyError, ValueError, QueueFullError) as exc:
+    except (KeyError, ValueError, QueueFullError, InternalStatusError) as exc:
         raise _store_http_error(exc) from exc
 
 
@@ -144,7 +161,7 @@ def require_connections(
             store.get_connection(sid, include_token=True)
         else:
             store.resolve_active_pair(source_id, target_id)
-    except (KeyError, ValueError, QueueFullError) as exc:
+    except (KeyError, ValueError, QueueFullError, InternalStatusError) as exc:
         raise _store_http_error(exc) from exc
 
 
@@ -167,6 +184,7 @@ def submit_chained(
     func: Callable[[JobRecord], dict[str, Any]],
     need: Literal["both", "source", "none"] = "both",
     allow_statuses: tuple[str, ...] = ("succeeded",),
+    root_path: str = "",
 ) -> JobCreated:
     """Pre-validate connections + chaining, then enqueue the job.
 
@@ -177,7 +195,8 @@ def submit_chained(
     mid-pipeline require explicit ``allow_pair_switch`` here, not just at
     execution, so mismatches fail fast with 400. Connectionless jobs
     (``need="none"``) skip snapshotting and gating. Resume callers pass
-    ``allow_statuses`` including failed/cancelled.
+    ``allow_statuses`` including failed/cancelled. ``root_path`` prefixes
+    the poll URL so subpath-mounted deployments get a working target.
     """
     from aap_migration.api.context import check_pair_switch
 
@@ -223,7 +242,7 @@ def submit_chained(
             from aap_migration.api.context import submit_pair_snapshot
 
             dumped.update(submit_pair_snapshot(source_id, target_id, need))
-        except (KeyError, ValueError, QueueFullError) as exc:
+        except (KeyError, ValueError, QueueFullError, InternalStatusError) as exc:
             raise _store_http_error(exc) from exc
     if job_ref and reuse and needs_connections(need):
         # Connectionless jobs (need="none", e.g. iam-report) skip this gate:
@@ -250,4 +269,4 @@ def submit_chained(
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return submit_job(job_type, dumped, func, job_dir=reuse)
+    return submit_job(job_type, dumped, func, job_dir=reuse, root_path=root_path)

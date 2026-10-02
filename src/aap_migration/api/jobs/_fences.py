@@ -119,10 +119,13 @@ class FenceTracker:
         """Drop finished orphans and unfence their directories/pairs.
 
         A timed-out pool thread cannot be preempted, so its pool is shut
-        down (no-wait) only once its future reports done; the fence stays
-        until then, except when the fence deadline expires (a wedged
-        thread must degrade to a warning instead of bricking its pair
-        forever: the fence is released but the orphan stays tracked).
+        down (no-wait) only once its future reports done; the fence is held
+        until then. The fence deadline is observability only: at expiry a
+        warning names the runaway, but the fence stays until the thread
+        actually finishes -- releasing it early would let the next dequeue
+        start overlapping writes on the same dir/pair (state corruption).
+        A wedged-forever thread bricks its pair until restart; parked jobs
+        fail loudly with resubmit-after-drain instead of running concurrently.
         """
         with self._lock:
             now = time.monotonic()
@@ -139,20 +142,17 @@ class FenceTracker:
                 if expires_at is not None and now >= float(expires_at):
                     if not orphan.get("fence_expired"):
                         log.warning(
-                            "orphan fence expired for dir=%r pair=%r; releasing fence "
-                            "while runaway thread still tracked",
+                            "orphan fence deadline passed for dir=%r pair=%r; "
+                            "holding fence until the runaway thread finishes "
+                            "(parked jobs fail loudly instead of overlapping)",
                             orphan.get("job_dir"),
                             orphan.get("pair_fp"),
                         )
                         orphan["fence_expired"] = True
                 live.append(orphan)
             self._orphans = live
-            self._fenced_dirs = {
-                str(o["job_dir"]) for o in live if o.get("job_dir") and not o.get("fence_expired")
-            }
-            self._fenced_pairs = {
-                str(o["pair_fp"]) for o in live if o.get("pair_fp") and not o.get("fence_expired")
-            }
+            self._fenced_dirs = {str(o["job_dir"]) for o in live if o.get("job_dir")}
+            self._fenced_pairs = {str(o["pair_fp"]) for o in live if o.get("pair_fp")}
 
     def check_submit(self, work_dir: str, pair_fp: str) -> str | None:
         """Load-shedding gate for new submissions (reaps first).
@@ -262,8 +262,9 @@ class FenceTracker:
                             cap,
                         )
                     # Rebuild fence sets from the retained orphans, keeping
-                    # deadline-expired runaways unfenced (reap() already
-                    # marked them) so no live fence is released early.
+                    # deadline-expired runaways fenced (reap() holds every
+                    # live fence until its thread finishes) so no live fence
+                    # is released early.
                     self._fenced_dirs = {
                         str(o["job_dir"])
                         for o in self._orphans

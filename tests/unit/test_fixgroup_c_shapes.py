@@ -19,15 +19,16 @@ def test_valid_bool_not_literal(pair: Any, client: TestClient) -> None:
     assert conn.get("type") == "boolean"
 
 
-def test_errors_alias_deprecated(client: TestClient) -> None:
+def test_errors_alias_removed(client: TestClient) -> None:
     body = client.get("/api/v1/prep/schemas").json()
-    assert "errors_by_file" in body and "errors" in body
-    assert body["errors"] == body["errors_by_file"]
+    assert "errors_by_file" in body and "errors" not in body
     assert isinstance(body["errors_by_file"], dict)
+    # Validation results elsewhere keep errors as list[str] under their own
+    # models; the prep route no longer serves the colliding dict alias.
     spec = client.get("/api/v1/openapi.json").json()
     props = spec["components"]["schemas"]["PrepSchemasOut"]["properties"]
-    assert props["errors"].get("deprecated") is True
-    assert "removed in v2" in (props["errors"].get("description") or "")
+    assert "errors" not in props
+    assert "errors_by_file" in props
     # Total alias same treatment.
     arts = spec["components"]["schemas"]["JobArtifactsOut"]["properties"]
     assert arts["total"].get("deprecated") is True

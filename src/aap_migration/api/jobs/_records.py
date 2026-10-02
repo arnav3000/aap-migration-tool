@@ -5,14 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
+from aap_migration.api._paths import API_V1_PREFIX as API_V1_PREFIX
+
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled")
 
 # Non-terminal statuses: queued or running work still owns its workdir,
 # connections, and state DB. Single home for the membership test so a
 # future status lands in one place instead of six literal tuples.
 ACTIVE_STATUSES = ("queued", "running")
-
-API_V1_PREFIX = "/api/v1"
 
 
 class JobRecord(TypedDict, total=False):
@@ -36,12 +36,34 @@ class QueueFullError(RuntimeError):
     """Raised when the FIFO queue is at capacity (mapped to HTTP 429)."""
 
 
+class StorageUnhealthyError(QueueFullError):
+    """Storage probes failed at startup (mapped to HTTP 503)."""
+
+
+class ServerShuttingDownError(QueueFullError):
+    """Submissions closed during drain (mapped to HTTP 503)."""
+
+
+class InternalStatusError(RuntimeError):
+    """Unknown internal job status (mapped to HTTP 500, never 400)."""
+
+
 class ConflictError(ValueError):
     """Lifecycle conflict: queued/running work blocks the mutation (HTTP 409)."""
 
 
 class UnknownJobError(KeyError):
     """Unknown job id (HTTP 404). Carries the job id for message stability."""
+
+
+def public_job_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Single home for the client-visible job-params rule.
+
+    Internal ``_*`` keys (submit-time ``_snapshot_*`` pins) stay
+    server-side. Both the manager's ``_public`` view and the routers'
+    ``public_params`` call this so the two views cannot diverge.
+    """
+    return {k: v for k, v in params.items() if not k.startswith("_")}
 
 
 def _utcnow() -> str:

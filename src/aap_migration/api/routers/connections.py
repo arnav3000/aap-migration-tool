@@ -98,7 +98,7 @@ def set_active(body: ActiveConfigIn) -> ActiveConfigOut:
     except (KeyError, ValueError) as exc:
         from aap_migration.api.jobs._records import ConflictError
 
-        if isinstance(exc, ConflictError) or "queued/running job" in str(exc):
+        if isinstance(exc, ConflictError):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if isinstance(exc, KeyError):
             raise HTTPException(status_code=404, detail=_key_detail(exc)) from exc
@@ -124,7 +124,7 @@ def clear_active(
     except (KeyError, ValueError) as exc:
         from aap_migration.api.jobs._records import ConflictError
 
-        if isinstance(exc, ConflictError) or "queued/running job" in str(exc):
+        if isinstance(exc, ConflictError):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if isinstance(exc, KeyError):
             raise HTTPException(status_code=404, detail=_key_detail(exc)) from exc
@@ -157,7 +157,7 @@ def _update_connection(conn_id: str, body: ConnectionUpdate | ConnectionReplace)
 
         # Lifecycle guard (queued/running refs) is a conflict, not a bad
         # request; validation errors stay 400. Map on type first.
-        if isinstance(exc, ConflictError) or "queued/running job" in str(exc):
+        if isinstance(exc, ConflictError):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if isinstance(exc, KeyError):
             raise HTTPException(status_code=404, detail=_key_detail(exc)) from exc
@@ -207,7 +207,7 @@ def delete_connection(conn_id: str) -> dict:
     except (KeyError, ValueError) as exc:
         from aap_migration.api.jobs._records import ConflictError
 
-        if isinstance(exc, ConflictError) or "queued/running job" in str(exc):
+        if isinstance(exc, ConflictError):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if isinstance(exc, KeyError):
             raise HTTPException(status_code=404, detail=_key_detail(exc)) from exc

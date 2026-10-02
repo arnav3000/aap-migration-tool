@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from aap_migration.api import services
 from aap_migration.api.context import open_default_state
@@ -13,7 +13,9 @@ from aap_migration.api.jobs import TERMINAL_STATUSES, get_job_manager
 from aap_migration.api.routers._common import submit_chained, submit_job
 from aap_migration.api.schemas import (
     CheckpointCreate,
+    CheckpointsListOut,
     JobCreated,
+    MappingsListOut,
     RetryFailedRequest,
     StateExportRequest,
     StateImportRequest,
@@ -154,7 +156,7 @@ def show_state(
     return payload
 
 
-@router.get("/state/mappings")
+@router.get("/state/mappings", response_model=MappingsListOut)
 def show_mappings(
     resource_type: str | None = None,
     source_record_id: int | None = Query(
@@ -445,9 +447,14 @@ def reset_state(body: StateResetRequest) -> dict:
 
 
 @router.post("/state/export", response_model=JobCreated, status_code=202)
-def export_state(body: StateExportRequest) -> JobCreated:
+def export_state(body: StateExportRequest, request: Request) -> JobCreated:
     """Export migration state to a JSON backup file (mirrors ``state export``)."""
-    return submit_job("state-export", body.model_dump(), services.run_state_export)
+    return submit_job(
+        "state-export",
+        body.model_dump(),
+        services.run_state_export,
+        root_path=request.scope.get("root_path", ""),
+    )
 
 
 @router.post("/state/import")
@@ -590,7 +597,7 @@ def import_state(body: StateImportRequest) -> dict:
 
 
 @router.post("/retry/failed", response_model=JobCreated, status_code=202)
-def retry_failed(body: RetryFailedRequest) -> JobCreated:
+def retry_failed(body: RetryFailedRequest, request: Request) -> JobCreated:
     """Retry failed imports (mirrors ``retry failed``)."""
     return submit_chained(
         "retry-failed",
@@ -598,6 +605,7 @@ def retry_failed(body: RetryFailedRequest) -> JobCreated:
         services.run_retry_failed,
         need="both",
         allow_statuses=TERMINAL_STATUSES,
+        root_path=request.scope.get("root_path", ""),
     )
 
 
@@ -654,7 +662,7 @@ def retry_status(
     return {"by_type": by_type}
 
 
-@router.get("/checkpoints")
+@router.get("/checkpoints", response_model=CheckpointsListOut)
 def list_checkpoints(
     phase: str | None = None,
     limit: int = Query(default=50, ge=1, le=1000),

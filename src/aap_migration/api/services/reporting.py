@@ -182,9 +182,7 @@ def run_enhanced_report(job: JobRecord) -> dict[str, Any]:
         elif len(scoped) == 1:
             organization = scoped[0]
         else:
-            raise ValueError(
-                "Enhanced report supports a single organization; " f"got {len(scoped)}"
-            )
+            raise ValueError(f"Enhanced report supports a single organization; got {len(scoped)}")
         call_command(
             "enhanced-report",
             ctx,

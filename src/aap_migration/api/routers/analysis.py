@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from aap_migration.api import services
 from aap_migration.api.routers._common import submit_chained
@@ -19,11 +19,15 @@ MIGRATION_PLAN_HELPERS = [
 
 
 @router.post("/analysis/dependencies", response_model=JobCreated, status_code=202)
-def analyze_dependencies(body: AnalyzeDependenciesRequest) -> JobCreated:
+def analyze_dependencies(body: AnalyzeDependenciesRequest, request: Request) -> JobCreated:
     """Analyze cross-organization dependencies for migration planning."""
     # Scope rules live in AnalyzeDependenciesRequest (single home).
     return submit_chained(
-        "analyze-dependencies", body, services.run_analyze_dependencies, need="source"
+        "analyze-dependencies",
+        body,
+        services.run_analyze_dependencies,
+        need="source",
+        root_path=request.scope.get("root_path", ""),
     )
 
 
