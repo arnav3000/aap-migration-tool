@@ -122,13 +122,13 @@ class TestReadinessBranches:
     def test_health_unknown_manager_none_sentinels(
         self, client: TestClient, monkeypatch: Any
     ) -> None:
-        """No manager reads as unknown with None (never -1) numerics."""
+        """Fresh boot (no manager) reads as healthy alive/0, orphans None."""
         import aap_migration.api.jobs as jobs_mod
 
         monkeypatch.setattr(jobs_mod, "_manager", None)
         monkeypatch.setattr(jobs_mod, "manager_or_none", lambda: None)
         body = client.get("/api/v1/health").json()
-        assert body["worker"] == "unknown"
-        assert body["queue_depth"] is None
+        assert body["worker"] == "alive"
+        assert body["queue_depth"] == 0
         assert body["orphans"] is None
         assert body["fenced_dirs"] is None

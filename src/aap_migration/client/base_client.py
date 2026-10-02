@@ -294,7 +294,10 @@ class BaseAPIClient:
         try:
             from aap_migration.utils.ssrf import reverify_execution_url_bounded
 
-            reverify_execution_url_bounded(self.base_url)
+            # Blocking DNS re-verify must stay off the server event loop:
+            # one slow hostname would otherwise stall all concurrent API
+            # traffic. to_thread keeps the FIFO-worker path unchanged.
+            await asyncio.to_thread(reverify_execution_url_bounded, self.base_url)
         except ValueError as exc:
             raise NetworkError(f"SSRF re-verification blocked request: {exc}") from exc
 

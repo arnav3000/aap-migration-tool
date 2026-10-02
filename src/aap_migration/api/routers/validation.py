@@ -12,12 +12,12 @@ from aap_migration.api import services
 from aap_migration.api.context import build_ephemeral_context
 from aap_migration.api.routers._common import submit_chained
 from aap_migration.api.schemas import (
-    DependencyCheckOut,
     DependencyCheckRequest,
     JobCreated,
     PayloadCheckOut,
     PayloadCheckRequest,
     ValidateRequest,
+    ValidationDependencyOut,
 )
 
 log = logging.getLogger("aap_migration.api.validation")
@@ -48,7 +48,7 @@ def start_validation(body: ValidateRequest) -> JobCreated:
     return submit_chained("validate", body, services.run_validate)
 
 
-@router.post("/validations/dependencies", response_model=DependencyCheckOut)
+@router.post("/validations/dependencies", response_model=ValidationDependencyOut)
 def check_dependencies(body: DependencyCheckRequest) -> dict:
     """Pre-import dependency gate (mirrors the import pre-flight check).
 

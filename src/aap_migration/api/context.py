@@ -22,6 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from aap_migration.migration.state import MigrationState
 
 from aap_migration.api.store import (
+    SNAPSHOT_FERNET_FP,
     SNAPSHOT_FP,
     SNAPSHOT_NEED,
     SNAPSHOT_SOURCE_ID,
@@ -418,11 +419,18 @@ def submit_pair_snapshot(
     from aap_migration.api.store import pair_fingerprint
 
     snap = pair_fingerprint(source_id, target_id, need=need)
+    try:
+        from aap_migration.api.security import fernet_key_fingerprint
+
+        fernet_fp: str | None = fernet_key_fingerprint()
+    except Exception:
+        fernet_fp = None
     return {
         SNAPSHOT_SOURCE_ID: snap["source_id"],
         SNAPSHOT_TARGET_ID: snap["target_id"],
         SNAPSHOT_FP: snap["fp"],
         SNAPSHOT_NEED: need,
+        SNAPSHOT_FERNET_FP: fernet_fp,
     }
 
 
@@ -491,6 +499,25 @@ def verify_execution_pair(params: dict[str, Any]) -> None:
     snap_fp = params.get(SNAPSHOT_FP)
     if snap_src is None and snap_tgt is None and snap_fp is None:
         return
+    # Fernet key rotation guard (drain-before-rotate, enforced): the
+    # encryption key is pinned at submit; a rotation while queued fails
+    # fast here with one actionable error instead of N per-row decrypt
+    # failures at worker time. Pre-fingerprint records skip the check.
+    snap_fernet = params.get(SNAPSHOT_FERNET_FP)
+    if snap_fernet is not None:
+        try:
+            from aap_migration.api.security import fernet_key_fingerprint
+
+            current_fernet = fernet_key_fingerprint()
+        except Exception:
+            current_fernet = None
+        if current_fernet is not None and current_fernet != snap_fernet:
+            raise ValueError(
+                "API encryption key (AAP_BRIDGE_API_KEY) changed since this job "
+                "was submitted; drain the queue before rotating keys, then "
+                "resubmit. Queued jobs pinned to the old key cannot decrypt "
+                "under the new one."
+            )
     from aap_migration.api.store import pair_fingerprint
 
     # Source-only jobs hash only the source side (see store.pair_fingerprint):

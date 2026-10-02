@@ -120,9 +120,12 @@ class FenceTracker:
 
         A timed-out pool thread cannot be preempted, so its pool is shut
         down (no-wait) only once its future reports done; the fence stays
-        until then.
+        until then, except when the fence deadline expires (a wedged
+        thread must degrade to a warning instead of bricking its pair
+        forever: the fence is released but the orphan stays tracked).
         """
         with self._lock:
+            now = time.monotonic()
             live: list[dict[str, Any]] = []
             for orphan in self._orphans:
                 future = orphan["future"]
@@ -131,11 +134,25 @@ class FenceTracker:
                         orphan["pool"].shutdown(wait=False, cancel_futures=True)
                     except Exception:
                         pass
-                else:
-                    live.append(orphan)
+                    continue
+                expires_at = orphan.get("fence_expires_at")
+                if expires_at is not None and now >= float(expires_at):
+                    if not orphan.get("fence_expired"):
+                        log.warning(
+                            "orphan fence expired for dir=%r pair=%r; releasing fence "
+                            "while runaway thread still tracked",
+                            orphan.get("job_dir"),
+                            orphan.get("pair_fp"),
+                        )
+                        orphan["fence_expired"] = True
+                live.append(orphan)
             self._orphans = live
-            self._fenced_dirs = {str(o["job_dir"]) for o in live if o.get("job_dir")}
-            self._fenced_pairs = {str(o["pair_fp"]) for o in live if o.get("pair_fp")}
+            self._fenced_dirs = {
+                str(o["job_dir"]) for o in live if o.get("job_dir") and not o.get("fence_expired")
+            }
+            self._fenced_pairs = {
+                str(o["pair_fp"]) for o in live if o.get("pair_fp") and not o.get("fence_expired")
+            }
 
     def check_submit(self, work_dir: str, pair_fp: str) -> str | None:
         """Load-shedding gate for new submissions (reaps first).
@@ -199,6 +216,10 @@ class FenceTracker:
     ) -> None:
         """Fence a timed-out attempt's directory and pair (never raises)."""
         try:
+            try:
+                fence_ttl = max(2.0 * float(self._job_timeout()), 300.0)
+            except (TypeError, ValueError):
+                fence_ttl = 300.0
             with self._lock:
                 self._orphans.append(
                     {
@@ -206,6 +227,8 @@ class FenceTracker:
                         "pool": pool,
                         "job_dir": job_dir,
                         "pair_fp": pair_fp,
+                        "fence_expires_at": time.monotonic() + max(fence_ttl, 1.0),
+                        "fence_expired": False,
                     }
                 )
                 if job_dir:
@@ -238,13 +261,18 @@ class FenceTracker:
                             len(self._orphans),
                             cap,
                         )
-                    # Rebuild fence sets from the retained (never dropped-hung)
-                    # orphans so no live fence is released.
+                    # Rebuild fence sets from the retained orphans, keeping
+                    # deadline-expired runaways unfenced (reap() already
+                    # marked them) so no live fence is released early.
                     self._fenced_dirs = {
-                        str(o["job_dir"]) for o in self._orphans if o.get("job_dir")
+                        str(o["job_dir"])
+                        for o in self._orphans
+                        if o.get("job_dir") and not o.get("fence_expired")
                     }
                     self._fenced_pairs = {
-                        str(o["pair_fp"]) for o in self._orphans if o.get("pair_fp")
+                        str(o["pair_fp"])
+                        for o in self._orphans
+                        if o.get("pair_fp") and not o.get("fence_expired")
                     }
         except Exception:
             log.exception("orphan fence bookkeeping failed")

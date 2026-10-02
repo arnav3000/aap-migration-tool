@@ -28,8 +28,12 @@ def get_prep_schemas() -> dict:
 
     Always HTTP 200. Each artifact value is the parsed payload or null
     when missing/unreadable; per-file failures are surfaced in the
-    top-level ``"errors": {name: message}`` map (never as
-    ``{"error": ...}`` sentinels inside the values).
+    top-level ``"errors_by_file": {name: message}`` map (never as
+    ``{"error": ...}`` sentinels inside the values). ``"errors"`` is
+    kept as a deprecated alias of ``errors_by_file`` for back-compat;
+    new clients should read ``errors_by_file``. Validation results
+    elsewhere use ``errors`` as a list of strings -- the names diverge
+    on purpose and OpenAPI pins each route separately.
     """
     startup_cwd = Path(os.environ.get("AAP_BRIDGE_STARTUP_CWD", os.getcwd())).resolve()
     base = get_job_manager().base_dir
@@ -60,7 +64,8 @@ def get_prep_schemas() -> dict:
                     errors[name] = str(exc)
                 break
         out[name] = payload
-    out["errors"] = errors
+    out["errors_by_file"] = errors
+    out["errors"] = errors  # deprecated alias; new clients read errors_by_file
     return out
 
 

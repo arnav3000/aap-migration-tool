@@ -51,7 +51,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     degraded: list[str] = []
     try:
         db_path = init_api_db()
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        if "://" not in db_path:
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
         log.warning("API DB startup check failed: %s", exc)
         degraded.append(f"api-db: {exc}")

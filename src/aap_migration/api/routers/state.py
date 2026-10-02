@@ -295,9 +295,10 @@ def reset_state(body: StateResetRequest) -> dict:
                     manager.assert_no_active_jobs_locked()
                 elif body.job_id:
                     manager.assert_job_terminal_locked(body.job_id)
-                elif full_reset:
-                    # Server-default partial reset (resource_type/keep_mappings
-                    # path without job_id) still bulk-writes the shared DB.
+                elif not body.job_id:
+                    # Any server-default write without job_id (full or
+                    # partial reset via resource_type/keep_mappings)
+                    # bulk-writes the shared DB: guard like a full reset.
                     manager.assert_no_active_jobs_locked()
                 if body.job_id:
                     from aap_migration.api.context import resolve_job_state
@@ -718,9 +719,11 @@ def checkpoint_resume_info(
 ) -> dict:
     """Where a resumed migration would continue from.
 
-    By default (CLI parity) a missing DB returns 200 with a ``warning`` key.
-    Pass ``strict=true`` for a 404 ``{"detail": "No migration state DB found"}``
-    instead.
+    Always returns ``{"resumable": bool, "resume_from": ...}`` with
+    ``resumable: false`` and ``resume_from: null`` when no resume point
+    exists (never a bare ``{}``), so typed clients never branch on key
+    presence. By default a missing DB returns 200 with a ``warning``
+    key; pass ``strict=true`` for a 404 instead.
     """
     state, missing = _get_state(job_id, strict, {"warning": "No migration state DB found"})
     if missing is not None:
@@ -728,7 +731,10 @@ def checkpoint_resume_info(
     assert state is not None
     from aap_migration.migration.checkpoint import CheckpointManager
 
-    return CheckpointManager(state).get_resume_info() or {}
+    info = CheckpointManager(state).get_resume_info()
+    if not info:
+        return {"resumable": False, "resume_from": None}
+    return {"resumable": True, "resume_from": info}
 
 
 @router.post("/checkpoints", status_code=201)

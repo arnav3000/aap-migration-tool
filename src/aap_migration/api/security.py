@@ -94,6 +94,33 @@ def get_fernet() -> Fernet:
     return Fernet(key)
 
 
+def fernet_key_fingerprint() -> str:
+    """SHA-256 fingerprint of the active Fernet key material (hash, not key).
+
+    Used to pin the encryption key at job submit time: a rotation
+    between submit (202) and execution must fail fast with a
+    drain-before-rotate error instead of failing N queued jobs at
+    decrypt time with per-row errors. Never logs or returns key bytes.
+    """
+    env_key = os.environ.get("AAP_BRIDGE_API_KEY")
+    if env_key:
+        raw = env_key.encode()
+    else:
+        key_path = _key_file()
+        try:
+            with open(key_path, "rb") as fh:
+                raw = fh.read().strip()
+        except OSError:
+            # Key file does not exist yet (first submit will generate
+            # it via get_fernet): fingerprint the resolved instance.
+            # get_fernet has no accessor for raw bytes, so re-read the
+            # file it just created.
+            get_fernet()
+            with open(key_path, "rb") as fh:
+                raw = fh.read().strip()
+    return hashlib.sha256(raw).hexdigest()
+
+
 def encrypt_token(plain: str) -> str:
     """Encrypt a plaintext token for storage."""
     token: bytes = get_fernet().encrypt(plain.encode())
@@ -115,7 +142,12 @@ def decrypt_token(cipher: str) -> str:
 # -- API request authentication -------------------------------------------
 log = logging.getLogger("aap_migration.api.security")
 
-# In-memory per-IP 401 throttling state: {ip: [count, window_start]}.
+# In-memory per-(IP, key-identity) 401 throttling state:
+# {bucket: [count, window_start]} where bucket is "ip|key-prefix".
+# Per-key buckets stop one scanner from locking out legitimate users
+# sharing the same egress IP, and a success only resets its own bucket.
+# Deployments behind a shared NAT/ingress should still front this with an
+# external rate limiter for cross-IP abuse.
 _auth_failures: dict[str, list[float]] = {}
 _auth_lock = threading.Lock()
 _AUTH_WINDOW_S = 60.0
@@ -128,9 +160,9 @@ _AUTH_MAX_TRACKED_IPS = 5000
 
 def _sweep_auth_failures(now: float) -> None:
     """Drop expired windows. Callers hold ``_auth_lock``."""
-    expired = [ip for ip, entry in _auth_failures.items() if (now - entry[1]) > _AUTH_WINDOW_S]
-    for ip in expired:
-        _auth_failures.pop(ip, None)
+    expired = [b for b, entry in _auth_failures.items() if (now - entry[1]) > _AUTH_WINDOW_S]
+    for b in expired:
+        _auth_failures.pop(b, None)
 
 
 # (Fail-closed: no anonymous-access warning state is kept; every
@@ -175,13 +207,27 @@ def _client_ip(request: Request | None) -> str:
     return "unknown"
 
 
-def _record_auth_failure(ip: str) -> None:
+def _throttle_bucket(ip: str, presented_key: str | None) -> str:
+    """Bucket for 401 throttling: IP plus presented-key identity.
+
+    The key identity is a truncated SHA-256 prefix (never the key
+    itself), so different keys from the same egress IP do not share a
+    bucket. Missing/empty keys share the "missing" bucket.
+    """
+    if presented_key:
+        key_id = hashlib.sha256(presented_key.encode()).hexdigest()[:12]
+    else:
+        key_id = "missing"
+    return f"{ip}|{key_id}"
+
+
+def _record_auth_failure(bucket: str) -> None:
     now = time.monotonic()
     with _auth_lock:
-        entry = _auth_failures.get(ip)
+        entry = _auth_failures.get(bucket)
         if entry is None or (now - entry[1]) > _AUTH_WINDOW_S:
             entry = [0.0, now]
-            _auth_failures[ip] = entry
+            _auth_failures[bucket] = entry
         entry[0] += 1
         if len(_auth_failures) > _AUTH_MAX_TRACKED_IPS:
             _sweep_auth_failures(now)
@@ -191,21 +237,21 @@ def _record_auth_failure(ip: str) -> None:
                 _auth_failures.pop(oldest, None)
 
 
-def _auth_failure_count(ip: str) -> int:
+def _auth_failure_count(bucket: str) -> int:
     now = time.monotonic()
     with _auth_lock:
-        entry = _auth_failures.get(ip)
+        entry = _auth_failures.get(bucket)
         if entry is None:
             return 0
         if (now - entry[1]) > _AUTH_WINDOW_S:
-            _auth_failures.pop(ip, None)
+            _auth_failures.pop(bucket, None)
             return 0
         return int(entry[0])
 
 
-def _reset_auth_failures(ip: str) -> None:
+def _reset_auth_failures(bucket: str) -> None:
     with _auth_lock:
-        _auth_failures.pop(ip, None)
+        _auth_failures.pop(bucket, None)
 
 
 def require_api_key(
@@ -221,21 +267,25 @@ def require_api_key(
     host is never consulted -- an earlier revision trusted the
     ``AAP_BRIDGE_API_HOST`` env default and fail-opened when the process was
     launched with an explicit non-loopback bind (e.g. ``uvicorn --host
-    0.0.0.0``) that did not flow through that variable. Uses
+    0.0.0.0``) that did not flow through that variable.     Uses
     :func:`hmac.compare_digest` (constant time) to avoid timing oracles.
-    Per-IP 401 throttling: more than 20 failures in 60s yields 429.
+    Per-(IP, key) 401 throttling: more than 20 failures in 60s yields
+    429. Only a success presenting the same key identity resets its
+    bucket; deployments behind a shared egress/NAT need an external
+    rate limiter for cross-IP abuse.
     """
     expected_tokens = _expected_tokens()
     if not expected_tokens:
         if os.environ.get("AAP_BRIDGE_ALLOW_ANON", "") == "1":
             return None
         raise HTTPException(status_code=401, detail="API token required (set AAP_BRIDGE_API_TOKEN)")
-    if api_key is not None and _matches_any(api_key, expected_tokens):
-        _reset_auth_failures(_client_ip(request))
-        return None
     ip = _client_ip(request)
-    _record_auth_failure(ip)
-    if _auth_failure_count(ip) > _AUTH_MAX_FAILURES:
+    bucket = _throttle_bucket(ip, api_key)
+    if api_key is not None and _matches_any(api_key, expected_tokens):
+        _reset_auth_failures(bucket)
+        return None
+    _record_auth_failure(bucket)
+    if _auth_failure_count(bucket) > _AUTH_MAX_FAILURES:
         raise HTTPException(status_code=429, detail="Too many failed auth attempts")
     raise HTTPException(status_code=401, detail="Invalid or missing API key")
 

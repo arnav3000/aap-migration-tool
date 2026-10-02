@@ -14,7 +14,13 @@ from fastapi.testclient import TestClient
 
 
 class TestStateResetAtomicity:
-    """#1: job-scoped reset guard and write share one critical section."""
+    """#1: job-scoped reset guard and write share one critical section.
+
+    White-box pin: asserts the resolve happens while the manager lock is
+    held (via _lock._is_owned). If the locking strategy changes, update
+    this test alongside the refactor -- it pins the atomicity mechanism,
+    not just the HTTP contract (the 409 branch below covers the contract).
+    """
 
     def test_job_scoped_reset_inside_lock(
         self, pair: Any, client: TestClient, monkeypatch: Any, tmp_path: Any
@@ -253,42 +259,49 @@ class TestDNSIsolation:
 
     def test_healthy_passes_after_poison_timeouts(self, monkeypatch: Any) -> None:
         import socket
-        import time
+        import threading
 
         import aap_migration.utils.ssrf as ssrf
 
-        real_getaddrinfo = socket.getaddrinfo
+        release = threading.Event()
 
-        def _hanging(host: str, *args: Any, **kwargs: Any) -> Any:
+        def _blocking(host: str, *args: Any, **kwargs: Any) -> Any:
             if "poison" in str(host):
-                time.sleep(30)
+                # Block until released (no wall-clock sleep): proves the
+                # bounded call fails fast without measuring elapsed time.
+                assert release.wait(timeout=30)
                 raise socket.gaierror("hung")
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
 
-        monkeypatch.setattr(socket, "getaddrinfo", _hanging)
-        # Four rapid poison timeouts (short timeout for test speed).
-        for i in range(4):
-            try:
-                ssrf.reverify_execution_url_bounded(
-                    f"https://poison{i}.example.com/api", timeout_secs=0.2
-                )
-                raise AssertionError("expected timeout")
-            except ValueError as exc:
-                assert "timed out" in str(exc)
-        # Healthy host must still pass immediately (per-call isolation).
-        start = time.time()
-        out = ssrf.reverify_execution_url_bounded(
-            "https://healthy.example.com/api", timeout_secs=5.0
-        )
-        elapsed = time.time() - start
-        assert out.startswith("https://")
-        assert elapsed < 5.0, f"healthy blocked {elapsed:.1f}s (shared-pool exhaustion)"
-        # Restore to avoid leaking the hang into other tests.
-        monkeypatch.setattr(socket, "getaddrinfo", real_getaddrinfo)
+        monkeypatch.setattr(socket, "getaddrinfo", _blocking)
+        try:
+            # Four rapid poison timeouts (short timeout for test speed).
+            for i in range(4):
+                try:
+                    ssrf.reverify_execution_url_bounded(
+                        f"https://poison{i}.example.com/api", timeout_secs=0.2
+                    )
+                    raise AssertionError("expected timeout")
+                except ValueError as exc:
+                    assert "timed out" in str(exc)
+            # Healthy host still passes while poison lookups stay blocked
+            # (per-call isolation: no shared-pool exhaustion, no elapsed
+            # assertion so loaded CI cannot flake).
+            out = ssrf.reverify_execution_url_bounded(
+                "https://healthy.example.com/api", timeout_secs=5.0
+            )
+            assert out.startswith("https://")
+        finally:
+            release.set()
 
 
 class TestForkLiveDir:
-    """#6: console/fence must follow the pair-switch fork."""
+    """#6: console/fence must follow the pair-switch fork.
+
+    White-box pin: exercises the internal _live_job_dir()/set_job_dir()
+    helpers directly. If the fork bookkeeping moves, update these alongside
+    the refactor -- the HTTP round-trips elsewhere cover the public contract.
+    """
 
     def test_live_dir_follows_fork(self, client: TestClient) -> None:
         from aap_migration.api.jobs import get_job_manager
@@ -369,6 +382,67 @@ class TestPostureDrift:
         except ValueError as exc:
             assert "changed since" in str(exc)
         # Identical snapshot still verifies (no false positive).
+        snap2 = store.pair_fingerprint(src["id"], tgt["id"])
+        params2: Any = {
+            "source_id": src["id"],
+            "target_id": tgt["id"],
+            "_snapshot_source_id": snap2["source_id"],
+            "_snapshot_target_id": snap2["target_id"],
+            "_snapshot_fp": snap2["fp"],
+        }
+        verify_execution_pair(params2)
+
+    def test_timeout_drift_fails_execution(self, pair: Any, client: TestClient) -> None:
+        from aap_migration.api import store
+        from aap_migration.api.context import verify_execution_pair
+
+        src, tgt = pair
+        snap = store.pair_fingerprint(src["id"], tgt["id"])
+        params: Any = {
+            "source_id": src["id"],
+            "target_id": tgt["id"],
+            "_snapshot_source_id": snap["source_id"],
+            "_snapshot_target_id": snap["target_id"],
+            "_snapshot_fp": snap["fp"],
+        }
+        verify_execution_pair(params)
+        new_timeout = 5 if src.get("timeout", 30) != 5 else 60
+        store.update_connection(src["id"], timeout=new_timeout)
+        try:
+            verify_execution_pair(params)
+            raise AssertionError("expected timeout drift to fail")
+        except ValueError as exc:
+            assert "changed since" in str(exc)
+        snap2 = store.pair_fingerprint(src["id"], tgt["id"])
+        params2: Any = {
+            "source_id": src["id"],
+            "target_id": tgt["id"],
+            "_snapshot_source_id": snap2["source_id"],
+            "_snapshot_target_id": snap2["target_id"],
+            "_snapshot_fp": snap2["fp"],
+        }
+        verify_execution_pair(params2)
+
+    def test_url_drift_fails_execution(self, pair: Any, client: TestClient) -> None:
+        from aap_migration.api import store
+        from aap_migration.api.context import verify_execution_pair
+
+        src, tgt = pair
+        snap = store.pair_fingerprint(src["id"], tgt["id"])
+        params: Any = {
+            "source_id": src["id"],
+            "target_id": tgt["id"],
+            "_snapshot_source_id": snap["source_id"],
+            "_snapshot_target_id": snap["target_id"],
+            "_snapshot_fp": snap["fp"],
+        }
+        verify_execution_pair(params)
+        store.update_connection(src["id"], url="https://drifted.example.com/api/v2")
+        try:
+            verify_execution_pair(params)
+            raise AssertionError("expected URL drift to fail")
+        except ValueError as exc:
+            assert "changed since" in str(exc)
         snap2 = store.pair_fingerprint(src["id"], tgt["id"])
         params2: Any = {
             "source_id": src["id"],
@@ -575,6 +649,54 @@ class TestWorkerWiringSpies:
         out = m.run_state_export({"job_id": "s", "job_dir": str(workdir), "params": {}})
         assert out["message"] == "State export complete"
         assert out["state_file"].startswith("reports/")
+
+
+class TestCredentialMigrateBranches:
+    """Credential-migrate no-action vs migrate-all envelopes (direct workers)."""
+
+    def _run_migrate(self, monkeypatch: Any, tmp_path: Any, comparison: dict[str, Any]) -> Any:
+        import contextlib
+        import types
+
+        import aap_migration.api.services._core as core
+        import aap_migration.api.services.credentials as cred
+
+        workdir = tmp_path / "job"
+        workdir.mkdir(exist_ok=True)
+        (workdir / "reports").mkdir(exist_ok=True)
+        params: dict[str, Any] = {}
+
+        @contextlib.contextmanager
+        def _fake_ctx(job: Any, **kwargs: Any) -> Any:
+            config = types.SimpleNamespace(dry_run=False)
+            ctx = types.SimpleNamespace(config=config)
+            yield (ctx, config, workdir, params)
+
+        monkeypatch.setattr(core, "chained_ctx", _fake_ctx)
+        monkeypatch.setattr(cred, "chained_ctx", _fake_ctx)
+
+        class _FakeCoordinator:
+            async def compare_and_verify_credentials(self, report_path: str = "") -> Any:
+                return dict(comparison)
+
+            async def migrate_all(self, **kwargs: Any) -> Any:
+                return {"migrated": 3, "report": "reports/credential-migration.md"}
+
+        monkeypatch.setattr(cred, "_credential_coordinator", lambda ctx: _FakeCoordinator())
+        return cred.run_credential_migrate(
+            {"job_id": "c", "job_dir": str(workdir), "params": params}
+        )
+
+    def test_no_action_branch(self, tmp_path: Any, monkeypatch: Any) -> None:
+        out = self._run_migrate(monkeypatch, tmp_path, {"missing_count": 0})
+        assert out["status"] == "no_action_needed"
+        assert "message" in out and "artifacts" in out
+        assert "comparison" in out
+
+    def test_migrate_all_branch(self, tmp_path: Any, monkeypatch: Any) -> None:
+        out = self._run_migrate(monkeypatch, tmp_path, {"missing_count": 2})
+        assert "comparison" in out
+        assert "message" in out and "artifacts" in out
 
 
 class TestLifecycleBehavioral:

@@ -84,6 +84,7 @@ class JobParams(TypedDict, total=False):
     _snapshot_target_id: str | None
     _snapshot_fp: str | None
     _snapshot_need: str | None
+    _snapshot_fernet_fp: str | None
 
 
 def iam_max_workers(params: dict[str, Any]) -> int:
@@ -164,6 +165,8 @@ def chained_ctx(
         # Assert the submit-time pair-fingerprint keys once here instead of
         # trusting every params.get downstream: a typo or missing pin would
         # otherwise pass type-check silently and disable the drift guard.
+        # _snapshot_fernet_fp is best-effort (pre-fingerprint records
+        # skip the rotation check), so it stays optional here.
         for _key in (
             "_snapshot_source_id",
             "_snapshot_target_id",

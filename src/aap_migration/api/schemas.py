@@ -533,9 +533,44 @@ class DependencyCheckOut(BaseModel):
     missing: dict[str, Any] = Field(default_factory=dict)
 
 
+class ValidationDependencyOut(BaseModel):
+    """Wire shape for POST /validations/dependencies (not the import check)."""
+
+    model_config = {"extra": "forbid"}
+
+    input_dir: str
+    validation: dict[str, Any] = Field(default_factory=dict)
+
+
 class PayloadCheckOut(BaseModel):
     model_config = {"extra": "allow"}
 
     resource_type: str
     valid: bool
     errors: list[str] = Field(default_factory=list)
+
+
+class ConfigValidateOut(BaseModel):
+    """POST /config/validate success shape.
+
+    ``valid`` is a constant-True success marker (pinned as Literal so
+    generated clients cannot branch on False): real failures use
+    HTTP 400/502, never ``valid: false``.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    valid: Literal[True]
+    summary: dict[str, Any] = Field(default_factory=dict)
+    connectivity: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConnectionTestOut(BaseModel):
+    """POST /connections/{id}/test success shape (same constant-True rule)."""
+
+    model_config = {"extra": "forbid"}
+
+    connection_id: str
+    reachable: Literal[True]
+    version: str | None = None
+    url: str

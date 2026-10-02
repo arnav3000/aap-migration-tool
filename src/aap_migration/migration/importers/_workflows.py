@@ -4,11 +4,11 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from aap_migration.migration.database import get_session
+from aap_migration.migration.importers._workflow_nodes import WorkflowNodeImporter
 from aap_migration.migration.importers.base import (
     ResourceImporter,
     logger,
 )
-from aap_migration.migration.importers.scheduling import WorkflowNodeImporter
 from aap_migration.migration.models import MigrationProgress
 
 

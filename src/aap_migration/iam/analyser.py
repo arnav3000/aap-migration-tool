@@ -262,6 +262,23 @@ class IAMAnalyser:
 
         while url:
             try:
+                # Per-fetch SSRF re-verification (mirror BaseAPIClient):
+                # a benign hostname can be rebound after the submit-time
+                # check; re-verify before every bearer-token send so a
+                # flipped DNS fails closed here instead of delivering the
+                # token to a metadata endpoint.
+                try:
+                    from aap_migration.utils.ssrf import reverify_execution_url_bounded
+
+                    reverify_execution_url_bounded(url)
+                except ValueError as exc:
+                    raise PaginationError(
+                        endpoint,
+                        f"SSRF re-verification blocked fetch: {exc}",
+                        url=url,
+                        items_collected=len(results),
+                        expected_count=expected_count,
+                    ) from exc
                 resp: requests.Response | None = None
                 for attempt in range(self._PAGINATE_MAX_RETRIES):
                     resp = session.get(
@@ -403,6 +420,13 @@ class IAMAnalyser:
     def _source_get(self, endpoint: str, params: dict | None = None) -> dict | None:
         url = f"{self.source_url}/{endpoint.lstrip('/')}"
         try:
+            from aap_migration.utils.ssrf import reverify_execution_url_bounded
+
+            reverify_execution_url_bounded(url)
+        except ValueError as exc:
+            logger.error("Source GET %s blocked by SSRF reverify: %s", endpoint, exc)
+            return None
+        try:
             resp = self._source_session.get(
                 url,
                 headers={"Authorization": f"Bearer {self.source_token}"},
@@ -431,6 +455,13 @@ class IAMAnalyser:
         if not self.target_url or not self.target_token or not self._target_session:
             return None
         url = f"{self.target_url}/{endpoint.lstrip('/')}"
+        try:
+            from aap_migration.utils.ssrf import reverify_execution_url_bounded
+
+            reverify_execution_url_bounded(url)
+        except ValueError as exc:
+            logger.error("Target GET %s blocked by SSRF reverify: %s", endpoint, exc)
+            return None
         try:
             resp = self._target_session.get(
                 url,
@@ -462,6 +493,13 @@ class IAMAnalyser:
         if not self.target_url or not self.target_token or not self._target_session:
             return None
         url = f"{self.target_url}/{endpoint.lstrip('/')}"
+        try:
+            from aap_migration.utils.ssrf import reverify_execution_url_bounded
+
+            reverify_execution_url_bounded(url)
+        except ValueError as exc:
+            logger.error("Target POST %s blocked by SSRF reverify: %s", endpoint, exc)
+            return None
         try:
             return self._target_session.post(
                 url,

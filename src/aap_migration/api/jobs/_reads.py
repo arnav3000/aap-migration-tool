@@ -9,7 +9,10 @@ independent state here.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterable
 from typing import Any, cast
+
+from aap_migration.api.jobs._records import JobRecord
 
 _ACTIVE_JOBS_MESSAGE = (
     "Server-default state reset requires zero running jobs; "
@@ -17,14 +20,14 @@ _ACTIVE_JOBS_MESSAGE = (
 )
 
 
-def _active_count(jobs: Any) -> int:
+def _active_count(jobs: Iterable[JobRecord]) -> int:
     """Count queued + running jobs (single home for the status scan)."""
     from aap_migration.api.jobs._records import ACTIVE_STATUSES
 
     return sum(1 for j in jobs if j.get("status") in ACTIVE_STATUSES)
 
 
-def _check_terminal(job: Any, job_id: str) -> Any:
+def _check_terminal(job: JobRecord, job_id: str) -> JobRecord:
     """Return a copy of *job* when terminal; fail loudly otherwise."""
     from aap_migration.api.jobs._records import ACTIVE_STATUSES, ConflictError
 
@@ -34,7 +37,7 @@ def _check_terminal(job: Any, job_id: str) -> Any:
             f"Job '{job_id}' is {status}; wait for it to reach "
             "a terminal state before resetting or importing its state DB."
         )
-    return cast(Any, dict(job))
+    return cast(JobRecord, dict(job))
 
 
 class JobReadMixin:
@@ -58,7 +61,7 @@ class JobReadMixin:
                 raise UnknownJobError(self._unknown_job_message(job_id))
             return self._public(job)  # type: ignore[attr-defined]
 
-    def get_internal(self, job_id: str) -> Any:
+    def get_internal(self, job_id: str) -> JobRecord:
         """Return the internal record including ``job_dir`` (workers only)."""
         from aap_migration.api.jobs._records import UnknownJobError
 
@@ -66,7 +69,7 @@ class JobReadMixin:
             job = self._jobs.get(job_id)
             if job is None:
                 raise UnknownJobError(self._unknown_job_message(job_id))
-            return cast(Any, dict(job))
+            return cast(JobRecord, dict(job))
 
     def list_jobs(self, status: str | None = None, limit: int = 100) -> list[Any]:
         """List jobs, newest first, optionally filtered by status."""

@@ -73,6 +73,11 @@ def list_jobs(
     matching the ``limit``/``offset``/``total`` keys on the
     state/checkpoint list endpoints. (The legacy bare-list shape was
     removed: one route, one shape.)
+
+    Note: ``GET /jobs/{id}/artifacts`` uses ``walked`` (bounded-walk
+    count) instead of a true total; ``total`` there is a deprecated
+    alias. List endpoints cap ``limit`` at 1000 (artifacts/console
+    tails allow 5000); shared pagers must clamp per route.
     """
     manager = get_job_manager()
     total = manager.count(status)
@@ -124,6 +129,14 @@ def get_job_artifacts(
 
     Pair with ``GET /jobs/{job_id}/artifacts/{path}`` to download a
     listed file.
+
+    Pagination keys differ from ``GET /jobs`` on purpose: ``walked``
+    is the bounded-walk count so far (not a true pre-page total) and
+    ``truncated`` alone signals incompleteness. ``total`` is kept as
+    a deprecated alias of ``walked`` for back-compat; new clients
+    should read ``walked``. List endpoints (jobs, connections,
+    mappings, checkpoints) cap ``limit`` at 1000; artifact/console
+    tails allow up to 5000 because streaming output justifies it.
     """
     try:
         job = get_job_manager().get_internal(job_id)
@@ -134,9 +147,10 @@ def get_job_artifacts(
     payload: dict = {
         "job_id": job_id,
         "artifacts": page,
-        # One shape always: total is the bounded-walk count so far (an
-        # integer on every branch) and truncated:true alone signals
-        # incompleteness, matching the jobs/state/checkpoint envelopes.
+        # walked is the bounded-walk count so far; total is a
+        # deprecated alias kept so shared total/limit/offset pagers
+        # keep working. truncated:true alone signals incompleteness.
+        "walked": len(artifacts),
         "total": len(artifacts),
         "truncated": truncated or len(artifacts) > offset + limit,
         "limit": limit,

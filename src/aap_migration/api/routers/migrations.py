@@ -187,9 +187,15 @@ def preview_transform(body: PayloadCheckRequest) -> dict:
     from aap_migration.config import StateConfig
     from aap_migration.migration.state import MigrationState
     from aap_migration.migration.transformer import SkipResourceError, create_transformer
-    from aap_migration.resources import normalize_resource_type
+    from aap_migration.resources import get_info, normalize_resource_type
 
     resource_type = normalize_resource_type(body.resource_type)
+    try:
+        get_info(resource_type)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown resource type '{body.resource_type}'"
+        ) from exc
 
     tmp_dir = tempfile.mkdtemp(prefix="aap-preview-")
     try:

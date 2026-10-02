@@ -98,6 +98,10 @@ class AAPSourceClient(BaseAPIClient):
             return self._version_cache
 
     @retry_api_call
+    async def _fetch_page(self, endpoint: str, query_params: dict[str, Any]) -> dict[str, Any]:
+        """Fetch one page with bounded retry (per-page, no full re-scan)."""
+        return await self.get(endpoint, params=query_params)
+
     async def get_paginated(
         self,
         endpoint: str,
@@ -105,6 +109,10 @@ class AAPSourceClient(BaseAPIClient):
         params: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch all pages from a paginated endpoint.
+
+        Each page retries independently (bounded backoff) and resumes
+        from the failed page: already-fetched pages are never discarded,
+        so a late-page transient cannot trigger a full re-scan storm.
 
         Args:
             endpoint: API endpoint path
@@ -129,7 +137,7 @@ class AAPSourceClient(BaseAPIClient):
                 page_size=query_params["page_size"],
             )
 
-            response = await self.get(endpoint, params=query_params)
+            response = await self._fetch_page(endpoint, dict(query_params))
 
             results = response.get("results", [])
             all_results.extend(results)
@@ -314,7 +322,6 @@ class AAPSourceClient(BaseAPIClient):
         )
 
     # Organization resources
-    @retry_api_call
     async def get_organizations(self, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Get all organizations.
 
@@ -327,7 +334,6 @@ class AAPSourceClient(BaseAPIClient):
         return await self.get_paginated("organizations/", params=params)
 
     # User and team resources
-    @retry_api_call
     async def get_users(self, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Get all users.
 
@@ -339,7 +345,6 @@ class AAPSourceClient(BaseAPIClient):
         """
         return await self.get_paginated("users/", params=params)
 
-    @retry_api_call
     async def get_teams(self, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Get all teams.
 
@@ -352,7 +357,6 @@ class AAPSourceClient(BaseAPIClient):
         return await self.get_paginated("teams/", params=params)
 
     # Credential resources
-    @retry_api_call
     async def get_credential_types(
         self, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -366,7 +370,6 @@ class AAPSourceClient(BaseAPIClient):
         """
         return await self.get_paginated("credential_types/", params=params)
 
-    @retry_api_call
     async def get_credentials(self, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Get all credentials.
 
@@ -381,7 +384,6 @@ class AAPSourceClient(BaseAPIClient):
         return await self.get_paginated("credentials/", params=params)
 
     # Inventory resources
-    @retry_api_call
     async def get_inventories(self, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Get all inventories.
 
@@ -393,7 +395,6 @@ class AAPSourceClient(BaseAPIClient):
         """
         return await self.get_paginated("inventories/", params=params)
 
-    @retry_api_call
     async def get_input_inventories(
         self, inventory_id: int, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -413,7 +414,6 @@ class AAPSourceClient(BaseAPIClient):
         endpoint = f"inventories/{inventory_id}/input_inventories/"
         return await self.get_paginated(endpoint, params=params)
 
-    @retry_api_call
     async def get_inventory_sources(
         self, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -427,7 +427,6 @@ class AAPSourceClient(BaseAPIClient):
         """
         return await self.get_paginated("inventory_sources/", params=params)
 
-    @retry_api_call
     async def get_hosts(
         self, inventory_id: int | None = None, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -446,7 +445,6 @@ class AAPSourceClient(BaseAPIClient):
             endpoint = "hosts/"
         return await self.get_paginated(endpoint, params=params)
 
-    @retry_api_call
     async def get_groups(
         self, inventory_id: int | None = None, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -466,7 +464,6 @@ class AAPSourceClient(BaseAPIClient):
         return await self.get_paginated(endpoint, params=params)
 
     # Project and execution environment resources
-    @retry_api_call
     async def get_projects(self, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Get all projects.
 
@@ -478,7 +475,6 @@ class AAPSourceClient(BaseAPIClient):
         """
         return await self.get_paginated("projects/", params=params)
 
-    @retry_api_call
     async def get_execution_environments(
         self, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -492,7 +488,6 @@ class AAPSourceClient(BaseAPIClient):
         """
         return await self.get_paginated("execution_environments/", params=params)
 
-    @retry_api_call
     async def get_instance_groups(
         self, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -507,7 +502,6 @@ class AAPSourceClient(BaseAPIClient):
         return await self.get_paginated("instance_groups/", params=params)
 
     # Job template resources
-    @retry_api_call
     async def get_job_templates(self, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Get all job templates.
 
@@ -519,7 +513,6 @@ class AAPSourceClient(BaseAPIClient):
         """
         return await self.get_paginated("job_templates/", params=params)
 
-    @retry_api_call
     async def get_job_template_credentials(
         self, job_template_id: int, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -535,7 +528,6 @@ class AAPSourceClient(BaseAPIClient):
         endpoint = f"job_templates/{job_template_id}/credentials/"
         return await self.get_paginated(endpoint, params=params)
 
-    @retry_api_call
     async def get_workflow_job_templates(
         self, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -549,7 +541,6 @@ class AAPSourceClient(BaseAPIClient):
         """
         return await self.get_paginated("workflow_job_templates/", params=params)
 
-    @retry_api_call
     async def get_workflow_nodes(
         self, workflow_id: int, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -566,7 +557,6 @@ class AAPSourceClient(BaseAPIClient):
         return await self.get_paginated(endpoint, params=params)
 
     # Schedule resources
-    @retry_api_call
     async def get_schedules(self, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Get all schedules.
 
@@ -579,7 +569,6 @@ class AAPSourceClient(BaseAPIClient):
         return await self.get_paginated("schedules/", params=params)
 
     # Notification resources
-    @retry_api_call
     async def get_notification_templates(
         self, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -594,7 +583,6 @@ class AAPSourceClient(BaseAPIClient):
         return await self.get_paginated("notification_templates/", params=params)
 
     # Label resources
-    @retry_api_call
     async def get_labels(self, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Get all labels.
 
@@ -607,7 +595,6 @@ class AAPSourceClient(BaseAPIClient):
         return await self.get_paginated("labels/", params=params)
 
     # Role assignments
-    @retry_api_call
     async def get_role_assignments(
         self, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:

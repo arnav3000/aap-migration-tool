@@ -8,7 +8,11 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from aap_migration.api.context import build_ephemeral_context, close_job_context
-from aap_migration.api.schemas import ConfigShowRequest, ConfigValidateRequest
+from aap_migration.api.schemas import (
+    ConfigShowRequest,
+    ConfigValidateOut,
+    ConfigValidateRequest,
+)
 from aap_migration.api.security import redact_backend_error
 from aap_migration.config import MigrationConfig
 
@@ -34,15 +38,15 @@ def _config_summary(config: MigrationConfig) -> dict:
     }
 
 
-@router.post("/config/validate")
+@router.post("/config/validate", response_model=ConfigValidateOut)
 def validate_config(body: ConfigValidateRequest) -> dict:
     """Validate active connection config, optionally testing connectivity.
 
-    ``valid`` is a constant-True success marker on 200 (real failures come
-    back as 400/502, never ``valid: false``): do not branch on it being
-    False. ``connectivity`` is always present (empty ``{}`` unless
-    ``check_connectivity`` was requested), with per-side ``"reachable"``
-    markers under the same rule.
+    ``valid`` is a constant-True success marker on 200 (pinned as
+    Literal[True] in OpenAPI; real failures come back as 400/502, never
+    ``valid: false``): use the status code, not the boolean, for failure
+    detection. ``connectivity`` is always present (empty ``{}`` unless
+    ``check_connectivity`` was requested).
     """
     try:
         ctx = build_ephemeral_context(body.source_id, body.target_id)

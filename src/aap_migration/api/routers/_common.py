@@ -55,10 +55,7 @@ def submit_job(
     try:
         job = get_job_manager().submit(job_type, params, func, job_dir=job_dir)
     except QueueFullError as exc:
-        message = str(exc)
-        if message.startswith(("Server storage unhealthy", "Server is shutting down")):
-            raise HTTPException(status_code=503, detail=message) from exc
-        raise HTTPException(status_code=429, detail=message) from exc
+        raise _store_http_error(exc) from exc
     chained_from = None
     if params.get("job_id"):
         try:
@@ -241,7 +238,4 @@ def submit_chained(
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-    try:
-        return submit_job(job_type, dumped, func, job_dir=reuse)
-    except QueueFullError as exc:
-        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    return submit_job(job_type, dumped, func, job_dir=reuse)

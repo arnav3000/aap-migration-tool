@@ -384,8 +384,11 @@ class TestContractShapes:
 
         monkeypatch.setattr(jobs_mod, "_manager", None)
         body = client.get("/api/v1/health").json()
-        assert body["worker"] == "unknown"
-        assert body["queue_depth"] is None
+        # Fresh boot with no manager yet reports healthy (alive, depth 0):
+        # the first submit lazily creates the manager, so probes must not
+        # 503 before any job exists.
+        assert body["worker"] == "alive"
+        assert body["queue_depth"] == 0
         assert body["orphans"] is None
 
     def test_versioned_docs_and_redirects(self, client: TestClient) -> None:
@@ -589,6 +592,10 @@ class TestBurstBackoff:
         dead = threading.Thread(target=lambda: None, name="dead-burst-probe")
         dead.start()
         dead.join()
+        # White-box pin: drives the restart supervisor via its internal
+        # _restart_times/_worker state. If the supervisor is refactored,
+        # update this test alongside -- it pins backoff behavior through
+        # the public ensure_worker() entry point.
         now = time.monotonic()
         manager._restart_times = [now - i for i in range(6)]
         manager._worker = dead
@@ -767,6 +774,7 @@ class TestSnapshotConstants:
         assert store.SNAPSHOT_TARGET_ID == "_snapshot_target_id"
         assert store.SNAPSHOT_FP == "_snapshot_fp"
         assert store.SNAPSHOT_NEED == "_snapshot_need"
+        assert store.SNAPSHOT_FERNET_FP == "_snapshot_fernet_fp"
         # The writer emits exactly the single-home keys.
         src = client.post(
             "/api/v1/connections",
@@ -792,6 +800,7 @@ class TestSnapshotConstants:
             store.SNAPSHOT_TARGET_ID,
             store.SNAPSHOT_FP,
             store.SNAPSHOT_NEED,
+            store.SNAPSHOT_FERNET_FP,
         }
 
 

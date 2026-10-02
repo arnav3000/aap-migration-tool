@@ -29,6 +29,7 @@ SNAPSHOT_SOURCE_ID = "_snapshot_source_id"
 SNAPSHOT_TARGET_ID = "_snapshot_target_id"
 SNAPSHOT_FP = "_snapshot_fp"
 SNAPSHOT_NEED = "_snapshot_need"
+SNAPSHOT_FERNET_FP = "_snapshot_fernet_fp"
 
 
 def needs_target(need: NeedScope) -> bool:

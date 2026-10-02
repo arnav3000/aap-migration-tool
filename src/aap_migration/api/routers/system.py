@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from aap_migration import __version__
+from aap_migration.api.schemas import HealthOut, ReadyOut, VersionOut
 
 router = APIRouter(tags=["system"])
 
@@ -21,7 +22,10 @@ def _worker_state() -> tuple[str, int | None]:
 
         manager = manager_or_none()
         if manager is None:
-            return "unknown", None
+            # No manager yet means no jobs submitted since boot: the
+            # process is serving, so report healthy instead of 503.
+            # The first submit lazily creates the manager.
+            return "alive", 0
         # Public API (locked queue_depth) instead of lock-free _jobs iteration.
         return ("alive" if manager.worker_alive() else "dead"), manager.queue_depth()
     except Exception:
@@ -45,7 +49,7 @@ def _orphan_state() -> dict[str, int | None]:
         return {"orphans": None, "fenced_dirs": None}
 
 
-@router.get("/health")
+@router.get("/health", response_model=HealthOut)
 def health() -> JSONResponse:
     """Liveness probe (includes FIFO worker state for orchestration)."""
     worker, depth = _worker_state()
@@ -93,7 +97,7 @@ def _probe_dir_writable(directory: str) -> None:
             pass
 
 
-@router.get("/ready")
+@router.get("/ready", response_model=ReadyOut)
 def ready() -> JSONResponse:
     """Readiness probe: worker alive plus DB and job-dir writability."""
     import os
@@ -151,7 +155,7 @@ def ready() -> JSONResponse:
     )
 
 
-@router.get("/version", response_model=dict)
+@router.get("/version", response_model=VersionOut)
 def version() -> dict:
     """API + CLI version info (mirrors ``--version``)."""
     return {"api": __version__, "prog_name": "aap-bridge"}

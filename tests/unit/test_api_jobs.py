@@ -409,6 +409,265 @@ class TestFamilyCoverage:
         assert client.post("/api/v1/connections/missing/test").status_code == 404
 
 
+class TestWiringSpies11:
+    """CLI-boundary spies for the 11 roundtrip-only workers.
+
+    _roundtrip proves acceptance + envelope; these spies prove param
+    mapping at the CLI boundary (wrong worker or dropped param fails).
+    """
+
+    def _stub_ctx(self, monkeypatch: Any, tmp_path: Any, params: dict) -> Any:
+        import contextlib
+        import types
+
+        import aap_migration.api.services._core as core
+
+        workdir = tmp_path / "job"
+        workdir.mkdir(exist_ok=True)
+        (workdir / "reports").mkdir(exist_ok=True)
+        (workdir / "schemas").mkdir(exist_ok=True)
+        (workdir / "exports").mkdir(exist_ok=True)
+        config = types.SimpleNamespace(
+            dry_run=False,
+            export=types.SimpleNamespace(records_per_file=1000),
+            performance=types.SimpleNamespace(
+                project_patch_batch_size=50, project_patch_batch_interval=0
+            ),
+        )
+
+        @contextlib.contextmanager
+        def _fake_ctx(job: Any, **kwargs: Any) -> Any:
+            yield (types.SimpleNamespace(config=config), config, workdir, params)
+
+        monkeypatch.setattr(core, "chained_ctx", _fake_ctx)
+        for _mod_name in (
+            "aap_migration.api.services.etl",
+            "aap_migration.api.services.reporting",
+            "aap_migration.api.services.maintenance",
+            "aap_migration.api.services.credentials",
+            "aap_migration.api.services.iam",
+        ):
+            try:
+                import importlib as _il
+
+                _mod = _il.import_module(_mod_name)
+                if hasattr(_mod, "chained_ctx"):
+                    monkeypatch.setattr(_mod, "chained_ctx", _fake_ctx)
+            except Exception:
+                pass
+        return workdir
+
+    def test_transform_maps_resource_type(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.etl as etl
+
+        params = {"resource_types": ["hosts"], "quiet": True}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        seen: dict = {}
+        monkeypatch.setattr(etl, "call_command", lambda cmd, ctx, **kw: seen.update(cmd=cmd, **kw))
+        monkeypatch.setattr(etl, "is_noop_scope", lambda p: False)
+        etl.run_transform({"job_id": "t", "job_dir": str(tmp_path / "job"), "params": params})
+        assert seen["cmd"] == "transform"
+        assert seen["resource_type"] == ("hosts",)
+
+    def test_patch_projects_maps_batch(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.etl as etl
+
+        params = {"batch_size": 25}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        seen: dict = {}
+        monkeypatch.setattr(etl, "call_command", lambda cmd, ctx, **kw: seen.update(cmd=cmd, **kw))
+        etl.run_patch_projects({"job_id": "p", "job_dir": str(tmp_path / "job"), "params": params})
+        assert seen["cmd"] == "patch-projects"
+        assert seen["batch_size"] == 25
+
+    def test_migrate_resume_maps_phase(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.etl as etl
+
+        params = {"from_phase": "hosts"}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        seen: dict = {}
+        monkeypatch.setattr(etl, "call_command", lambda cmd, ctx, **kw: seen.update(cmd=cmd, **kw))
+        etl.run_migrate_resume({"job_id": "r", "job_dir": str(tmp_path / "job"), "params": params})
+        assert seen["cmd"] == "resume"
+        assert seen["from_phase"] == "hosts"
+
+    def test_credential_compare_calls_coordinator(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.credentials as cred
+
+        params: dict = {}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        called: dict = {}
+
+        class _C:
+            async def compare_and_verify_credentials(self, report_path: str = "") -> Any:
+                called["report"] = report_path
+                return {"missing_count": 1}
+
+        monkeypatch.setattr(cred, "_credential_coordinator", lambda ctx: _C())
+        out = cred.run_credential_compare(
+            {"job_id": "c", "job_dir": str(tmp_path / "job"), "params": params}
+        )
+        assert called["report"].endswith("credential-comparison.md")
+        assert out["report"] == "reports/credential-comparison.md"
+
+    def test_credential_migrate_maps_branches(self, tmp_path: Any, monkeypatch: Any) -> None:
+        # Covered directly by TestCredentialMigrateBranches (no-action vs
+        # migrate-all); this spy pins the migrate_all phase allowlist.
+        import aap_migration.api.services.credentials as cred
+
+        params: dict = {}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        seen: dict = {}
+
+        class _C:
+            async def compare_and_verify_credentials(self, report_path: str = "") -> Any:
+                return {"missing_count": 2}
+
+            async def migrate_all(self, **kw: Any) -> Any:
+                seen.update(kw)
+                return {"migrated": 1}
+
+        monkeypatch.setattr(cred, "_credential_coordinator", lambda ctx: _C())
+        cred.run_credential_migrate(
+            {"job_id": "c", "job_dir": str(tmp_path / "job"), "params": params}
+        )
+        assert seen["only_phases"] == ["organizations", "credentials"]
+
+    def test_iam_audit_maps_source(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.iam as iam
+
+        params = {"skip_ssl_verify": False}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        monkeypatch.setattr(
+            iam, "_iam_connections", lambda pdict, need="source": ({"url": "u", "token": "t"}, None)
+        )
+        seen: dict = {}
+        monkeypatch.setattr(
+            iam, "_run_iam_audit", lambda pd, wd, s: seen.update(pdict=pd) or {"message": "ok"}
+        )
+        iam.run_iam_audit({"job_id": "a", "job_dir": str(tmp_path / "job"), "params": params})
+        assert seen["pdict"] is not None
+
+    def test_iam_migrate_rejects_exclusive_flags(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.iam as iam
+
+        params = {"skip_user_roles": True, "users_only": True}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        monkeypatch.setattr(
+            iam, "_iam_connections", lambda pdict, need="both": ({"url": "u"}, {"url": "v"})
+        )
+        try:
+            iam.run_iam_migrate({"job_id": "m", "job_dir": str(tmp_path / "job"), "params": params})
+            raise AssertionError("expected exclusive-flags ValueError")
+        except ValueError as exc:
+            assert "mutually exclusive" in str(exc)
+
+    def test_analyze_dependencies_requires_scope(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.reporting as rep
+
+        params: dict = {}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        try:
+            rep.run_analyze_dependencies(
+                {"job_id": "d", "job_dir": str(tmp_path / "job"), "params": params}
+            )
+            raise AssertionError("expected scope ValueError")
+        except ValueError as exc:
+            assert "analyze_all" in str(exc)
+
+    def test_migration_report_maps_format(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.reporting as rep
+
+        params = {"output_format": "markdown", "resource_type": "hosts"}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        seen: dict = {}
+        monkeypatch.setattr(rep, "call_command", lambda cmd, ctx, **kw: seen.update(cmd=cmd, **kw))
+        rep.run_migration_report(
+            {"job_id": "m", "job_dir": str(tmp_path / "job"), "params": params}
+        )
+        assert seen["cmd"] == "migration-report"
+        assert seen["resource_type"] == "hosts"
+
+    def test_enhanced_report_maps_org(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.reporting as rep
+
+        params = {"output_format": "csv", "organization": "Default"}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        seen: dict = {}
+        monkeypatch.setattr(rep, "call_command", lambda cmd, ctx, **kw: seen.update(cmd=cmd, **kw))
+        rep.run_enhanced_report({"job_id": "e", "job_dir": str(tmp_path / "job"), "params": params})
+        assert seen["cmd"] == "enhanced-report"
+        assert seen["organization"] == "Default"
+
+    def test_project_failures_runs_command(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.reporting as rep
+
+        params: dict = {}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        seen: dict = {}
+        monkeypatch.setattr(rep, "call_command", lambda cmd, ctx, **kw: seen.update(cmd=cmd, **kw))
+        out = rep.run_project_failures(
+            {"job_id": "p", "job_dir": str(tmp_path / "job"), "params": params}
+        )
+        assert seen["cmd"] == "analyze-project-failures"
+        assert out["report"].endswith("PROJECT-FAILURES-REPORT.md")
+
+    def test_prep_pings_both_sides(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import aap_migration.api.services.maintenance as m
+
+        params: dict = {}
+        self._stub_ctx(monkeypatch, tmp_path, params)
+        pinged: list = []
+
+        class _C:
+            async def get(self, endpoint: str, **kw: Any) -> Any:
+                pinged.append(endpoint)
+                return {}
+
+            async def get_version(self) -> Any:
+                return "2.5.0"
+
+        import types
+
+        ctx = types.SimpleNamespace(source_client=_C(), target_client=_C())
+        import contextlib
+
+        import aap_migration.api.services._core as core
+
+        @contextlib.contextmanager
+        def _fake_prep_ctx(job: Any, **kw: Any) -> Any:
+            cfg = types.SimpleNamespace(
+                state=types.SimpleNamespace(db_path=""),
+                paths=types.SimpleNamespace(schema_dir=str(tmp_path)),
+                ignored_endpoints={"common": [], "source": [], "target": []},
+            )
+            yield (ctx, cfg, tmp_path / "job", params)
+
+        monkeypatch.setattr(core, "chained_ctx", _fake_prep_ctx)
+        monkeypatch.setattr(m, "chained_ctx", _fake_prep_ctx)
+
+        async def _fake_discover(*a: Any, **k: Any) -> Any:
+            return {"endpoints": {}}
+
+        monkeypatch.setattr("aap_migration.prep.discover_endpoints", _fake_discover)
+
+        async def _fake_gen(*a: Any, **k: Any) -> Any:
+            return {}
+
+        monkeypatch.setattr("aap_migration.prep.generate_schema", _fake_gen)
+        monkeypatch.setattr("aap_migration.prep.compare_schemas", lambda *a, **k: {})
+        monkeypatch.setattr("aap_migration.prep.save_endpoints", lambda *a, **k: None)
+        monkeypatch.setattr("aap_migration.prep.save_schema", lambda *a, **k: None)
+        monkeypatch.setattr("aap_migration.prep.save_comparison", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "aap_migration.utils.version_validation.validate_version_compatibility",
+            lambda *a, **k: None,
+        )
+        out = m.run_prep({"job_id": "p", "job_dir": str(tmp_path / "job"), "params": params})
+        assert pinged.count("ping/") >= 2
+        assert out["message"] == "Prep complete"
+
+
 class TestCoreEtl:
     """Execution tests for core ETL/sync endpoints (#4).
 

@@ -104,6 +104,42 @@ def _reject_userinfo_and_scheme(url: str) -> str:
     return url
 
 
+def _resolve_host_bounded(host: str, timeout_secs: float = 5.0) -> Any:
+    """Resolve *host* via getaddrinfo on a daemon helper thread (fail-closed).
+
+    Bare ``socket.getaddrinfo`` has no timeout: on the sync request path
+    one slow hostname would hang the serving thread indefinitely and
+    stall every API route. This mirrors
+    :func:`reverify_execution_url_bounded` with a shorter submit-time
+    budget. Raises ValueError on timeout or resolution failure.
+    """
+    import concurrent.futures
+    import logging
+
+    pool = _daemon_dns_pool(max_workers=1)
+    future = pool.submit(socket.getaddrinfo, host, None, socket.SOCK_STREAM)
+    try:
+        return future.result(timeout=max(timeout_secs, 1.0))
+    except concurrent.futures.TimeoutError as exc:
+        logging.getLogger("aap_migration.utils.ssrf").warning(
+            "SSRF strict DNS resolve timed out after %ss for host %s; failing closed",
+            max(timeout_secs, 1.0),
+            host,
+        )
+        raise ValueError("Connection URL host resolution timed out; failing closed") from exc
+    except (socket.gaierror, UnicodeError, OSError) as exc:
+        raise ValueError("Connection URL host cannot be resolved") from exc
+    finally:
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+
+def _strict_enabled() -> bool:
+    return os.environ.get("AAP_BRIDGE_SSRF_STRICT", "").strip() in {"1", "true", "yes"}
+
+
 def validate_connection_url(url: str) -> str:
     """Reject metadata-service URLs; private AAP hosts stay allowed.
 
@@ -117,12 +153,9 @@ def validate_connection_url(url: str) -> str:
     _reject_userinfo_and_scheme(url)
     if is_metadata_url(url):
         raise ValueError("Connection URL targets a blocked metadata endpoint")
-    if os.environ.get("AAP_BRIDGE_SSRF_STRICT", "").strip() in {"1", "true", "yes"}:
-        try:
-            host = urlparse(url).hostname or ""
-            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-        except (socket.gaierror, UnicodeError) as exc:
-            raise ValueError("Connection URL host cannot be resolved") from exc
+    if _strict_enabled():
+        host = urlparse(url).hostname or ""
+        infos = _resolve_host_bounded(host, timeout_secs=5.0)
         for _, _, _, _, sockaddr in infos:
             ip_str = sockaddr[0]
             try:
@@ -141,11 +174,12 @@ def reverify_execution_url(url: str) -> str:
     (or the stored URL edited) to a metadata endpoint before the worker
     fetches: the job's ping/version calls would then deliver the bearer
     token to the metadata service. This re-verifies the literal URL and its
-    currently resolved IPs against the metadata ranges. Private AAP hosts
-    stay allowed (strict private blocking remains opt-in via
-    ``AAP_BRIDGE_SSRF_STRICT``). DNS resolution failures fail closed with
-    ValueError (fail-safe: a host that cannot be verified must not receive
-    the bearer token). Raises ValueError.
+    currently resolved IPs against the metadata ranges, plus the strict
+    private/loopback/link-local rejection when ``AAP_BRIDGE_SSRF_STRICT``
+    is set (execution enforces the same strict contract as create-time
+    validation). DNS resolution failures fail closed with ValueError
+    (fail-safe: a host that cannot be verified must not receive the
+    bearer token). Raises ValueError.
     """
     _reject_userinfo_and_scheme(url)
     if is_metadata_url(url):
@@ -157,6 +191,7 @@ def reverify_execution_url(url: str) -> str:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except (socket.gaierror, UnicodeError, OSError) as exc:
         raise ValueError("Connection URL host cannot be resolved") from exc
+    strict = _strict_enabled()
     for _, _, _, _, sockaddr in infos:
         try:
             ip = ipaddress.ip_address(sockaddr[0])
@@ -164,6 +199,8 @@ def reverify_execution_url(url: str) -> str:
             continue
         if _ip_is_metadata(ip):
             raise ValueError("Connection URL resolves to a blocked metadata endpoint")
+        if strict and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast):
+            raise ValueError("Connection URL resolves to a blocked private address")
     return url
 
 

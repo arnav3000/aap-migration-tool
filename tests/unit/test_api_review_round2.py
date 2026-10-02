@@ -96,13 +96,99 @@ class TestSharedWorkerLifecycle:
         ],
     )
     def test_worker_uses_shared_lifecycle(
-        self, module_name: str, worker: str, lifecycle: str
+        self, module_name: str, worker: str, lifecycle: str, tmp_path: Any, monkeypatch: Any
     ) -> None:
+        """Behavioral proof: invoke the worker with stubbed lifecycle and
+        assert the expected lifecycle entry was hit (not source text)."""
+        import contextlib
         import importlib
-        import inspect
+        import types
+
+        import aap_migration.api.services._core as core
 
         module = importlib.import_module(module_name)
-        assert f"{lifecycle}(" in inspect.getsource(getattr(module, worker))
+        fn = getattr(module, worker)
+        entered: list[str] = []
+
+        @contextlib.contextmanager
+        def _spy_chained(job: Any, **kwargs: Any) -> Any:
+            entered.append("chained_ctx")
+            cfg = types.SimpleNamespace(
+                export=types.SimpleNamespace(records_per_file=1000),
+                performance=types.SimpleNamespace(
+                    project_patch_batch_size=50, project_patch_batch_interval=0
+                ),
+                state=types.SimpleNamespace(db_path=""),
+                dry_run=False,
+            )
+            yield (types.SimpleNamespace(config=cfg), cfg, tmp_path, dict(job.get("params", {})))
+
+        @contextlib.contextmanager
+        def _spy_workdir(job: Any, **kwargs: Any) -> Any:
+            entered.append("workdir_ctx")
+            yield (tmp_path, dict(job.get("params", {})))
+
+        monkeypatch.setattr(core, "chained_ctx", _spy_chained)
+        monkeypatch.setattr(core, "workdir_ctx", _spy_workdir)
+        try:
+            monkeypatch.setattr(module, "chained_ctx", _spy_chained)
+        except Exception:
+            pass
+        try:
+            monkeypatch.setattr(module, "workdir_ctx", _spy_workdir)
+        except Exception:
+            pass
+        # Stub worker-specific side effects so the lifecycle entry is
+        # what is proven (failure after entry still proves entry).
+        if module_name.endswith(".iam"):
+            monkeypatch.setattr(
+                module,
+                "_iam_connections",
+                lambda pdict, need="source": ({"url": "u", "token": "t"}, None),
+            )
+            for _stub in ("_run_iam_audit", "_run_iam_migrate", "_run_iam_benchmark"):
+                try:
+                    monkeypatch.setattr(module, _stub, lambda *a, **k: {"message": "ok"})
+                except Exception:
+                    pass
+            try:
+                monkeypatch.setattr("aap_migration.iam.benchmark.run_benchmark", lambda **k: None)
+            except Exception:
+                pass
+        if worker == "run_retry_failed":
+            monkeypatch.setattr(core, "call_command", lambda *a, **k: None)
+            try:
+                monkeypatch.setattr(module, "call_command", lambda *a, **k: None)
+            except Exception:
+                pass
+            monkeypatch.setattr("aap_migration.api.context.write_job_config", lambda *a, **k: None)
+
+            class _FakeState:
+                database_url = "sqlite:///" + str(tmp_path / "r.db")
+
+            import aap_migration.api.context as ctx_mod
+
+            monkeypatch.setattr(ctx_mod, "open_default_state", lambda: _FakeState())
+        if worker == "run_state_export":
+
+            class _FakeState2:
+                database_url = "sqlite:///" + str(tmp_path / "s.db")
+
+                def export_state(self, path: str) -> None:
+                    __import__("pathlib").Path(path).parent.mkdir(parents=True, exist_ok=True)
+                    __import__("pathlib").Path(path).write_text("{}")
+
+            monkeypatch.setattr(module, "open_default_state", lambda: _FakeState2())
+        if worker == "run_iam_report":
+            monkeypatch.setattr(
+                module, "_iam_report_data", lambda *a, **k: {"report": "r"}
+            ) if hasattr(module, "_iam_report_data") else None
+        job = {"job_id": "lc", "job_dir": str(tmp_path), "params": {}}
+        try:
+            fn(job)
+        except Exception:
+            pass
+        assert lifecycle in entered, f"{worker} did not enter {lifecycle}: {entered}"
 
 
 class TestIamMigrateSchema:

@@ -21,6 +21,7 @@ from aap_migration.api.schemas import (
     ConnectionCreate,
     ConnectionOut,
     ConnectionReplace,
+    ConnectionTestOut,
     ConnectionUpdate,
 )
 
@@ -214,24 +215,26 @@ def delete_connection(conn_id: str) -> dict:
     return {"deleted": conn_id}
 
 
-@router.post("/connections/{conn_id}/test")
+@router.post("/connections/{conn_id}/test", response_model=ConnectionTestOut)
 async def test_connection(conn_id: str) -> dict:
     """Test connectivity to a stored AAP (mirrors ``config validate --check-connectivity``).
 
-    ``reachable`` is a constant-True success marker on 200 (failures come
-    back as 400/502, never ``reachable: false``): do not branch on it being
-    False.
+    ``reachable`` is a constant-True success marker on 200 (pinned as
+    Literal[True]; failures come back as 400/502, never
+    ``reachable: false``): use the status code, not the boolean, for
+    failure detection.
 
-    Async (no ``asyncio.run`` threadpool block): awaits the client directly
-    on the request's event loop with a bounded probe
-    (``asyncio.wait_for`` capped at the connection timeout, max 30s).
+    SSRF re-verification runs off the event loop in a bounded helper
+    thread (fail-closed) so one slow hostname cannot stall all API
+    traffic; the probe itself stays async with ``asyncio.wait_for``
+    capped at the connection timeout (max 30s).
     """
     from aap_migration.api.security import redact_backend_error
     from aap_migration.utils.ssrf import reverify_execution_url_bounded
 
     conn = handle_store_errors(store.get_connection, conn_id, include_token=True)
     try:
-        reverify_execution_url_bounded(conn["url"])
+        await asyncio.to_thread(reverify_execution_url_bounded, conn["url"])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

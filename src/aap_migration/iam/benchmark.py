@@ -45,6 +45,12 @@ def _api_get(
     url = f"{base_url}/{endpoint.lstrip('/')}"
     start = time.monotonic()
     try:
+        from aap_migration.utils.ssrf import reverify_execution_url_bounded
+
+        reverify_execution_url_bounded(url)
+    except ValueError:
+        return time.monotonic() - start, 0, None
+    try:
         resp = session.get(
             url,
             headers={"Authorization": f"Bearer {token}"},

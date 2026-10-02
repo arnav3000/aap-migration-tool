@@ -69,6 +69,32 @@ class TestConnections:
         }
         assert client.post("/api/v1/connections", json=payload).status_code == 201
         assert client.post("/api/v1/connections", json=payload).status_code == 400
+        # embedded credentials rejected at the API boundary (400, not stored)
+        assert (
+            client.post(
+                "/api/v1/connections",
+                json={
+                    "name": "userinfo",
+                    "kind": "source",
+                    "url": "https://user:pass@a.example.com/api/v2",
+                    "token": "t",
+                },
+            ).status_code
+            == 400
+        )
+        # non-http(s) schemes rejected at the API boundary (400)
+        assert (
+            client.post(
+                "/api/v1/connections",
+                json={
+                    "name": "gopher",
+                    "kind": "source",
+                    "url": "gopher://a.example.com/api/v2",
+                    "token": "t",
+                },
+            ).status_code
+            == 400
+        )
 
     def test_metadata_url_blocked(self, client: TestClient) -> None:
         resp = client.post(

@@ -45,13 +45,13 @@ class TestSyncValidators:
         assert "transformed" in body
 
     def test_transform_preview_unknown_type(self, client: TestClient) -> None:
-        # Unknown types fall through to the generic transformer (passthrough)
+        # Unknown types 404 like GET /resources/{type} (contract pin).
         resp = client.post(
             "/api/v1/transforms/preview",
             json={"resource_type": "nope", "payload": {}},
         )
-        assert resp.status_code == 200
-        assert resp.json()["preview"] is True
+        assert resp.status_code == 404
+        assert "Unknown resource type" in resp.json()["detail"]
 
     def test_transform_preview_error_branches(self, client: TestClient, monkeypatch: Any) -> None:
         from aap_migration.migration import transformer as transformer_mod
