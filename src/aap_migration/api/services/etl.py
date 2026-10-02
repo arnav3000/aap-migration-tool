@@ -13,6 +13,7 @@ from aap_migration.api.services._core import (
     is_noop_scope,
     noop_result,
 )
+from aap_migration.migration.importers._registry import DEFAULT_GRANULAR_STEPS
 
 
 # -- full migration workflow --------------------------------------------
@@ -160,25 +161,8 @@ def run_granular_import(job: JobRecord) -> dict[str, Any]:
     with chained_ctx(job) as (ctx, _, workdir, params):
         raw_steps = params.get("steps")
         if raw_steps is None:
-            steps = [
-                "organizations",
-                "users",
-                "teams",
-                "credential_types",
-                "credentials",
-                "execution_environments",
-                "projects",
-                "inventories",
-                "inventory_sources",
-                "inventory_groups",
-                "hosts",
-                "instance_groups",
-                "job_templates",
-                "workflow_job_templates",
-                "schedules",
-                "applications",
-                "settings",
-            ]
+            # Canonical granular order (single home: importers._registry).
+            steps = list(DEFAULT_GRANULAR_STEPS)
         else:
             # Explicit [] is a no-op (consistent with resource_types):
             # run zero steps instead of the full order.

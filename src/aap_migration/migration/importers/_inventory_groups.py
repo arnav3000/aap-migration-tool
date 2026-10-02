@@ -58,6 +58,8 @@ class InventoryGroupImporter(ResourceImporter):
         )
 
         try:
+            # Work on a copy so caller-owned dicts are never mutated.
+            data = dict(data)
             if resolve_dependencies:
                 data = await self._resolve_dependencies(resource_type, data)
 
@@ -263,6 +265,10 @@ class InventoryGroupImporter(ResourceImporter):
         Returns:
             List of lists (tiers), where Tier 0 is roots, Tier 1 is their children, etc.
         """
+        # Work on copies so caller-owned dicts are never mutated (a second
+        # pass must still see _source_id/children). Mutations below (parent
+        # injection, children stripping) apply to the copies only.
+        groups = [dict(g) for g in groups]
         # Index groups by ID
         group_by_id = {g.get("_source_id", g.get("id")): g for g in groups}
 
@@ -611,10 +617,11 @@ class InventorySourceImporter(ResourceImporter):
         Returns:
             List of created inventory source data
         """
-        # Extract schedules before import
+        # Extract schedules before import (non-mutating: keep caller dicts
+        # intact so a second pass still sees schedules/_source_id).
         sources_with_schedules = []
         for source in sources:
-            schedules = source.pop("schedules", None)
+            schedules = source.get("schedules", None)
             if schedules:
                 source_id = source.get("_source_id", source.get("id"))
                 sources_with_schedules.append(
@@ -624,8 +631,9 @@ class InventorySourceImporter(ResourceImporter):
                     }
                 )
 
-        # Import inventory sources
-        results = await self._import_parallel("inventory_sources", sources, progress_callback)
+        # Import inventory sources without the nested schedules key.
+        clean_sources = [{k: v for k, v in s.items() if k != "schedules"} for s in sources]
+        results = await self._import_parallel("inventory_sources", clean_sources, progress_callback)
 
         # Import schedules for successfully imported inventory sources
         if sources_with_schedules:

@@ -10,12 +10,11 @@ from typing import Any
 from aap_migration.client.aap_target_client import AAPTargetClient
 from aap_migration.client.exceptions import APIError, ConflictError
 from aap_migration.config import PerformanceConfig
-from aap_migration.migration.importers._base_helpers import (
+from aap_migration.migration.importers._base_helpers import BaseLookupMixin
+from aap_migration.migration.importers._registry import (
     ORGANIZATION_REQUIRED_RESOURCES,
     ORGANIZATION_SCOPED_RESOURCES,
-    BaseLookupMixin,
 )
-from aap_migration.migration.models import MigrationProgress
 from aap_migration.migration.state import MigrationState
 from aap_migration.resources import PARENT_SCOPED_RESOURCES
 from aap_migration.utils.idempotency import compare_resources
@@ -385,8 +384,8 @@ class ResourceImporter(BaseLookupMixin):
         if not error.response or not isinstance(error.response, dict):
             return base_error
 
-        # Get dependencies for this resource type (may be empty for some importers)
-        dependencies = self._get_dependencies(resource_type)
+        # Dependencies for this resource type (may be empty for some importers)
+        dependencies = self.DEPENDENCIES
 
         # Parse error response to find dependency-related failures
         enriched_parts = []
@@ -459,34 +458,15 @@ class ResourceImporter(BaseLookupMixin):
             warnings_by_source_id: Dict mapping source_id -> list of warning messages
         """
         try:
-            from aap_migration.migration.database import get_session
-
-            with get_session(self.state.database_url) as session:
-                for source_id, warnings in warnings_by_source_id.items():
-                    progress = (
-                        session.query(MigrationProgress)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
-                        .first()
-                    )
-
-                    if progress and progress.status == "completed":
-                        # Append warnings to existing error_message
-                        warning_text = "WARNING: " + "; ".join(warnings)
-                        if progress.error_message:
-                            progress.error_message = f"{progress.error_message}\n{warning_text}"
-                        else:
-                            progress.error_message = warning_text
-
-                        logger.info(
-                            "notification_warning_added_to_report",
-                            resource_type=resource_type,
-                            source_id=source_id,
-                            source_name=progress.source_name,
-                            warning_count=len(warnings),
-                        )
-
-                session.commit()
-
+            append = getattr(self.state, "append_notification_warnings", None)
+            if callable(append):
+                append(resource_type, warnings_by_source_id)
+                return
+            logger.error(
+                "failed_to_add_notification_warnings",
+                resource_type=resource_type,
+                error="state helper missing",
+            )
         except Exception as e:
             logger.error(
                 "failed_to_add_notification_warnings",
@@ -507,7 +487,7 @@ class ResourceImporter(BaseLookupMixin):
             Data with resolved dependencies
         """
         resolved = dict(data)
-        dependencies = self._get_dependencies(resource_type)
+        dependencies = self.DEPENDENCIES
         resource_source_id = data.get("_source_id") or data.get("id")
 
         logger.debug(
@@ -863,14 +843,17 @@ class ResourceImporter(BaseLookupMixin):
 
             async with semaphore:
                 try:
-                    # Extract source ID
-                    source_id = resource.pop("_source_id", resource.get("id"))
+                    # Non-mutating read: never pop caller-owned keys so the
+                    # same batch can be re-passed (retry/resume) without
+                    # mis-keying state. Strip via a copy instead.
+                    source_id = resource.get("_source_id", resource.get("id"))
+                    payload = {k: v for k, v in resource.items() if k != "_source_id"}
 
                     # Import resource
                     result = await self.import_resource(
                         resource_type=resource_type,
                         source_id=source_id,
-                        data=resource,
+                        data=payload,
                     )
 
                     # Update counters

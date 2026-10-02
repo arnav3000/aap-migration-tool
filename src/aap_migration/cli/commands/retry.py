@@ -3,7 +3,7 @@
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import click
 from rich.console import Console
@@ -20,6 +20,21 @@ from aap_migration.cli.utils import (
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _retry_child_timeout_secs() -> float:
+    """Timeout for each per-type ``migrate`` child process.
+
+    Uses the job timeout config so a hung child cannot wedge the single FIFO
+    worker forever; falls back to 3600s when the API config is unavailable
+    (e.g. CLI-only installs).
+    """
+    try:
+        from aap_migration.api.jobs._config import JOB_TIMEOUT_SECS
+
+        return max(float(JOB_TIMEOUT_SECS), 1.0)
+    except Exception:
+        return 3600.0
 
 
 @click.group(name="retry", hidden=True)
@@ -172,7 +187,10 @@ def retry_failed(
                     .first()
                 )
                 if progress:
-                    progress.status = cast(Any, None)
+                    # Reset status from 'failed' to 'pending' to allow
+                    # re-import (status column is NOT NULL; None would
+                    # raise IntegrityError on commit).
+                    progress.status = "pending"
             session.commit()
 
     echo_success(f"Cleared {len(failed_resources)} failed resource statuses")
@@ -188,9 +206,15 @@ def retry_failed(
     if ctx.config_path:
         config_arg = ["--config", str(ctx.config_path)]
 
-    # Import each resource type that had failures using proven migrate command
+    # Import each resource type that had failures using proven migrate command.
+    # Each child runs with an explicit timeout (job timeout config): on expiry
+    # the child is killed (subprocess.run kills on timeout) and the type is
+    # recorded as a timeout error instead of wedging the single FIFO worker.
+    # Note: grandchildren detached by the child may outlive the kill; each
+    # resource kind is independent, so the loop continues with the next one.
+    child_timeout = _retry_child_timeout_secs()
     for rtype in grouped.keys():
-        echo_info(f"Retrying {rtype}...")
+        echo_info(f"Retrying {rtype}... (timeout {child_timeout:g}s)")
 
         # Build command using the proven migrate command
         cmd = (
@@ -210,6 +234,7 @@ def retry_failed(
                 check=False,
                 capture_output=False,  # Show output in real-time
                 text=True,
+                timeout=child_timeout,
             )
 
             if result.returncode == 0:
@@ -217,6 +242,12 @@ def retry_failed(
             else:
                 echo_warning(f"  ⚠ {rtype} retry finished with errors")
 
+        except subprocess.TimeoutExpired:
+            echo_error(
+                f"Retry of {rtype} timed out after {child_timeout:g}s; "
+                "child process killed, continuing with next type"
+            )
+            continue
         except Exception as e:
             echo_error(f"Failed to retry {rtype}: {e}")
             continue

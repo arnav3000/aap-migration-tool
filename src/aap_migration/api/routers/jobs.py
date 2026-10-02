@@ -8,8 +8,13 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
 from aap_migration.api.jobs import JobRecord, get_job_manager, read_console_tail
-from aap_migration.api.routers._common import _key_detail, _narrow_status
-from aap_migration.api.schemas import JobListFilter, JobStatus
+from aap_migration.api.routers._common import _key_detail, _narrow_status, public_params
+from aap_migration.api.schemas import (
+    JobArtifactsOut,
+    JobListFilter,
+    JobListOut,
+    JobStatus,
+)
 
 router = APIRouter(tags=["jobs"])
 
@@ -27,7 +32,7 @@ def _to_status(payload: JobRecord) -> JobStatus:
         job_id=payload["job_id"],
         job_type=payload["job_type"],
         status=_narrow_status(payload["status"]),
-        params=dict(payload.get("params", {})),
+        params=public_params(dict(payload.get("params", {}))),
         result=payload.get("result"),
         error=payload.get("error"),
         exit_code=payload.get("exit_code"),
@@ -60,7 +65,24 @@ def _filtered_artifacts(job_dir: str, limit: int = 500) -> tuple[list[str], bool
     return artifacts, truncated
 
 
-@router.get("/jobs")
+def _count_all_artifacts(job_dir: str) -> int:
+    """True pre-page artifact count (full walk, same exclusions).
+
+    P2 #11: ``total`` must be the true pre-page count everywhere; the
+    bounded walk count stays in ``walked``. Removed in v2: the old
+    bounded meaning of ``total`` (equal to ``walked``).
+    """
+    count = 0
+    for _root, dirnames, files in os.walk(job_dir):
+        dirnames.sort()
+        for name in sorted(files):
+            if name in _EXCLUDED_ARTIFACTS or name.endswith(_EXCLUDED_SUFFIXES):
+                continue
+            count += 1
+    return count
+
+
+@router.get("/jobs", response_model=JobListOut)
 def list_jobs(
     status: JobListFilter | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
@@ -74,10 +96,11 @@ def list_jobs(
     state/checkpoint list endpoints. (The legacy bare-list shape was
     removed: one route, one shape.)
 
-    Note: ``GET /jobs/{id}/artifacts`` uses ``walked`` (bounded-walk
-    count) instead of a true total; ``total`` there is a deprecated
-    alias. List endpoints cap ``limit`` at 1000 (artifacts/console
-    tails allow 5000); shared pagers must clamp per route.
+    Note: ``GET /jobs/{id}/artifacts`` returns both ``total`` (true
+    pre-page count) and ``walked`` (bounded-walk count); ``total`` carries
+    deprecated=True during the v2 transition (previously bounded). List
+    endpoints cap ``limit`` at 1000 (artifacts/console tails allow 5000);
+    shared pagers must clamp per route.
     """
     manager = get_job_manager()
     total = manager.count(status)
@@ -119,7 +142,7 @@ def get_job_console(job_id: str, tail: int = Query(default=100, ge=1, le=5000)) 
     }
 
 
-@router.get("/jobs/{job_id}/artifacts")
+@router.get("/jobs/{job_id}/artifacts", response_model=JobArtifactsOut)
 def get_job_artifacts(
     job_id: str,
     limit: int = Query(default=500, ge=1, le=5000),
@@ -130,13 +153,15 @@ def get_job_artifacts(
     Pair with ``GET /jobs/{job_id}/artifacts/{path}`` to download a
     listed file.
 
-    Pagination keys differ from ``GET /jobs`` on purpose: ``walked``
-    is the bounded-walk count so far (not a true pre-page total) and
-    ``truncated`` alone signals incompleteness. ``total`` is kept as
-    a deprecated alias of ``walked`` for back-compat; new clients
-    should read ``walked``. List endpoints (jobs, connections,
-    mappings, checkpoints) cap ``limit`` at 1000; artifact/console
-    tails allow up to 5000 because streaming output justifies it.
+    ``total`` is the true pre-page count (full filtered walk, matching
+    ``GET /jobs`` and list endpoints); ``walked`` is the bounded-walk
+    count so far (``limit+offset+1`` cap) and ``truncated`` alone signals
+    incompleteness (true total exceeds walked). ``total`` was previously a
+    bounded alias of ``walked``; bounded meaning removed in v2 (see
+    ``JobArtifactsOut``: ``total`` carries deprecated=True during the
+    transition, new clients read ``walked`` for bounded progress). List
+    endpoints (jobs, connections, mappings, checkpoints) cap ``limit`` at
+    1000; artifact/console tails allow up to 5000.
     """
     try:
         job = get_job_manager().get_internal(job_id)
@@ -144,15 +169,16 @@ def get_job_artifacts(
         raise HTTPException(status_code=404, detail=_key_detail(exc)) from exc
     artifacts, truncated = _filtered_artifacts(job["job_dir"], limit=limit + offset + 1)
     page = artifacts[offset : offset + limit]
+    # P2 #11: true pre-page total via full walk; walked stays bounded.
+    # Removed in v2: old bounded meaning of total (equal to walked).
+    true_total = _count_all_artifacts(job["job_dir"])
+    walked = len(artifacts)
     payload: dict = {
         "job_id": job_id,
         "artifacts": page,
-        # walked is the bounded-walk count so far; total is a
-        # deprecated alias kept so shared total/limit/offset pagers
-        # keep working. truncated:true alone signals incompleteness.
-        "walked": len(artifacts),
-        "total": len(artifacts),
-        "truncated": truncated or len(artifacts) > offset + limit,
+        "walked": walked,
+        "total": true_total,
+        "truncated": truncated or true_total > walked,
         "limit": limit,
         "offset": offset,
     }

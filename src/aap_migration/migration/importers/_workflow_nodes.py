@@ -712,7 +712,9 @@ class WorkflowNodeImporter(ResourceImporter):
         failed_count = 0
 
         for node in nodes:
-            source_id = node.pop("_source_id", node.get("id"))
+            # Non-mutating read: keep caller dicts intact for retry passes.
+            source_id = node.get("_source_id", node.get("id"))
+            node_payload = {k: v for k, v in node.items() if k != "_source_id"}
 
             # Don't remove edge fields here - import_resource() will extract and store them
             # The edge creation happens after all nodes are imported
@@ -721,7 +723,7 @@ class WorkflowNodeImporter(ResourceImporter):
                 result = await self.import_resource(
                     resource_type="workflow_nodes",
                     source_id=source_id,
-                    data=node,
+                    data=node_payload,
                 )
                 if result:
                     results.append(result)

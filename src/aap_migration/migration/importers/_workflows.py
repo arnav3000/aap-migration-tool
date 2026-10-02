@@ -3,13 +3,11 @@
 from collections.abc import Callable
 from typing import Any, cast
 
-from aap_migration.migration.database import get_session
 from aap_migration.migration.importers._workflow_nodes import WorkflowNodeImporter
 from aap_migration.migration.importers.base import (
     ResourceImporter,
     logger,
 )
-from aap_migration.migration.models import MigrationProgress
 
 
 class WorkflowImporter(ResourceImporter):
@@ -49,39 +47,21 @@ class WorkflowImporter(ResourceImporter):
         workflows_with_notifications = []  # Collect workflows that have notification associations
 
         # Query failed dependencies once (efficient approach)
-        # This allows us to check if workflow nodes reference failed templates
-        failed_job_template_ids = set()
-        failed_workflow_template_ids = set()
+        # This allows us to check if workflow nodes reference failed templates.
+        # Session lifecycle lives in MigrationState.get_failed_source_ids.
+        failed_job_template_ids: set[int] = set()
+        failed_workflow_template_ids: set[int] = set()
 
         try:
-            with get_session(self.state.database_url) as session:
-                # Get all failed job templates
-                failed_jobs = (
-                    session.query(MigrationProgress.source_id)
-                    .filter(
-                        MigrationProgress.resource_type == "job_templates",
-                        MigrationProgress.status == "failed",
-                    )
-                    .all()
-                )
-                failed_job_template_ids = {row.source_id for row in failed_jobs}
-
-                # Get all failed workflow templates
-                failed_workflows = (
-                    session.query(MigrationProgress.source_id)
-                    .filter(
-                        MigrationProgress.resource_type == "workflow_job_templates",
-                        MigrationProgress.status == "failed",
-                    )
-                    .all()
-                )
-                failed_workflow_template_ids = {row.source_id for row in failed_workflows}
-
-                logger.info(
-                    "Loaded failed dependencies for validation",
-                    failed_job_templates=len(failed_job_template_ids),
-                    failed_workflow_templates=len(failed_workflow_template_ids),
-                )
+            get_failed = getattr(self.state, "get_failed_source_ids", None)
+            if callable(get_failed):
+                failed_job_template_ids = set(get_failed("job_templates"))
+                failed_workflow_template_ids = set(get_failed("workflow_job_templates"))
+            logger.info(
+                "Loaded failed dependencies for validation",
+                failed_job_templates=len(failed_job_template_ids),
+                failed_workflow_templates=len(failed_workflow_template_ids),
+            )
         except Exception as e:
             logger.warning(
                 "Failed to query failed dependencies, will skip validation",
@@ -90,19 +70,22 @@ class WorkflowImporter(ResourceImporter):
 
         # Phase 1: Import workflows and collect nodes/surveys/schedules/notifications
         for workflow in workflows:
-            source_id = workflow.pop("_source_id", workflow.get("id"))
+            # Non-mutating reads: never pop caller-owned keys so the same
+            # batch can be re-passed without losing _source_id or nested
+            # payloads. Build a stripped copy for the API call instead.
+            source_id = workflow.get("_source_id", workflow.get("id"))
 
             # Extract nodes for separate import
-            nodes = workflow.pop("_workflow_nodes", None)
+            nodes = workflow.get("_workflow_nodes", None)
 
             # Extract survey spec for separate import (must be POSTed after workflow creation)
-            survey_spec = workflow.pop("survey_spec", None)
+            survey_spec = workflow.get("survey_spec", None)
 
             # Extract schedules for separate import
-            schedules = workflow.pop("schedules", None)
+            schedules = workflow.get("schedules", None)
 
             # Extract notification associations for separate import
-            notifications = workflow.pop("notifications", None)
+            notifications = workflow.get("notifications", None)
 
             # SECURITY FIX: Validate all node dependencies BEFORE importing workflow
             # Check if nodes reference any FAILED templates from earlier import phases
@@ -196,10 +179,22 @@ class WorkflowImporter(ResourceImporter):
                     continue  # Skip to next workflow
 
             try:
+                workflow_payload = {
+                    k: v
+                    for k, v in workflow.items()
+                    if k
+                    not in (
+                        "_source_id",
+                        "_workflow_nodes",
+                        "survey_spec",
+                        "schedules",
+                        "notifications",
+                    )
+                }
                 result = await self.import_resource(
                     resource_type="workflow_job_templates",
                     source_id=source_id,
-                    data=workflow,
+                    data=workflow_payload,
                 )
             except Exception as e:
                 failed_count += 1

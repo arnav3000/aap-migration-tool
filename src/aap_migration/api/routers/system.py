@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from aap_migration import __version__
-from aap_migration.api.schemas import HealthOut, ReadyOut, VersionOut
+from aap_migration.api.schemas import HealthOut, ReadyOut, ResourcesOut, VersionOut
 
 router = APIRouter(tags=["system"])
 
@@ -161,7 +161,7 @@ def version() -> dict:
     return {"api": __version__, "prog_name": "aap-bridge"}
 
 
-@router.get("/resources", response_model=dict)
+@router.get("/resources", response_model=ResourcesOut)
 def list_resources() -> dict:
     """Full resource catalog (mirrors ``resources.py`` registry)."""
     from aap_migration.resources import (

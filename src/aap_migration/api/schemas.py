@@ -88,6 +88,13 @@ class ChainedRequest(ConnectionSelector):
         default=False,
         description="Explicit opt-in to run a chained phase against a different AAP pair",
     )
+    force: bool = Field(
+        default=False,
+        description="Explicit opt-in to chain onto a job whose previous attempt "
+        "was cancelled mid-phase (cancel fence). Without force, chaining onto "
+        "a mid-phase-cancelled job returns 409; resubmit explicitly instead. "
+        "Subclasses may reuse this flag for overwrite semantics.",
+    )
 
 
 class JobStatus(BaseModel):
@@ -181,6 +188,19 @@ class ConfigShowRequest(ConnectionSelector):
 
 
 # -- migrate / ETL --------------------------------------------------------
+# Single shared phase type (superset of migrate + import CLI choices).
+# Per-command validation still rejects phases its CLI command does not
+# support (see MigrateRequest validator: migrate has no phase3).
+MigrationPhase = Literal["phase1", "phase2", "phase3", "all"]
+
+
+def _normalize_phase_value(value: Any) -> Any:
+    """Lowercase a phase string (CLI Choice is case_insensitive=False-safe)."""
+    if isinstance(value, str):
+        return value.lower()
+    return value
+
+
 class MigrateRequest(ChainedRequest):
     resource_types: list[str] | None = Field(
         default=None,
@@ -189,7 +209,23 @@ class MigrateRequest(ChainedRequest):
     force: bool = False
     resume: bool = False
     skip_prep: bool = False
-    phase: Literal["phase1", "phase2", "all"] = "all"
+    phase: MigrationPhase = "all"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_phase(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "phase" in data:
+            data = dict(data)
+            data["phase"] = _normalize_phase_value(data["phase"])
+        return data
+
+    @model_validator(mode="after")
+    def _check_phase(self) -> MigrateRequest:
+        # Migrate CLI accepts only phase1/phase2/all (no phase3); import
+        # accepts the full superset. Reject phase3 here with 422.
+        if self.phase == "phase3":
+            raise ValueError("phase3 is not supported for migrate; use phase1, phase2, or all")
+        return self
 
 
 class MigrateResumeRequest(ChainedRequest):
@@ -233,7 +269,15 @@ class ImportRequest(ChainedRequest):
     skip_dependencies: bool = False
     check_dependencies: bool = False
     force_reimport: bool = False
-    phase: Literal["phase1", "phase2", "phase3", "all"] = "all"
+    phase: MigrationPhase = "all"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_phase(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "phase" in data:
+            data = dict(data)
+            data["phase"] = _normalize_phase_value(data["phase"])
+        return data
 
 
 class PatchProjectsRequest(ChainedRequest):
@@ -359,14 +403,23 @@ class ValidateRequest(ChainedRequest):
     live: bool = False
     resource_type: str | None = None
     skip_hosts: bool = False
-    orgs: str | None = Field(
+    orgs: str | list[str] | None = Field(
         default=None, description="Comma-separated organization names to scope"
     )
+    # Legacy spellings accepted at the boundary; canonicalized via
+    # services._core.parse_organizations (single home). None = all.
+    organizations: list[str] | None = Field(default=None)
+    organization: str | None = Field(default=None)
 
     @model_validator(mode="after")
     def _check_hosts(self) -> ValidateRequest:
         if self.skip_hosts and self.resource_type == "hosts":
             raise ValueError("skip_hosts conflicts with resource_type=hosts")
+        # Canonicalize via the single home (also rejects ambiguous and
+        # unknown org spellings instead of silently widening to all).
+        from aap_migration.api.services._core import parse_organizations
+
+        parse_organizations(self.model_dump())
         return self
 
 
@@ -389,12 +442,23 @@ class AnalyzeDependenciesRequest(ChainedRequest):
     organizations: list[str] = Field(default_factory=list)
     analyze_all: bool = False
     verbose: bool = False
+    # Legacy spellings accepted at the boundary; canonicalized via
+    # services._core.parse_organizations (single home). None = all.
+    organization: str | None = Field(default=None)
+    orgs: str | list[str] | None = Field(default=None)
 
     @model_validator(mode="after")
     def _check_scope(self) -> AnalyzeDependenciesRequest:
-        if not self.analyze_all and not self.organizations:
+        from aap_migration.api.services._core import parse_organizations
+
+        # Single home for spelling normalization + ambiguity/typo guards.
+        scoped = parse_organizations(self.model_dump())
+        effective = scoped if scoped else list(self.organizations or [])
+        # Preserve original contract messages (omitted/None means all via
+        # analyze_all; explicit [] is not a valid scope without analyze_all).
+        if not self.analyze_all and not effective:
             raise ValueError("Must specify analyze_all=true or organizations=[...]")
-        if self.analyze_all and self.organizations:
+        if self.analyze_all and effective:
             raise ValueError("Cannot use analyze_all with organizations")
         return self
 
@@ -410,6 +474,17 @@ class EnhancedReportRequest(ChainedRequest):
     resource_type: str | None = None
     output_format: Literal["html", "markdown", "csv"] = "html"
     organization: str | None = None
+    # Legacy spellings accepted at the boundary; canonicalized via
+    # services._core.parse_organizations (single home). None = all.
+    organizations: list[str] | None = Field(default=None)
+    orgs: str | list[str] | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _check_org_scope(self) -> EnhancedReportRequest:
+        from aap_migration.api.services._core import parse_organizations
+
+        parse_organizations(self.model_dump())
+        return self
 
 
 class ProjectFailuresRequest(ChainedRequest):
@@ -446,6 +521,12 @@ class RetryFailedRequest(ConnectionSelector):
         default=False,
         description="Explicit opt-in to retry under a different AAP pair "
         "than the referenced job was submitted with",
+    )
+    force: bool = Field(
+        default=False,
+        description="Explicit opt-in to retry after a previous attempt was "
+        "cancelled mid-phase (cancel fence). Without force, retrying onto a "
+        "mid-phase-cancelled job returns 409.",
     )
 
 
@@ -492,6 +573,89 @@ class CleanupRequest(ChainedRequest):
 
 
 # -- sync read envelopes (response models pin openapi success shapes) -----
+# NOTE (P2 #12/#13 deprecation timeline): deprecated aliases below keep
+# working but are removed in v2. Canonical shapes are errors_by_file (dict)
+# for per-file maps and errors (list[str]) for validation result lists;
+# artifacts keep walked (bounded) + total (true pre-page count). Old
+# aliases carry deprecated=True so OpenAPI marks them; descriptions note
+# "removed in v2". Do not reintroduce dict/list collisions under one name.
+class StateShowOut(BaseModel):
+    """GET /state/show success shape (models only constrain, no renames)."""
+
+    model_config = {"extra": "allow"}
+
+    migration_id: str | None = None
+    stats: dict[str, Any] = Field(default_factory=dict)
+    warning: str | None = None
+
+
+class JobListOut(BaseModel):
+    """GET /jobs envelope (true pre-page total)."""
+
+    model_config = {"extra": "forbid"}
+
+    items: list[Any] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 100
+    offset: int = 0
+
+
+class ResourcesOut(BaseModel):
+    """GET /resources catalog shape."""
+
+    model_config = {"extra": "forbid"}
+
+    all: list[str] = Field(default_factory=list)
+    fully_supported: list[str] = Field(default_factory=list)
+    migration_order: list[str] = Field(default_factory=list)
+    cleanup_order: list[str] = Field(default_factory=list)
+    resources: dict[str, Any] = Field(default_factory=dict)
+
+
+class PrepSchemasOut(BaseModel):
+    """GET /prep/schemas shape (canonical errors_by_file dict)."""
+
+    model_config = {"extra": "allow"}
+
+    errors_by_file: dict[str, str] = Field(default_factory=dict)
+    # Deprecated alias of errors_by_file (dict); removed in v2. New clients
+    # must read errors_by_file. Validation results elsewhere use errors as
+    # list[str] -- names diverge on purpose and OpenAPI pins each route.
+    errors: dict[str, str] = Field(
+        default_factory=dict,
+        deprecated=True,
+        description="Deprecated alias of errors_by_file; removed in v2.",
+    )
+
+
+class JobArtifactsOut(BaseModel):
+    """GET /jobs/{id}/artifacts shape.
+
+    total is the true pre-page count (full filtered walk); walked is the
+    bounded-walk count so far (limit+offset+1 cap). truncated alone signals
+    incompleteness. total was previously a bounded alias of walked;
+    bounded meaning removed in v2 -- new clients read walked for bounded
+    progress and total for the true count.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    job_id: str
+    artifacts: list[str] = Field(default_factory=list)
+    walked: int = 0
+    total: int = Field(
+        default=0,
+        deprecated=True,
+        description=(
+            "True pre-page count (previously bounded alias of walked); "
+            "bounded meaning removed in v2. Use walked for bounded progress."
+        ),
+    )
+    truncated: bool = False
+    limit: int = 500
+    offset: int = 0
+
+
 class HealthOut(BaseModel):
     model_config = {"extra": "allow"}
 
@@ -553,24 +717,24 @@ class PayloadCheckOut(BaseModel):
 class ConfigValidateOut(BaseModel):
     """POST /config/validate success shape.
 
-    ``valid`` is a constant-True success marker (pinned as Literal so
-    generated clients cannot branch on False): real failures use
-    HTTP 400/502, never ``valid: false``.
+    ``valid`` is a boolean success marker (``True`` on 200; real failures
+    use HTTP 400/502, never ``valid: false``): branch on the status code,
+    not the boolean, for failure detection.
     """
 
     model_config = {"extra": "forbid"}
 
-    valid: Literal[True]
+    valid: bool
     summary: dict[str, Any] = Field(default_factory=dict)
     connectivity: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConnectionTestOut(BaseModel):
-    """POST /connections/{id}/test success shape (same constant-True rule)."""
+    """POST /connections/{id}/test success shape (same boolean rule)."""
 
     model_config = {"extra": "forbid"}
 
     connection_id: str
-    reachable: Literal[True]
+    reachable: bool
     version: str | None = None
     url: str

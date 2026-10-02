@@ -49,7 +49,9 @@ class InventoryImporter(ResourceImporter):
             Created resource data or None if skipped/failed
         """
         is_constructed = data.get("kind") == "constructed"
-        input_inventory_source_ids = data.pop("_input_inventory_ids", [])
+        # Non-mutating read: keep caller dicts intact for retry passes.
+        input_inventory_source_ids = data.get("_input_inventory_ids", []) or []
+        data = {k: v for k, v in data.items() if k != "_input_inventory_ids"}
 
         if not is_constructed:
             return await super().import_resource(

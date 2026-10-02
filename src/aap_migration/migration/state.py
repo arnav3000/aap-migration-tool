@@ -2272,3 +2272,118 @@ class MigrationState:
             except Exception as e:
                 logger.error("Failed to import state", input_path=input_path, error=str(e))
                 raise StateError(f"Failed to import state: {e}") from e
+
+    def get_source_name(self, resource_type: str, source_id: int) -> str | None:
+        """Return the recorded source name for a resource, if any.
+
+        Single home for the dependency-name lookup previously done inline
+        by importers via ``get_session(self.state.database_url)``. Encapsulates
+        the session lifecycle (context-managed, never leaked).
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    progress = (
+                        session.query(MigrationProgress)
+                        .filter_by(resource_type=resource_type, source_id=source_id)
+                        .first()
+                    )
+                    if progress and progress.source_name:
+                        return cast("str | None", progress.source_name)
+                    return None
+            except Exception as e:
+                logger.debug(
+                    "dependency_name_lookup_failed",
+                    resource_type=resource_type,
+                    source_id=source_id,
+                    error=str(e),
+                )
+                return None
+
+    def get_failed_source_ids(self, resource_type: str) -> set[int]:
+        """Return source_ids with status='failed' for a resource type.
+
+        Single home for the failed-dependency pre-query previously done inline
+        by the workflow importer. Encapsulates the session lifecycle.
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    rows = (
+                        session.query(MigrationProgress.source_id)
+                        .filter(
+                            MigrationProgress.resource_type == resource_type,
+                            MigrationProgress.status == "failed",
+                        )
+                        .all()
+                    )
+                    return {row.source_id for row in rows}
+            except Exception as e:
+                logger.warning(
+                    "Failed to query failed dependencies, will skip validation",
+                    error=str(e),
+                )
+                return set()
+
+    def get_failed_resource_types(self) -> list[str]:
+        """Return resource types that have at least one failed record.
+
+        Used by the API retry worker to iterate per-type retries with cancel
+        polling between types. Encapsulates the session lifecycle.
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    rows = (
+                        session.query(MigrationProgress.resource_type)
+                        .filter(MigrationProgress.status == "failed")
+                        .distinct()
+                        .all()
+                    )
+                    return sorted(row[0] for row in rows)
+            except Exception as e:
+                logger.warning(
+                    "Failed to query failed resource types",
+                    error=str(e),
+                )
+                return []
+
+    def append_notification_warnings(
+        self, resource_type: str, warnings_by_source_id: dict[int, list[str]]
+    ) -> None:
+        """Append notification warnings to completed records' error_message.
+
+        Single home for the notification-warning update previously done inline
+        by the base importer. Only touches records already ``completed`` so
+        reports surface the warning without changing status. Encapsulates the
+        session lifecycle.
+        """
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    for source_id, warnings in warnings_by_source_id.items():
+                        progress = (
+                            session.query(MigrationProgress)
+                            .filter_by(resource_type=resource_type, source_id=source_id)
+                            .first()
+                        )
+                        if progress and progress.status == "completed":
+                            warning_text = "WARNING: " + "; ".join(warnings)
+                            if progress.error_message:
+                                progress.error_message = f"{progress.error_message}\n{warning_text}"
+                            else:
+                                progress.error_message = warning_text
+                            logger.info(
+                                "notification_warning_added_to_report",
+                                resource_type=resource_type,
+                                source_id=source_id,
+                                source_name=progress.source_name,
+                                warning_count=len(warnings),
+                            )
+                    session.commit()
+            except Exception as e:
+                logger.error(
+                    "failed_to_add_notification_warnings",
+                    resource_type=resource_type,
+                    error=str(e),
+                )

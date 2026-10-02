@@ -45,6 +45,18 @@ def _narrow_status(value: str) -> JobStatusValue:
     return cast(JobStatusValue, value)
 
 
+def public_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Return the client-visible subset of stored job params.
+
+    Internal ``_*`` keys (submit-time ``_snapshot_*`` pins written by
+    ``submit_chained``) stay server-side: they pin execution-time
+    connection resolution, not client input, and must never leak via job
+    polling. Single home for the rule (mirrors the manager's ``_public``
+    stripping) so every public job-params view filters the same way.
+    """
+    return {k: v for k, v in params.items() if not k.startswith("_")}
+
+
 def submit_job(
     job_type: str,
     params: dict[str, Any],

@@ -86,16 +86,14 @@ def migration_status(
         # state/* endpoints read (MIGRATION_STATE_DB_PATH aware) instead
         # of the ephemeral context default, so custom-path deployments
         # report the same stats everywhere and a GET never creates a DB.
+        # P2 #16 + W4: lenient 200+warning on empty DB like all sibling
+        # readers (no require_connections gate); strict=true opts into 404.
         from aap_migration.api.context import default_state_db_path, open_state
-        from aap_migration.api.routers._common import require_connections
 
         default_path = default_state_db_path()
         if default_path is None:
-            # No state DB yet: still validate the pair so callers get the
-            # same 400/404 connection errors as before, then report the
-            # shared 200+warning missing-DB shape (never create a DB as a
-            # GET side effect).
-            require_connections(source_id, target_id)
+            # No state DB yet: shared 200+warning missing-DB shape (never
+            # create a DB as a GET side effect, never demand a pair).
             if strict:
                 raise HTTPException(status_code=404, detail="No migration state DB found")
             return {
@@ -253,18 +251,31 @@ def check_import_dependencies(body: ImportDependencyCheckRequest) -> dict:
 
         # Same 404/409 semantics as submit-time chaining (unknown -> 404,
         # non-succeeded -> 409) instead of the generic 400 envelope.
+        # P2 #17: job-scoped reads must judge the chained pipeline, never
+        # the ephemeral/default scope. Absent chained state is transient
+        # (no transformed data yet): 404, not 200 for wrong data.
+        # The closure itself is state-based (not file-based), so an absent
+        # xformed tree alone with a present DB still judges the chained DB
+        # (preserves test_chained_dependency_reads_job_db); the validation
+        # route owns the strict xformed->404 gate. Removed in v2: none
+        # (404 contract is canonical).
         workdir, chained_state = resolve_job_state(
             body.job_id, strict=False, allow_statuses=("succeeded",)
         )
         assert workdir is not None  # job_id is truthy, so a dir is returned
         try:
             ctx = build_ephemeral_context(body.source_id, body.target_id)
-            # Prefer the chained directory's transform tree when present.
+            # Always point at the chained tree (even when absent) so we never
+            # judge the ephemeral server-default transform_dir.
             chained_transform = workdir / "xformed"
-            if chained_transform.is_dir():
-                ctx.config.paths.transform_dir = str(chained_transform)
+            ctx.config.paths.transform_dir = str(chained_transform)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if chained_state is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No transformed data yet for job '{body.job_id}'",
+            )
     else:
         chained_state = None
         try:
@@ -278,9 +289,10 @@ def check_import_dependencies(body: ImportDependencyCheckRequest) -> dict:
     available = get_importable_types(use_discovered=True)
     closure = build_dependency_closure(requested, available)
     # Like POST /validations/dependencies: judge the chained pipeline against
-    # its own state DB, not the ephemeral/default one. Read-only: fall back
-    # to a throwaway temp-dir state (never the server-default DB on disk)
-    # when no chained state resolves.
+    # its own state DB, not the ephemeral/default one. Server-default scope
+    # is read-only: use the default DB when present, else a throwaway
+    # temp-dir state (never create a DB as a side effect). Job scope never
+    # falls back (404 above).
     from contextlib import ExitStack
 
     from aap_migration.api.context import (

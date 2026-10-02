@@ -83,6 +83,8 @@ class CredentialImporter(ResourceImporter):
             self.stats["error_count"] += 1
             return None
 
+        # Work on a copy so caller-owned dicts are never mutated.
+        data = dict(data)
         # Clean up transformer markers
         data.pop("_temp_credential_values", None)
         data.pop("_encrypted_fields", None)
@@ -377,13 +379,19 @@ class CredentialImporter(ResourceImporter):
             message="PATCHing pre-created credentials in target",
         )
 
-        # Clean up transformer marker fields before import
-        for credential in credentials:
-            credential.pop("_encrypted_fields", None)
-            credential.pop("_temp_credential_values", None)
+        # Clean up transformer marker fields before import (non-mutating:
+        # build copies so a second pass still sees the original batch).
+        clean_credentials = [
+            {
+                k: v
+                for k, v in c.items()
+                if k not in ("_encrypted_fields", "_temp_credential_values")
+            }
+            for c in credentials
+        ]
 
         # All credentials go through the same PATCH flow via import_resource()
-        results = await self._import_parallel("credentials", credentials, progress_callback)
+        results = await self._import_parallel("credentials", clean_credentials, progress_callback)
 
         logger.info(
             "credentials_import_completed",
@@ -446,10 +454,11 @@ class ProjectImporter(ResourceImporter):
         Returns:
             List of created project data
         """
-        # Extract schedules before import
+        # Extract schedules before import (non-mutating: keep caller dicts
+        # intact so a second pass still sees schedules/_source_id).
         projects_with_schedules = []
         for project in projects:
-            schedules = project.pop("schedules", None)
+            schedules = project.get("schedules", None)
             if schedules:
                 source_id = project.get("_source_id", project.get("id"))
                 projects_with_schedules.append(
@@ -459,8 +468,9 @@ class ProjectImporter(ResourceImporter):
                     }
                 )
 
-        # Import projects
-        results = await self._import_parallel("projects", projects, progress_callback)
+        # Import projects without the nested schedules key.
+        clean_projects = [{k: v for k, v in p.items() if k != "schedules"} for p in projects]
+        results = await self._import_parallel("projects", clean_projects, progress_callback)
 
         # Import schedules for successfully imported projects
         if projects_with_schedules:

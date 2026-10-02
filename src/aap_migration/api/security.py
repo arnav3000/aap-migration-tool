@@ -142,10 +142,12 @@ def decrypt_token(cipher: str) -> str:
 # -- API request authentication -------------------------------------------
 log = logging.getLogger("aap_migration.api.security")
 
-# In-memory per-(IP, key-identity) 401 throttling state:
-# {bucket: [count, window_start]} where bucket is "ip|key-prefix".
-# Per-key buckets stop one scanner from locking out legitimate users
-# sharing the same egress IP, and a success only resets its own bucket.
+# In-memory per-IP 401 throttling state:
+# {bucket: [count, window_start]} where bucket is the client IP.
+# Buckets are keyed by IP alone: keying by presented-key identity lets an
+# attacker rotate X-API-Key per guess and never trip the 20/min 429.
+# Trade-off: one abusive IP throttles legitimate users sharing the same
+# egress IP until the 60s window lapses (a success resets the IP bucket).
 # Deployments behind a shared NAT/ingress should still front this with an
 # external rate limiter for cross-IP abuse.
 _auth_failures: dict[str, list[float]] = {}
@@ -207,18 +209,14 @@ def _client_ip(request: Request | None) -> str:
     return "unknown"
 
 
-def _throttle_bucket(ip: str, presented_key: str | None) -> str:
-    """Bucket for 401 throttling: IP plus presented-key identity.
+def _throttle_bucket(ip: str) -> str:
+    """Bucket for 401 throttling: client IP only.
 
-    The key identity is a truncated SHA-256 prefix (never the key
-    itself), so different keys from the same egress IP do not share a
-    bucket. Missing/empty keys share the "missing" bucket.
+    The presented-key identity is deliberately not part of the bucket:
+    per-key buckets let an attacker rotate X-API-Key per guess and never
+    trip the 20/min 429.
     """
-    if presented_key:
-        key_id = hashlib.sha256(presented_key.encode()).hexdigest()[:12]
-    else:
-        key_id = "missing"
-    return f"{ip}|{key_id}"
+    return ip or "unknown"
 
 
 def _record_auth_failure(bucket: str) -> None:
@@ -269,9 +267,9 @@ def require_api_key(
     launched with an explicit non-loopback bind (e.g. ``uvicorn --host
     0.0.0.0``) that did not flow through that variable.     Uses
     :func:`hmac.compare_digest` (constant time) to avoid timing oracles.
-    Per-(IP, key) 401 throttling: more than 20 failures in 60s yields
-    429. Only a success presenting the same key identity resets its
-    bucket; deployments behind a shared egress/NAT need an external
+    Per-IP 401 throttling: more than 20 failures in 60s yields
+    429. A success resets its IP bucket; deployments behind a shared
+    egress/NAT need an external
     rate limiter for cross-IP abuse.
     """
     expected_tokens = _expected_tokens()
@@ -280,7 +278,7 @@ def require_api_key(
             return None
         raise HTTPException(status_code=401, detail="API token required (set AAP_BRIDGE_API_TOKEN)")
     ip = _client_ip(request)
-    bucket = _throttle_bucket(ip, api_key)
+    bucket = _throttle_bucket(ip)
     if api_key is not None and _matches_any(api_key, expected_tokens):
         _reset_auth_failures(bucket)
         return None

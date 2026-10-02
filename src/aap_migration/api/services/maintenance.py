@@ -11,6 +11,7 @@ from aap_migration.api.context import open_default_state
 from aap_migration.api.jobs import TERMINAL_STATUSES, JobRecord
 from aap_migration.api.services._core import (
     _artifacts,
+    _cancel_requested,
     _relativize,
     call_command,
     chained_ctx,
@@ -103,6 +104,13 @@ def run_cleanup(job: JobRecord) -> dict[str, Any]:
 def run_retry_failed(job: JobRecord) -> dict[str, Any]:
     """Retry failed imports (mirrors ``retry failed``).
 
+    Retries each failed resource type separately, polling for operator
+    cancel between types (mirroring :func:`etl.run_migrate` /
+    :func:`etl.run_granular_import`). A cancel stops further types from
+    starting; a type already running in its ``migrate`` subprocess runs to
+    completion because the subprocess cannot be preempted (its timeout is
+    owned by the CLI retry path, not this worker).
+
     With ``job_id``, retries against the chained job's workdir and isolated
     state DB (where API job failures are recorded); otherwise operates on
     the server-default state DB and the startup-CWD ``xformed/`` directory
@@ -150,15 +158,48 @@ def run_retry_failed(job: JobRecord) -> dict[str, Any]:
         config.state.db_path = url.split("sqlite:///")[-1] if "sqlite:///" in url else url
         write_job_config(config, workdir)
         ctx._config = config
-        call_command(
-            "retry-failed",
-            ctx,
-            resource_type=tuple(params.get("resource_types") or ()),
-            input_dir=input_dir,
-            dry_run=bool(params.get("dry_run", False)),
-            yes=True,
-        )
-    return {"message": "Retry failed complete"}
+        requested = tuple(params.get("resource_types") or ())
+        if requested:
+            rtypes = list(requested)
+        else:
+            get_failed_types = getattr(target_state, "get_failed_resource_types", None)
+            try:
+                rtypes = list(get_failed_types()) if callable(get_failed_types) else []
+            except Exception:
+                rtypes = []
+        dry_run = bool(params.get("dry_run", False))
+        if not rtypes:
+            # Nothing discovered (or DB unreadable): single call preserves
+            # CLI behavior ("No failed resources to retry!").
+            call_command(
+                "retry-failed",
+                ctx,
+                resource_type=(),
+                input_dir=input_dir,
+                dry_run=dry_run,
+                yes=True,
+            )
+            return {"message": "Retry failed complete", "retried": []}
+        retried: list[str] = []
+        for rtype in rtypes:
+            if _cancel_requested(job):
+                break
+            call_command(
+                "retry-failed",
+                ctx,
+                resource_type=(rtype,),
+                input_dir=input_dir,
+                dry_run=dry_run,
+                yes=True,
+            )
+            retried.append(rtype)
+    if _cancel_requested(job):
+        return {
+            "message": "Retry failed cancelled",
+            "retried": retried,
+            "cancelled": True,
+        }
+    return {"message": "Retry failed complete", "retried": retried}
 
 
 def run_state_export(job: JobRecord) -> dict[str, Any]:

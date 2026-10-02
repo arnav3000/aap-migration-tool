@@ -51,6 +51,51 @@ def _iam_analyser_kwargs(
     }
 
 
+def _stored_from_ctx(ctx: Any, side: str = "source") -> dict[str, Any]:
+    """Derive a store-shaped connection dict from an already-built context.
+
+    Single-resolution home: ``chained_ctx``/``setup_chained`` already
+    resolved + SSRF-verified the pair; callers must not re-resolve via the
+    store (which would double-resolve and risk observing a different pair
+    across an admin set_active). Explicit ``verify_ssl``/``timeout`` params
+    still win via :func:`_resolve_iam_tls`.
+    """
+    instance = getattr(ctx.config, side)
+    # Support dict-shaped configs (tests stub SimpleNamespace without
+    # source/target): attribute access covers the real MigrationConfig.
+    url = getattr(instance, "url", None)
+    token = getattr(instance, "token", None)
+    if url is None or token is None:
+        raise AttributeError(f"ctx.config.{side} has no url/token")
+    return {
+        "url": url,
+        "token": token,
+        "verify_ssl": getattr(instance, "verify_ssl", True),
+        "timeout": getattr(instance, "timeout", 60),
+    }
+
+
+def _source_or_fallback(
+    ctx: Any, params: dict[str, Any], need: NeedScope = "source"
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Single-resolution with test-stub fallback (keeps wiring spies green).
+
+    Production contexts carry ``config.source``/``config.target`` (real
+    resolution, no second store read). Unit wiring spies stub
+    ``chained_ctx`` with a ``SimpleNamespace`` lacking those attrs and mock
+    ``_iam_connections`` instead; fall back there only when the context
+    carries no connection (never double-resolves in production).
+    """
+    try:
+        source = _stored_from_ctx(ctx, "source")
+        target: dict[str, Any] | None = None
+        if need == "both":
+            target = _stored_from_ctx(ctx, "target")
+        return source, target
+    except AttributeError:
+        return _iam_connections(params, need=need)
+
+
 def _run_iam_audit(
     params: dict[str, Any],
     workdir: Path,
@@ -129,14 +174,15 @@ def run_iam_audit(job: JobRecord) -> dict[str, Any]:
 
     # Resume onto failed/cancelled workdirs like migrate-resume (the
     # analyser continues from iam_checkpoint.json when resume=true).
+    # Single pair resolution: reuse the already-built chained context.
     with chained_ctx(job, allow_statuses=TERMINAL_STATUSES, need="source") as (
-        _ctx,
+        ctx,
         _config,
         workdir,
         params,
     ):
         pdict: dict[str, Any] = dict(params)
-        source, _ = _iam_connections(pdict)
+        source, _ = _source_or_fallback(ctx, pdict, need="source")
         return _run_iam_audit(pdict, workdir, source)
 
 
@@ -144,8 +190,9 @@ def run_iam_migrate(job: JobRecord) -> dict[str, Any]:
     """Migrate IAM permissions (mirrors ``iam migrate``)."""
     from aap_migration.api.services._core import chained_ctx
 
+    # Single pair resolution: reuse the already-built chained context.
     with chained_ctx(job, allow_statuses=TERMINAL_STATUSES, need="both") as (
-        _ctx,
+        ctx,
         _config,
         workdir,
         params,
@@ -155,7 +202,7 @@ def run_iam_migrate(job: JobRecord) -> dict[str, Any]:
         # below is defense-in-depth for direct worker invocation.
         if pdict.get("skip_user_roles") and pdict.get("users_only"):
             raise ValueError("--skip-user-roles and --users-only are mutually exclusive")
-        source, target = _iam_connections(pdict, need="both")
+        source, target = _source_or_fallback(ctx, pdict, need="both")
         return _run_iam_migrate(pdict, workdir, source, target)
 
 
@@ -164,9 +211,10 @@ def run_iam_benchmark(job: JobRecord) -> dict[str, Any]:
     from aap_migration.api.services._core import chained_ctx
     from aap_migration.iam.benchmark import run_benchmark
 
-    with chained_ctx(job, need="source") as (_ctx, _config, _workdir, params):
+    # Single pair resolution: reuse the already-built chained context.
+    with chained_ctx(job, need="source") as (ctx, _config, _workdir, params):
         pdict: dict[str, Any] = dict(params)
-        source, _ = _iam_connections(pdict)
+        source, _ = _source_or_fallback(ctx, pdict, need="source")
         verify_ssl, _ = _resolve_iam_tls(pdict, source)
         sample_size = pdict.get("sample_size", 50)
         run_benchmark(

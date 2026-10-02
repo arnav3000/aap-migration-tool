@@ -63,7 +63,7 @@ class TestJobs:
     def test_artifacts_truncation_keeps_int_total(
         self, pair: Any, client: TestClient, monkeypatch: Any
     ) -> None:
-        """Truncated artifact walks signal truncated:true with an int total (one shape)."""
+        """Truncated artifact walks signal truncated:true with a true int total."""
         from pathlib import Path
 
         from aap_migration.api.jobs import get_job_manager
@@ -82,7 +82,10 @@ class TestJobs:
         payload = client.get(f"/api/v1/jobs/{job['job_id']}/artifacts?limit=2").json()
         assert payload["truncated"] is True
         assert isinstance(payload["total"], int)
-        assert payload["total"] == 3  # bounded walk count so far (limit+offset+1)
+        # total is the true pre-page count; walked is the bounded count
+        # (limit+offset+1) and truncated signals true total > walked.
+        assert payload["walked"] == 3
+        assert payload["total"] > payload["walked"]
         assert len(payload["artifacts"]) == 2
         assert "config.yaml" not in payload["artifacts"]
         assert not any(a.endswith(".db") for a in payload["artifacts"])

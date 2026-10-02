@@ -278,7 +278,9 @@ class TestConnectionPinning:
         params["allow_pair_switch"] = True
         with pytest.raises(ValueError, match="not rotations"):
             verify_execution_pair(params)
-        # An actual id switch is honored under explicit opt-in.
+        # An actual id switch after a rotation still fails closed: the
+        # fingerprint changed, so the job must be resubmitted even under
+        # explicit opt-in (rotations cannot piggyback on a switched job).
         other = client.post(
             "/api/v1/connections",
             json={
@@ -289,6 +291,17 @@ class TestConnectionPinning:
             },
         ).json()
         params["source_id"] = other["id"]
+        with pytest.raises(ValueError, match="resubmit"):
+            verify_execution_pair(params)
+        # An id switch with an unchanged fingerprint is honored under opt-in.
+        fresh = store.pair_fingerprint(other["id"], tgt["id"])
+        params.update(
+            {
+                "_snapshot_source_id": fresh["source_id"],
+                "_snapshot_target_id": fresh["target_id"],
+                "_snapshot_fp": fresh["fp"],
+            }
+        )
         verify_execution_pair(params)
 
     def test_iam_report_chains_after_pair_change(

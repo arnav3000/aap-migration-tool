@@ -41,6 +41,9 @@ class JobTemplateImporter(ResourceImporter):
         Returns:
             Created/updated resource data, or None if failed
         """
+        # Work on a copy so caller-owned dicts are never mutated (retry
+        # passes reuse the same batch).
+        data = dict(data)
         # Extract credentials before import (they're not valid API fields)
         credentials = data.pop("credentials", [])
         template_name = data.get("name")
@@ -87,19 +90,21 @@ class JobTemplateImporter(ResourceImporter):
         templates_with_notifications = []  # Collect templates that have notification associations
 
         for template in templates:
-            source_id = template.pop("_source_id", template.get("id"))
+            # Non-mutating reads: keep caller dicts intact for retry passes;
+            # build a stripped copy for the API call instead of popping.
+            source_id = template.get("_source_id", template.get("id"))
 
             # Extract credentials for post-creation association
-            credentials = template.pop("credentials", [])
+            credentials = template.get("credentials", [])
 
             # Extract schedules for separate import
-            schedules = template.pop("schedules", None)
+            schedules = template.get("schedules", None)
 
             # Extract survey spec for separate import (must be POSTed after template creation)
-            survey_spec = template.pop("survey_spec", None)
+            survey_spec = template.get("survey_spec", None)
 
             # Extract notification associations for separate import
-            notifications = template.pop("notifications", None)
+            notifications = template.get("notifications", None)
 
             # Clean up EE markers
             if template.get("_needs_execution_environment"):
@@ -110,15 +115,27 @@ class JobTemplateImporter(ResourceImporter):
                     source_name=template.get("name"),
                     virtualenv=template.get("_custom_virtualenv_path"),
                 )
-                template.pop("_needs_execution_environment", None)
-                template.pop("_custom_virtualenv_path", None)
+            template_payload = {
+                k: v
+                for k, v in template.items()
+                if k
+                not in (
+                    "_source_id",
+                    "credentials",
+                    "schedules",
+                    "survey_spec",
+                    "notifications",
+                    "_needs_execution_environment",
+                    "_custom_virtualenv_path",
+                )
+            }
 
             try:
                 # Create the job template
                 result = await self.import_resource(
                     resource_type="job_templates",
                     source_id=source_id,
-                    data=template,
+                    data=template_payload,
                 )
 
                 if result:

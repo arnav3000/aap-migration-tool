@@ -482,10 +482,11 @@ def verify_execution_pair(params: dict[str, Any]) -> None:
     fails the job with an operator-actionable error instead of silently
     running under credentials or targets the submitter never presented.
     Explicit ``allow_pair_switch=true`` opts into intentional *id* switches
-    only: when the resolved ids are unchanged but the fingerprint differs
-    (pure credential/posture rotation under identical ids) the job still
-    fails, so a planned rotation cannot piggyback on an unrelated switched
-    job. Kind mismatches still fail in resolution.
+    with an UNCHANGED fingerprint only: any fingerprint drift (credential
+    rotation, URL edit, TLS/timeout posture change) fails even when the
+    resolved ids also switched, so a rotation can never piggyback on a
+    switched job -- every rotation requires resubmit. Kind mismatches
+    still fail in resolution.
     Params without snapshot keys (pre-snapshot records, connectionless jobs)
     are returned unchecked.
 
@@ -550,15 +551,17 @@ def verify_execution_pair(params: dict[str, Any]) -> None:
     )
     fp_changed = snap_fp is not None and current["fp"] != snap_fp
     if allow_switch:
-        # Opt-in covers intentional id switches only. A pure rotation under
-        # identical ids (fingerprint drift with no id change) still fails:
-        # planned rotations must be resubmitted, not piggybacked.
-        if not ids_changed and fp_changed:
+        # Opt-in covers intentional id switches with an unchanged
+        # fingerprint only. Any fingerprint drift (rotation, URL edit,
+        # posture change) fails closed and requires resubmit, even when
+        # the ids also switched: a rotation must never piggyback on a
+        # switched job.
+        if fp_changed:
             raise ValueError(
                 "Credentials or connection posture changed since this job "
-                "was submitted (same connection ids, new fingerprint); "
-                "resubmit to run under the current pair. "
-                "allow_pair_switch covers id switches, not rotations."
+                "was submitted (new fingerprint); resubmit to run under "
+                "the current pair. allow_pair_switch covers id switches "
+                "with an unchanged fingerprint, not rotations."
             )
         return
     if ids_changed or fp_changed:

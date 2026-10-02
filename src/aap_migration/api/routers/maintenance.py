@@ -11,7 +11,12 @@ from fastapi import APIRouter
 from aap_migration.api import services
 from aap_migration.api.jobs import get_job_manager
 from aap_migration.api.routers._common import submit_chained
-from aap_migration.api.schemas import CleanupRequest, JobCreated, PrepRequest
+from aap_migration.api.schemas import (
+    CleanupRequest,
+    JobCreated,
+    PrepRequest,
+    PrepSchemasOut,
+)
 
 router = APIRouter(tags=["maintenance"])
 
@@ -22,7 +27,7 @@ def start_prep(body: PrepRequest) -> JobCreated:
     return submit_chained("prep", body, services.run_prep)
 
 
-@router.get("/prep/schemas")
+@router.get("/prep/schemas", response_model=PrepSchemasOut)
 def get_prep_schemas() -> dict:
     """Return locally cached prep artifacts when present (startup-CWD bound).
 
@@ -30,10 +35,11 @@ def get_prep_schemas() -> dict:
     when missing/unreadable; per-file failures are surfaced in the
     top-level ``"errors_by_file": {name: message}`` map (never as
     ``{"error": ...}`` sentinels inside the values). ``"errors"`` is
-    kept as a deprecated alias of ``errors_by_file`` for back-compat;
-    new clients should read ``errors_by_file``. Validation results
-    elsewhere use ``errors`` as a list of strings -- the names diverge
-    on purpose and OpenAPI pins each route separately.
+    kept as a deprecated alias of ``errors_by_file`` for back-compat
+    (deprecated=True in OpenAPI; removed in v2); new clients should read
+    ``errors_by_file``. Validation results elsewhere use ``errors`` as a
+    list of strings -- the names diverge on purpose and OpenAPI pins each
+    route separately (see ``PrepSchemasOut``).
     """
     startup_cwd = Path(os.environ.get("AAP_BRIDGE_STARTUP_CWD", os.getcwd())).resolve()
     base = get_job_manager().base_dir
@@ -65,7 +71,8 @@ def get_prep_schemas() -> dict:
                 break
         out[name] = payload
     out["errors_by_file"] = errors
-    out["errors"] = errors  # deprecated alias; new clients read errors_by_file
+    # Deprecated alias (deprecated=True in PrepSchemasOut; removed in v2).
+    out["errors"] = errors
     return out
 
 

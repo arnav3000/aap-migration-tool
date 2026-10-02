@@ -254,7 +254,8 @@ class HostImporter(ResourceImporter):
             existing_hosts_by_name = {h["name"]: h for h in existing_hosts_data.get("results", [])}
 
             for host in batch:
-                source_id = host.pop("_source_id", host.get("id"))
+                # Non-mutating read: keep caller batch intact for retry passes.
+                source_id = host.get("_source_id", host.get("id"))
                 source_name = host.get("name", f"host_{source_id}")
                 source_name_by_id[source_id] = source_name
 

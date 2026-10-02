@@ -7,6 +7,27 @@ the single setup/teardown path for connection-bearing workers; do not add
 new ad-hoc setup/teardown scaffolding. :func:`workdir_ctx` is the companion
 for connectionless workers (no pair, no snapshot pins) needing only the
 workdir + logging lifecycle.
+
+CLI <-> API bridge (see also schemas request models):
+
+- Server-default scope shares the CLI DB: sync readers (state/show,
+  mappings, retry/status, checkpoints, migrations/status) open the same
+  file resolved by ``default_state_db_path`` (``MIGRATION_STATE_DB_PATH``,
+  then ``./migration_state.db``, then ``./database/migration_state.db``
+  under ``AAP_BRIDGE_STARTUP_CWD``). A GET never creates a DB.
+- Job scope is isolated per job dir (``exports/``, ``xformed/``,
+  ``migration_state.db``). To promote a job dir to CWD for CLI use:
+  ``GET /jobs/{id}/artifacts`` to list, ``GET
+  /jobs/{id}/artifacts/{path}`` to download (e.g. ``xformed/``,
+  ``exports/``, reports), then manually copy the downloaded tree into
+  the CLI working directory. There is no server-side "promote to CWD"
+  operation by design (no CWD mutation on a shared server process).
+- Credential-store split: the API stores AAP connections encrypted in
+  the API DB (``AAP_BRIDGE_API_DB``) via ``/connections``; the CLI uses
+  ``config.yaml``/``.env`` tokens. Workers resolve the stored pair at
+  submit (snapshot pins) and execution (re-verify); CLI runs never read
+  the API DB and API workers never read CLI ``config.yaml`` except for
+  repo-level mappings/ignored-endpoints fallbacks.
 """
 
 from __future__ import annotations
@@ -114,6 +135,103 @@ def benchmark_counts(params: dict[str, Any]) -> list[int]:
     if isinstance(value, list) and value:
         return [int(v) for v in value]
     return [1, 10, 20]
+
+
+def parse_organizations(params: dict[str, Any]) -> list[str] | None:
+    """Canonical organization scope for reporting/validate workers (single home).
+
+    Accepts legacy spellings at the boundary and returns the canonical
+    ``organizations: list[str] | None`` where ``None`` means all (no filter).
+
+    Accepted keys:
+
+    - ``organizations``: ``list[str]`` (canonical) or comma-separated ``str``.
+    - ``organization``: single ``str`` (or single-element ``list``).
+    - ``orgs``: comma-separated ``str`` (CLI ``--orgs``) or ``list[str]``.
+
+    Rules (fail closed, never silently widen to all):
+
+    - No known org keys present (all missing/``None``/empty-string) -> ``None``.
+    - Exactly one spelling present with values -> normalized ``list[str]``.
+      Empty ``list`` is preserved as ``[]`` (explicit empty); empty/blank
+      ``str`` normalizes to ``None`` (mirrors ``parse_orgs_arg``).
+    - Multiple spellings present with values -> ``ValueError`` (ambiguous;
+      specify only one spelling) instead of silently picking one.
+    - Unknown ``*org*`` keys (e.g. ``organisations``, ``org``) holding a
+      non-empty value -> ``ValueError`` instead of widening to ``None``
+      (all). ``by_organization``/``analyze_all`` are exempt (flags, not
+      scope values).
+
+    Callers keep their own scope validation (e.g. analyze ``analyze_all``
+    vs orgs exclusivity); this helper only normalizes the spelling.
+    """
+    _KNOWN = ("organizations", "organization", "orgs")
+    _EXEMPT = {"analyze_all", "by_organization"}
+    # Fail closed on typo spellings: an unknown *org* key with a real value
+    # must not silently become None (= all organizations).
+    for key, value in params.items():
+        if "org" not in key.lower():
+            continue
+        if key in _KNOWN or key in _EXEMPT:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, list | tuple) and len(value) == 0:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        raise ValueError(
+            f"Unknown organization field {key!r}; "
+            "use one of 'organizations', 'organization', or 'orgs'."
+        )
+
+    def _norm_list(value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+            return parts if parts else None
+        if isinstance(value, list | tuple):
+            cleaned = [str(v).strip() for v in value if str(v).strip()]
+            if len(value) == 0:
+                return []
+            return cleaned if cleaned else []
+        return None
+
+    def _norm_single(value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else None
+        if isinstance(value, list | tuple):
+            return _norm_list(value)
+        return None
+
+    normed: dict[str, list[str] | None] = {
+        "organizations": _norm_list(params.get("organizations"))
+        if "organizations" in params
+        else None,
+        "organization": _norm_single(params.get("organization"))
+        if "organization" in params
+        else None,
+        "orgs": _norm_list(params.get("orgs")) if "orgs" in params else None,
+    }
+    present = {k: v for k, v in normed.items() if v is not None}
+    # Treat explicit [] as "no values" for ambiguity: default [] plus one
+    # real spelling is not ambiguous (mirrors Analyze default).
+    with_values = {k: v for k, v in present.items() if len(v) > 0}
+    if len(with_values) > 1:
+        raise ValueError(
+            "Ambiguous organization scope: specify only one of "
+            "'organizations', 'organization', or 'orgs'."
+        )
+    if with_values:
+        return next(iter(with_values.values()))
+    for v in present.values():
+        if v == []:
+            return []
+    return None
 
 
 @contextmanager

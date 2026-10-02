@@ -319,6 +319,8 @@ class UserImporter(ResourceImporter):
         )
 
         try:
+            # Work on a copy so caller-owned dicts are never mutated.
+            data = dict(data)
             # Remove password-related fields (cannot be migrated)
             data.pop("password", None)
             data.pop("ldap_dn", None)

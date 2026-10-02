@@ -143,7 +143,7 @@ class JobManager(JobReadMixin):
             is_storage_probe = ("api-db:" in degraded) or ("job-dir:" in degraded)
             if is_storage_probe:
                 try:
-                    if _job_config.clear_startup_degraded_if_recovered():
+                    if self._clear_degraded_bounded():
                         degraded = None
                     else:
                         degraded = startup_degraded_reason()
@@ -155,6 +155,13 @@ class JobManager(JobReadMixin):
             )
         if getattr(self, "_draining", False):
             raise QueueFullError("Server is shutting down; submissions closed")
+        # Cancel fence (P1 #3): chaining (resume/retry/resubmit via
+        # job_id) onto a job that was cancelled mid-phase replays writes the
+        # pool thread already applied. Require explicit force=true (where the
+        # endpoint supports it); otherwise refuse with a 409 naming the
+        # stop-point. Unchained submits and chains onto succeeded/failed or
+        # queued-cancelled jobs are unaffected.
+        self.assert_no_cancel_fence(params.get("job_id"), bool(params.get("force", False)))
         job_id = str(uuid.uuid4())
         if job_dir:
             work_dir = os.path.abspath(job_dir)
@@ -335,6 +342,7 @@ class JobManager(JobReadMixin):
                 indexed = (job["job_id"], job["job_type"], "cancelled")
             else:
                 job["cancel_requested"] = True
+                job["cancel_requested_at"] = _utcnow()  # type: ignore[typeddict-unknown-key]
                 job["updated_at"] = _utcnow()
                 # Best-effort pollable signal so future resume/retry phases
                 # can detect a pending cancel without invasive phase polling.
@@ -349,6 +357,78 @@ class JobManager(JobReadMixin):
         if indexed is not None:
             self._record_terminal_index(*indexed)
         return public
+
+    def assert_no_cancel_fence(self, ref_job_id: str | None, force: bool = False) -> None:
+        """Refuse chained resubmission onto a mid-phase-cancelled job without force.
+
+        Cancel of a running job only sets ``cancel_requested``: the pool
+        thread finishes the current phase and then records
+        cancelled-with-result, so target writes may already be applied.
+        Chaining (resume/retry/resubmit via ``job_id``) onto such a job
+        without an explicit ``force=true`` risks replaying those writes.
+
+        Raises:
+            ConflictError: When the referenced job was cancelled mid-phase
+                (``cancelled_at_phase`` marker present) and *force* is false.
+                Queued cancels (no writes) and succeeded/failed references
+                never trip the fence; unknown ids are left for the caller's
+                404 path.
+        """
+        if not ref_job_id or force:
+            return
+        with self._lock:
+            ref = self._jobs.get(ref_job_id)
+            if ref is None:
+                return
+            if ref.get("status") != "cancelled":
+                return
+            marker = ref.get("cancelled_at_phase")
+            if not marker:
+                return
+            completed = ref.get("completed_phases") or []
+        raise ConflictError(
+            f"Job '{ref_job_id}' was cancelled mid-phase ({marker}; "
+            f"completed before stop: {completed or 'unknown'}); chained "
+            "resume/retry may replay writes already applied. Resubmit with "
+            "force=true to acknowledge, or submit without job_id for a fresh directory."
+        )
+
+    def _clear_degraded_bounded(self, timeout_secs: float | None = None) -> bool:
+        """Re-probe startup storage with a hard timeout (never hang submit).
+
+        ``clear_startup_degraded_if_recovered`` does blocking FS/DB I/O with
+        no timeout of its own; run it on a daemon thread and wait at most
+        *timeout_secs* (default ~5s, ``AAP_BRIDGE_DEGRADED_PROBE_SECS``).
+        On timeout (or error, handled by the caller) return False so the
+        submission keeps the degraded state and fails fast instead of
+        occupying a sync-route thread indefinitely.
+        """
+        if timeout_secs is None:
+            try:
+                timeout_secs = float(_env_float("AAP_BRIDGE_DEGRADED_PROBE_SECS", 5.0))
+            except Exception:
+                timeout_secs = 5.0
+        timeout_secs = max(float(timeout_secs), 0.1)
+        box: dict[str, Any] = {}
+
+        def _probe() -> None:
+            try:
+                box["ok"] = _job_config.clear_startup_degraded_if_recovered()
+            except Exception as exc:  # caller falls back to the cached reason
+                box["error"] = exc
+
+        worker = threading.Thread(target=_probe, name="degraded-probe", daemon=True)
+        worker.start()
+        worker.join(timeout=timeout_secs)
+        if worker.is_alive():
+            log.warning(
+                "startup storage re-probe timed out after %ss; keeping degraded state",
+                timeout_secs,
+            )
+            return False
+        if "error" in box:
+            raise box["error"]
+        return bool(box.get("ok", False))
 
     def ensure_worker(self) -> None:
         """Restart a dead worker thread (supervisor).
@@ -435,6 +515,30 @@ class JobManager(JobReadMixin):
         self._run()
 
     # -- internals ------------------------------------------------------
+    @staticmethod
+    def _cancel_stop_point(job_snapshot: JobRecord, result: Any) -> tuple[str, list[str]]:
+        """Derive the cancel fence marker from a finished attempt.
+
+        Returns ``(cancelled_at_phase, completed_phases)``: the phase is the
+        job type (the stop-point granularity the manager owns), and completed
+        phases come from step-tracking results when the worker reports them
+        (e.g. granular import's ``steps_completed``). Persisted on the
+        cancelled record so :meth:`assert_no_cancel_fence` can refuse
+        non-force chained resubmissions that would replay applied writes.
+        """
+        try:
+            phase = str(job_snapshot.get("job_type") or "unknown")
+        except Exception:
+            phase = "unknown"
+        completed: list[str] = []
+        try:
+            if isinstance(result, dict):
+                steps = result.get("steps_completed") or []
+                completed = [str(s) for s in steps]
+        except Exception:
+            completed = []
+        return phase, completed
+
     @staticmethod
     def _public(job: JobRecord) -> JobRecord:
         # Never expose server-local paths; internal callers use get_internal().
@@ -829,10 +933,13 @@ class JobManager(JobReadMixin):
                             error_id,
                         )
                         if cancelled:
+                            phase, completed = self._cancel_stop_point(job_snapshot, None)
                             self._set(
                                 job_id,
                                 status="cancelled",
                                 error="Cancelled by operator (timed out while cancelling)",
+                                cancelled_at_phase=phase,
+                                completed_phases=completed,
                             )
                         else:
                             self._set(
@@ -874,6 +981,7 @@ class JobManager(JobReadMixin):
                     live_dir = self._live_job_dir(job_id, job_dir)
                     _persist_console(live_dir, output, job_id)
                     if cancelled:
+                        phase, completed = self._cancel_stop_point(job_snapshot, result)
                         self._set(
                             job_id,
                             status="cancelled",
@@ -881,6 +989,8 @@ class JobManager(JobReadMixin):
                             "preemptive, so target writes may already be applied; "
                             "verify before resubmitting to avoid replaying them)",
                             result=_normalize_result(result),
+                            cancelled_at_phase=phase,
+                            completed_phases=completed,
                         )
                     else:
                         self._set(job_id, status="succeeded", result=_normalize_result(result))

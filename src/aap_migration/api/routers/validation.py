@@ -72,18 +72,27 @@ def check_dependencies(body: DependencyCheckRequest) -> dict:
                 body.job_id, strict=False, allow_statuses=("succeeded",)
             )
             assert workdir is not None  # job_id is truthy, so a dir is returned
-            chained = workdir / "xformed"
-            input_dir = str(chained) if chained.is_dir() else None
+            # P2 #17: job-scoped reads must judge the chained tree, never the
+            # ephemeral server-default transform_dir. Absent chained data is
+            # transient (transform has not run yet): 404, not 200 for wrong
+            # data. Removed in v2: none (404 contract is canonical).
             try:
                 ctx = build_ephemeral_context(body.source_id, body.target_id)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if input_dir is None:
-                input_dir = ctx.config.paths.transform_dir
-            if chained_db is not None:
-                state = chained_db
-            else:
-                state = stack.enter_context(open_throwaway_state())
+            chained = workdir / "xformed"
+            if not chained.is_dir():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No transformed data yet for job '{body.job_id}'",
+                )
+            if chained_db is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No transformed data yet for job '{body.job_id}'",
+                )
+            input_dir = str(chained)
+            state = chained_db
         else:
             try:
                 ctx = build_ephemeral_context(body.source_id, body.target_id)

@@ -6,6 +6,7 @@ rate limiting, retry logic, and comprehensive logging.
 
 import asyncio
 import time
+from datetime import UTC
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
@@ -32,6 +33,34 @@ from aap_migration.utils.logging import (
 )
 
 logger = get_logger(__name__)
+
+
+def _parse_retry_after(value: str | None) -> int | None:
+    """Parse a Retry-After header value defensively (never raises).
+
+    Integer delay-seconds are used directly; otherwise an HTTP-date
+    (RFC 7231) is converted to a non-negative delta against now. Any
+    other shape returns None so callers fall back to default backoff.
+    """
+    if not value:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        from datetime import datetime
+        from email.utils import parsedate_to_datetime
+
+        moment = parsedate_to_datetime(value.strip())
+        if moment is None:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        delta = (moment - datetime.now(UTC)).total_seconds()
+        return max(0, int(delta))
+    except Exception:
+        return None
 
 
 class BaseAPIClient:
@@ -237,7 +266,7 @@ class BaseAPIClient:
             )
         elif status_code == 429:
             retry_after = response.headers.get("Retry-After")
-            retry_seconds = int(retry_after) if retry_after else None
+            retry_seconds = _parse_retry_after(retry_after)
             raise RateLimitError(
                 message="Rate limit exceeded",
                 status_code=status_code,
@@ -364,7 +393,10 @@ class BaseAPIClient:
                     # httpx per-request timeout does not cover blocking
                     # getaddrinfo -- an unbounded check would head-of-line
                     # block the single FIFO worker behind one poison host.
-                    reverify_execution_url_bounded(target)
+                    # Offloaded via to_thread like the pre-request check
+                    # above so a slow redirect-target lookup cannot stall
+                    # concurrent API traffic.
+                    await asyncio.to_thread(reverify_execution_url_bounded, target)
                 except ValueError as exc:
                     raise NetworkError(f"Redirect target blocked: {exc}") from exc
                 follow_method = "GET" if response.status_code == 303 else method

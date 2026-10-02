@@ -118,10 +118,11 @@ class SystemJobTemplateImporter(ResourceImporter):
         progress_callback: Callable[[int, int, int], None] | None = None,
     ) -> list[dict[str, Any]]:
         """Import multiple system job templates (mapping only)."""
-        # Extract schedules before import
+        # Extract schedules before import (non-mutating: keep caller dicts
+        # intact so a second pass still sees _source_id/schedules).
         templates_with_schedules = []
         for template in templates:
-            schedules = template.pop("schedules", None)
+            schedules = template.get("schedules", None)
             if schedules:
                 source_id = template.get("_source_id", template.get("id"))
                 templates_with_schedules.append(
@@ -131,8 +132,11 @@ class SystemJobTemplateImporter(ResourceImporter):
                     }
                 )
 
-        # Import (map) system job templates
-        results = await self._import_parallel("system_job_templates", templates, progress_callback)
+        # Import (map) system job templates without the nested schedules key.
+        clean_templates = [{k: v for k, v in t.items() if k != "schedules"} for t in templates]
+        results = await self._import_parallel(
+            "system_job_templates", clean_templates, progress_callback
+        )
 
         # Import schedules for successfully mapped system job templates
         if templates_with_schedules:
@@ -244,7 +248,9 @@ class CredentialInputSourceImporter(ResourceImporter):
         # Removed local success_count, failed_count, skipped_count
 
         for input_source in input_sources:
-            source_id = input_source.pop("_source_id", input_source.get("id"))
+            # Non-mutating read (see base._import_parallel): keep _source_id
+            # on the caller dict so retries re-key correctly.
+            source_id = input_source.get("_source_id", input_source.get("id"))
             # `credential` is the ID of the credential whose input is being sourced.
             source_target_credential_id = input_source.get(
                 "credential"
@@ -431,6 +437,8 @@ class ApplicationImporter(ResourceImporter):
 
         self.state.mark_in_progress(resource_type, source_id, name, "import")
 
+        # Work on a copy so caller-owned dicts are never mutated.
+        data = dict(data)
         # Resolve organization dependency
         if resolve_dependencies:
             data = await self._resolve_dependencies(resource_type, data)

@@ -18,6 +18,7 @@ from aap_migration.api.schemas import (
     StateExportRequest,
     StateImportRequest,
     StateResetRequest,
+    StateShowOut,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -95,7 +96,7 @@ def _get_state(
     return state, None
 
 
-@router.get("/state/show")
+@router.get("/state/show", response_model=StateShowOut)
 def show_state(
     detailed: bool = False,
     job_id: str | None = Query(

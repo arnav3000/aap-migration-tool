@@ -6,7 +6,12 @@ import asyncio
 from typing import Any
 
 from aap_migration.api.jobs import JobRecord
-from aap_migration.api.services._core import _relativize, call_command, chained_ctx
+from aap_migration.api.services._core import (
+    _relativize,
+    call_command,
+    chained_ctx,
+    parse_organizations,
+)
 
 
 # -- validate ---------------------------------------------------------------
@@ -14,14 +19,17 @@ def run_validate(job: JobRecord) -> dict[str, Any]:
     """Post-migration validation (mirrors ``validate``)."""
     from aap_migration.validate.org_report import write_org_scoped_validation_reports
     from aap_migration.validate.report import resolve_validate_report_dir
-    from aap_migration.validate.runner import parse_orgs_arg, run_validation
+    from aap_migration.validate.runner import run_validation
 
     with chained_ctx(job) as (ctx, config, workdir, params):
         # Schema (ValidateRequest) owns the skip_hosts/hosts exclusion; kept
         # here only for direct worker calls that bypass HTTP validation.
         if params.get("skip_hosts") and params.get("resource_type") == "hosts":
             raise ValueError("--skip-hosts conflicts with resource_type=hosts")
-        organizations = parse_orgs_arg(params.get("orgs"))
+        # Single home for org spellings (orgs/organizations/organization);
+        # None = all. parse_orgs_arg remains the comma-split primitive used
+        # inside parse_organizations for str values.
+        organizations = parse_organizations(dict(params))
 
         async def _main() -> Any:
             target_client = ctx.target_client if params.get("live") else None
@@ -77,7 +85,10 @@ def run_analyze_dependencies(job: JobRecord) -> dict[str, Any]:
     )
 
     with chained_ctx(job, need="source") as (ctx, _, workdir, params):
-        organizations = list(params.get("organizations") or ())
+        # Single home for org spellings; None = all (analyze_all branch).
+        # Explicit [] preserved (worker below raises the scope error).
+        _scoped = parse_organizations(dict(params))
+        organizations = list(_scoped) if _scoped is not None else []
         analyze_all = bool(params.get("analyze_all", False))
         # Scope rules live in AnalyzeDependenciesRequest; worker re-checks for
         # direct invocation only.
@@ -164,13 +175,23 @@ def run_enhanced_report(job: JobRecord) -> dict[str, Any]:
         fmt = str(params.get("output_format", "html"))
         ext = {"html": "html", "markdown": "md", "csv": "csv"}[fmt]
         output = str(workdir / "reports" / f"org-failures-enhanced.{ext}")
+        # Single home for org spellings; enhanced CLI takes a single org.
+        scoped = parse_organizations(dict(params))
+        if scoped is None or len(scoped) == 0:
+            organization: str | None = None
+        elif len(scoped) == 1:
+            organization = scoped[0]
+        else:
+            raise ValueError(
+                "Enhanced report supports a single organization; " f"got {len(scoped)}"
+            )
         call_command(
             "enhanced-report",
             ctx,
             output=output,
             resource_type=params.get("resource_type"),
             output_format=fmt,
-            organization=params.get("organization"),
+            organization=organization,
         )
     return {"message": "Enhanced report complete", "report": _relativize(output, workdir)}
 
