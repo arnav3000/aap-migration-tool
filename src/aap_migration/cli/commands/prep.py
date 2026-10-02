@@ -19,6 +19,7 @@ from aap_migration.cli.decorators import (
     requires_config,
 )
 from aap_migration.cli.utils import (
+    console,
     echo_success,
     step_progress,
 )

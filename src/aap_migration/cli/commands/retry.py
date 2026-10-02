@@ -3,6 +3,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 from rich.console import Console
@@ -21,8 +22,23 @@ from aap_migration.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _retry_child_timeout_secs() -> float:
+    """Timeout for each per-type ``migrate`` child process.
+
+    Uses the job timeout config so a hung child cannot wedge the single FIFO
+    worker forever; falls back to 3600s when the API config is unavailable
+    (e.g. CLI-only installs).
+    """
+    try:
+        from aap_migration.api.jobs._config import JOB_TIMEOUT_SECS
+
+        return max(float(JOB_TIMEOUT_SECS), 1.0)
+    except Exception:
+        return 3600.0
+
+
 @click.group(name="retry", hidden=True)
-def retry_group():
+def retry_group() -> None:
     """Retry failed imports and resume interrupted migrations."""
     pass
 
@@ -95,8 +111,8 @@ def retry_failed(
             MigrationProgress.resource_type,
             MigrationProgress.source_id,
             MigrationProgress.source_name,
-            MigrationProgress.error_message
-        ).filter(MigrationProgress.status == 'failed')
+            MigrationProgress.error_message,
+        ).filter(MigrationProgress.status == "failed")
 
         if resource_type:
             query = query.filter(MigrationProgress.resource_type.in_(resource_type))
@@ -110,16 +126,18 @@ def retry_failed(
         return
 
     # Group by resource type
-    grouped = {}
+    grouped: dict[Any, list[dict[str, Any]]] = {}
     for row in failed_resources:
         rtype = row[0]
         if rtype not in grouped:
             grouped[rtype] = []
-        grouped[rtype].append({
-            "source_id": row[1],
-            "name": row[2],
-            "error": row[3],
-        })
+        grouped[rtype].append(
+            {
+                "source_id": row[1],
+                "name": row[2],
+                "error": row[3],
+            }
+        )
 
     # Display summary
     console.print("\n[bold yellow]Failed Resources to Retry:[/bold yellow]\n")
@@ -169,7 +187,10 @@ def retry_failed(
                     .first()
                 )
                 if progress:
-                    progress.status = None
+                    # Reset status from 'failed' to 'pending' to allow
+                    # re-import (status column is NOT NULL; None would
+                    # raise IntegrityError on commit).
+                    progress.status = "pending"
             session.commit()
 
     echo_success(f"Cleared {len(failed_resources)} failed resource statuses")
@@ -185,19 +206,27 @@ def retry_failed(
     if ctx.config_path:
         config_arg = ["--config", str(ctx.config_path)]
 
-    # Import each resource type that had failures using proven migrate command
+    # Import each resource type that had failures using proven migrate command.
+    # Each child runs with an explicit timeout (job timeout config): on expiry
+    # the child is killed (subprocess.run kills on timeout) and the type is
+    # recorded as a timeout error instead of wedging the single FIFO worker.
+    # Note: grandchildren detached by the child may outlive the kill; each
+    # resource kind is independent, so the loop continues with the next one.
+    child_timeout = _retry_child_timeout_secs()
+    failed_types: list[str] = []
     for rtype in grouped.keys():
-        echo_info(f"Retrying {rtype}...")
+        echo_info(f"Retrying {rtype}... (timeout {child_timeout:g}s)")
 
         # Build command using the proven migrate command
-        cmd = [
-            sys.executable, "-m", "aap_migration.cli.main",
-        ] + config_arg + [
-            "migrate",
-            "-r", rtype,
-            "--skip-prep",
-            "--phase", "all"
-        ]
+        cmd = (
+            [
+                sys.executable,
+                "-m",
+                "aap_migration.cli.main",
+            ]
+            + config_arg
+            + ["migrate", "-r", rtype, "--skip-prep", "--phase", "all"]
+        )
 
         try:
             # Run the proven migrate command
@@ -205,21 +234,65 @@ def retry_failed(
                 cmd,
                 check=False,
                 capture_output=False,  # Show output in real-time
-                text=True
+                text=True,
+                timeout=child_timeout,
             )
 
             if result.returncode == 0:
                 echo_success(f"  ✓ {rtype} retry completed")
             else:
                 echo_warning(f"  ⚠ {rtype} retry finished with errors")
+                failed_types.append(rtype)
+                _mark_type_failed(state, rtype)
 
+        except subprocess.TimeoutExpired:
+            echo_error(
+                f"Retry of {rtype} timed out after {child_timeout:g}s; "
+                "child process killed, continuing with next type"
+            )
+            failed_types.append(rtype)
+            _mark_type_failed(state, rtype, note="timeout")
+            continue
         except Exception as e:
             echo_error(f"Failed to retry {rtype}: {e}")
+            failed_types.append(rtype)
+            _mark_type_failed(state, rtype, note=str(e))
             continue
 
     click.echo()
+    if failed_types:
+        from click import ClickException
+
+        raise ClickException(
+            f"Retry failed for: {', '.join(failed_types)}. "
+            "Their rows were re-marked 'failed'; fix the cause and retry again."
+        )
     echo_success("Retry complete!")
     echo_info("Run 'aap-bridge retry status' to see updated progress")
+
+
+def _mark_type_failed(state: Any, rtype: str, note: str | None = None) -> None:
+    """Re-mark still-pending rows of *rtype* as failed (best-effort).
+
+    Rows were flipped to pending before the child ran; a timeout, spawn
+    error, or nonzero exit leaves them pending behind a success message.
+    Flip them back so the next status/retry sees the truth.
+    """
+    try:
+        from aap_migration.migration.database import get_session
+        from aap_migration.migration.models import MigrationProgress
+
+        with get_session(state.database_url) as session:
+            rows = (
+                session.query(MigrationProgress)
+                .filter_by(resource_type=rtype, status="pending")
+                .all()
+            )
+            for row in rows:
+                row.status = "failed"
+            session.commit()
+    except Exception:
+        pass
 
 
 @retry_group.command(name="status")
@@ -246,6 +319,7 @@ def retry_status(ctx: MigrationContext, resource_type: tuple) -> None:
         aap-bridge retry status -r credentials -r projects
     """
     from sqlalchemy import func
+
     from aap_migration.migration.database import get_session
     from aap_migration.migration.models import MigrationProgress
 
@@ -257,18 +331,14 @@ def retry_status(ctx: MigrationContext, resource_type: tuple) -> None:
         query = session.query(
             MigrationProgress.resource_type,
             MigrationProgress.status,
-            func.count(MigrationProgress.id).label('count')
+            func.count(MigrationProgress.id).label("count"),
         )
 
         if resource_type:
             query = query.filter(MigrationProgress.resource_type.in_(resource_type))
 
-        query = query.group_by(
-            MigrationProgress.resource_type,
-            MigrationProgress.status
-        ).order_by(
-            MigrationProgress.resource_type,
-            MigrationProgress.status
+        query = query.group_by(MigrationProgress.resource_type, MigrationProgress.status).order_by(
+            MigrationProgress.resource_type, MigrationProgress.status
         )
 
         rows = query.all()

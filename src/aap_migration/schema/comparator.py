@@ -1,6 +1,6 @@
 """Schema comparison logic for AAP 2.3 vs AAP 2.6 APIs."""
 
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.aap_target_client import AAPTargetClient
@@ -67,7 +67,7 @@ class SchemaComparator:
             )
             return {}
 
-        return schema
+        return cast(dict[str, Any], schema)
 
     def _extract_field_schema_26(self, options_response: dict[str, Any]) -> dict[str, Any]:
         """Extract field definitions from AAP 2.6 OPTIONS response.
@@ -88,7 +88,7 @@ class SchemaComparator:
                 "found_actions_in_26_schema",
                 message="AAP 2.6 has actions key (unexpected), using POST extraction",
             )
-            return options_response.get("actions", {}).get("POST", {})
+            return cast(dict[str, Any], options_response.get("actions", {}).get("POST", {}))
 
         # New flat format - entire response is field definitions
         # Each key should be a field name with dict value containing type, required, etc.
@@ -362,9 +362,9 @@ class SchemaComparator:
                     SchemaChange(
                         resource_type=resource_type,
                         change_type=ChangeType.VALIDATION_CHANGED,
-                        severity=rule_info["severity"],
-                        description=rule_info["description"],
-                        recommendation=rule_info["recommendation"],
+                        severity=cast(Severity, rule_info["severity"]),
+                        description=cast(str, rule_info["description"]),
+                        recommendation=cast(str, rule_info["recommendation"]),
                     )
                 )
 

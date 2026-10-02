@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.utils.logging import get_logger
 
@@ -125,7 +125,7 @@ async def preflight_gateway_access(
         role_definition_id=role_def_id,
         role_name=PLATFORM_AUDITOR_ROLE_NAME,
     )
-    return role_def_id
+    return cast(int, role_def_id)
 
 
 async def _create_gateway_assignment(
@@ -146,7 +146,7 @@ async def _create_gateway_assignment(
         headers={"Authorization": f"Bearer {client.token}"},
     )
     response.raise_for_status()
-    return response.json()
+    return cast(dict[str, Any], response.json())
 
 
 async def _verify_controller_sync(
@@ -202,9 +202,7 @@ async def assign_auditor_roles(
         )
 
         try:
-            gw_response = await _create_gateway_assignment(
-                client, target_id, role_definition_id
-            )
+            gw_response = await _create_gateway_assignment(client, target_id, role_definition_id)
             result.gateway_assignment_id = gw_response.get("id")
             summary.assigned_count += 1
 

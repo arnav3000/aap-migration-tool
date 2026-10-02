@@ -9,6 +9,7 @@ resumed after interruption.
 import hashlib
 import json
 from datetime import UTC, datetime
+from typing import cast
 
 from sqlalchemy import desc
 
@@ -144,7 +145,7 @@ class CheckpointManager:
                     progress_stats=progress_stats,
                 )
 
-                return checkpoint_id
+                return cast(int, checkpoint_id)
 
         except Exception as e:
             logger.error("Failed to create checkpoint", phase=phase, error=str(e))
@@ -228,12 +229,17 @@ class CheckpointManager:
         migration_id: str | None = None,
         phase: str | None = None,
         limit: int = 10,
+        offset: int = 0,
     ) -> list[dict]:
         """
         List available checkpoints.
 
         Args:
-            migration_id: Filter by migration ID (uses current if None)
+            migration_id: Filter by migration ID (uses current if None;
+                the explicit value ``"all"`` disables the filter and lists
+                every migration's checkpoints, which is what stateless API
+                readers need -- each API request opens a fresh state with a
+                new ID, so the current-ID default would always be empty).
             phase: Filter by phase
             limit: Maximum number of checkpoints to return
 
@@ -245,13 +251,16 @@ class CheckpointManager:
                 migration_id = self.state.migration_id
 
             with get_session(self.database_url) as session:
-                query = session.query(Checkpoint).filter_by(migration_id=migration_id)
+                query = session.query(Checkpoint)
+                if migration_id != "all":
+                    query = query.filter_by(migration_id=migration_id)
 
                 if phase:
                     query = query.filter_by(phase=phase)
 
                 checkpoints = (
                     query.order_by(desc(Checkpoint.created_at), desc(Checkpoint.id))
+                    .offset(max(offset, 0))
                     .limit(limit)
                     .all()
                 )
@@ -281,6 +290,32 @@ class CheckpointManager:
         except Exception as e:
             logger.error("Failed to list checkpoints", error=str(e))
             raise CheckpointError(f"Failed to list checkpoints: {e}") from e
+
+    def count_checkpoints(
+        self,
+        migration_id: str | None = None,
+        phase: str | None = None,
+    ) -> int:
+        """Return the true pre-page checkpoint count for an optional phase.
+
+        ``migration_id="all"`` counts every migration's checkpoints (see
+        :meth:`list_checkpoints`); None counts the current state's own.
+        """
+        from sqlalchemy import func
+
+        try:
+            if migration_id is None:
+                migration_id = self.state.migration_id
+            with get_session(self.database_url) as session:
+                query = session.query(func.count(Checkpoint.id))
+                if migration_id != "all":
+                    query = query.filter_by(migration_id=migration_id)
+                if phase:
+                    query = query.filter_by(phase=phase)
+                return int(query.scalar() or 0)
+        except Exception as e:
+            logger.error("Failed to count checkpoints", error=str(e))
+            raise CheckpointError(f"Failed to count checkpoints: {e}") from e
 
     def get_latest_checkpoint(
         self,

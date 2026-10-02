@@ -8,7 +8,6 @@ from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
 
-from aap_migration.cli.utils import echo_error, echo_info, echo_success, echo_warning
 from aap_migration.migration.state import MigrationState
 from aap_migration.utils.logging import get_logger
 
@@ -82,13 +81,19 @@ class DependencyValidator:
         return all_resources
 
     def validate_resource_dependencies(
-        self, resource: dict[str, Any], resource_type: str
+        self,
+        resource: dict[str, Any],
+        resource_type: str,
+        _mappings: dict[str, dict[int, int]] | None = None,
     ) -> dict[str, Any]:
         """Validate dependencies for a single resource.
 
         Args:
             resource: Resource data
             resource_type: Type of resource
+            _mappings: Optional preloaded ``{dep_type: {source_id: target_id}}``
+                maps (see :meth:`validate_all`). When present, dict lookups
+                replace one ``get_mapped_id`` SELECT per resource per field.
 
         Returns:
             Validation result with status and issues
@@ -109,25 +114,41 @@ class DependencyValidator:
             if not dep_id:
                 continue
 
-            # Check if dependency is already imported
-            mapping = self.state.get_mapped_id(dep_type, dep_id)
+            # Check if dependency is already imported (preloaded dict when
+            # available: one bulk load per dep type instead of one SELECT
+            # per resource per field).
+            if _mappings is not None and dep_type in _mappings:
+                try:
+                    mapping = _mappings[dep_type].get(int(dep_id))
+                except (TypeError, ValueError):
+                    mapping = _mappings[dep_type].get(dep_id)
+            else:
+                mapping = self.state.get_mapped_id(dep_type, dep_id)
 
             if not mapping:
                 # Dependency not yet imported
-                result["missing_deps"].append({
-                    "field": field,
-                    "type": dep_type,
-                    "source_id": dep_id,
-                })
+                result["missing_deps"].append(
+                    {
+                        "field": field,
+                        "type": dep_type,
+                        "source_id": dep_id,
+                    }
+                )
                 result["status"] = "blocked"
 
         return result
 
-    def validate_batch(self, resource_type: str) -> dict[str, Any]:
+    def validate_batch(
+        self,
+        resource_type: str,
+        _mappings: dict[str, dict[int, int]] | None = None,
+    ) -> dict[str, Any]:
         """Validate all resources of a given type.
 
         Args:
             resource_type: Type of resources to validate
+            _mappings: Optional preloaded mapping dicts (see
+                :meth:`validate_resource_dependencies`)
 
         Returns:
             Validation summary with counts and issues
@@ -150,7 +171,7 @@ class DependencyValidator:
         issues = []
 
         for resource in resources:
-            validation = self.validate_resource_dependencies(resource, resource_type)
+            validation = self.validate_resource_dependencies(resource, resource_type, _mappings)
 
             if validation["status"] == "ready":
                 ready_count += 1
@@ -182,13 +203,25 @@ class DependencyValidator:
         if not resource_types:
             resource_types = list(self.dependencies.keys())
 
+        # Preload one mapping dict per dependency type (one bulk SELECT
+        # each) instead of one get_mapped_id SELECT per resource per field.
+        dep_types: set[str] = set()
+        for rtype in resource_types:
+            dep_types.update(self.dependencies.get(rtype, {}).values())
+        preloaded: dict[str, dict[int, int]] = {}
+        for dep_type in sorted(dep_types):
+            try:
+                preloaded[dep_type] = self.state.get_all_mappings_dict(dep_type)
+            except Exception:
+                continue
+
         results = []
         overall_ready = 0
         overall_blocked = 0
         overall_warnings = 0
 
         for rtype in resource_types:
-            batch_result = self.validate_batch(rtype)
+            batch_result = self.validate_batch(rtype, preloaded)
             results.append(batch_result)
             overall_ready += batch_result["ready"]
             overall_blocked += batch_result["blocked"]
@@ -257,9 +290,13 @@ class DependencyValidator:
 
         # Decision
         if overall["can_proceed"]:
-            self.console.print("[bold green]✓ All dependencies satisfied - safe to proceed![/bold green]")
+            self.console.print(
+                "[bold green]✓ All dependencies satisfied - safe to proceed![/bold green]"
+            )
         else:
-            self.console.print("[bold red]✗ Cannot proceed - fix dependency issues first[/bold red]")
+            self.console.print(
+                "[bold red]✗ Cannot proceed - fix dependency issues first[/bold red]"
+            )
 
         self.console.print()
 
