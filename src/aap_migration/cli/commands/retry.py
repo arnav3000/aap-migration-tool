@@ -3,6 +3,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import click
 from rich.console import Console
@@ -22,7 +23,7 @@ logger = get_logger(__name__)
 
 
 @click.group(name="retry", hidden=True)
-def retry_group():
+def retry_group() -> None:
     """Retry failed imports and resume interrupted migrations."""
     pass
 
@@ -95,8 +96,8 @@ def retry_failed(
             MigrationProgress.resource_type,
             MigrationProgress.source_id,
             MigrationProgress.source_name,
-            MigrationProgress.error_message
-        ).filter(MigrationProgress.status == 'failed')
+            MigrationProgress.error_message,
+        ).filter(MigrationProgress.status == "failed")
 
         if resource_type:
             query = query.filter(MigrationProgress.resource_type.in_(resource_type))
@@ -110,16 +111,18 @@ def retry_failed(
         return
 
     # Group by resource type
-    grouped = {}
+    grouped: dict[Any, list[dict[str, Any]]] = {}
     for row in failed_resources:
         rtype = row[0]
         if rtype not in grouped:
             grouped[rtype] = []
-        grouped[rtype].append({
-            "source_id": row[1],
-            "name": row[2],
-            "error": row[3],
-        })
+        grouped[rtype].append(
+            {
+                "source_id": row[1],
+                "name": row[2],
+                "error": row[3],
+            }
+        )
 
     # Display summary
     console.print("\n[bold yellow]Failed Resources to Retry:[/bold yellow]\n")
@@ -169,7 +172,7 @@ def retry_failed(
                     .first()
                 )
                 if progress:
-                    progress.status = None
+                    progress.status = cast(Any, None)
             session.commit()
 
     echo_success(f"Cleared {len(failed_resources)} failed resource statuses")
@@ -190,14 +193,15 @@ def retry_failed(
         echo_info(f"Retrying {rtype}...")
 
         # Build command using the proven migrate command
-        cmd = [
-            sys.executable, "-m", "aap_migration.cli.main",
-        ] + config_arg + [
-            "migrate",
-            "-r", rtype,
-            "--skip-prep",
-            "--phase", "all"
-        ]
+        cmd = (
+            [
+                sys.executable,
+                "-m",
+                "aap_migration.cli.main",
+            ]
+            + config_arg
+            + ["migrate", "-r", rtype, "--skip-prep", "--phase", "all"]
+        )
 
         try:
             # Run the proven migrate command
@@ -205,7 +209,7 @@ def retry_failed(
                 cmd,
                 check=False,
                 capture_output=False,  # Show output in real-time
-                text=True
+                text=True,
             )
 
             if result.returncode == 0:
@@ -246,6 +250,7 @@ def retry_status(ctx: MigrationContext, resource_type: tuple) -> None:
         aap-bridge retry status -r credentials -r projects
     """
     from sqlalchemy import func
+
     from aap_migration.migration.database import get_session
     from aap_migration.migration.models import MigrationProgress
 
@@ -257,18 +262,14 @@ def retry_status(ctx: MigrationContext, resource_type: tuple) -> None:
         query = session.query(
             MigrationProgress.resource_type,
             MigrationProgress.status,
-            func.count(MigrationProgress.id).label('count')
+            func.count(MigrationProgress.id).label("count"),
         )
 
         if resource_type:
             query = query.filter(MigrationProgress.resource_type.in_(resource_type))
 
-        query = query.group_by(
-            MigrationProgress.resource_type,
-            MigrationProgress.status
-        ).order_by(
-            MigrationProgress.resource_type,
-            MigrationProgress.status
+        query = query.group_by(MigrationProgress.resource_type, MigrationProgress.status).order_by(
+            MigrationProgress.resource_type, MigrationProgress.status
         )
 
         rows = query.all()

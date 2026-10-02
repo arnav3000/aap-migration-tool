@@ -27,9 +27,10 @@ import csv as csv_module
 import json
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -117,7 +118,9 @@ def normalize_error_key(error_message: str) -> str:
             return "API: Variables not allowed on launch"
         if "maximum number of" in cleaned.lower():
             return "API: Host subscription limit reached"
-        if "inventory" in cleaned.lower() and ("null" in cleaned.lower() or "required" in cleaned.lower()):
+        if "inventory" in cleaned.lower() and (
+            "null" in cleaned.lower() or "required" in cleaned.lower()
+        ):
             return "API: Inventory required"
 
         short = cleaned[:80].split(".")[0].split("'")[0].strip()
@@ -139,8 +142,13 @@ def normalize_error_key(error_message: str) -> str:
 # Export metadata enrichment
 # ---------------------------------------------------------------------------
 _EXPORT_META_FIELDS = {
-    "created", "modified", "last_job_run", "last_job_failed",
-    "next_job_run", "last_update_failed", "last_updated",
+    "created",
+    "modified",
+    "last_job_run",
+    "last_job_failed",
+    "next_job_run",
+    "last_update_failed",
+    "last_updated",
 }
 
 
@@ -198,27 +206,23 @@ _HUMAN_READABLE_ERRORS: dict[str, str] = {
         " template does not allow variables on launch."
     ),
     "API: Cannot set source_path if not SCM type": (
-        "Inventory source has source_path set but the source type is not"
-        " SCM-based."
+        "Inventory source has source_path set but the source type is not" " SCM-based."
     ),
     "API: Cannot create source for Smart/Constructed Inventory": (
-        "Cannot create an inventory source for a Smart or Constructed"
-        " inventory."
+        "Cannot create an inventory source for a Smart or Constructed" " inventory."
     ),
     "API: Invalid hostname in policy_instance_list": (
         "The policy_instance_list contains a hostname that does not exist"
         " in the target AAP cluster."
     ),
     "API: Cannot enable provisioning callback without inventory": (
-        "Job template has provisioning callback enabled but no inventory"
-        " assigned."
+        "Job template has provisioning callback enabled but no inventory" " assigned."
     ),
     "API: ssh_key_unlock set when key not encrypted": (
         "Credential has ssh_key_unlock set but the SSH key is not encrypted."
     ),
     "API: Host subscription limit reached": (
-        "The target AAP organization has reached its maximum host"
-        " subscription limit."
+        "The target AAP organization has reached its maximum host" " subscription limit."
     ),
     "API: Credential required for cloud source": (
         "Inventory source requires a cloud credential but none was assigned."
@@ -259,9 +263,9 @@ def _build_export_lookup(export_dir: Path) -> dict:
 
         for json_file in json_files:
             try:
-                with open(json_file, "r") as f:
+                with open(json_file) as f:
                     items = json.load(f)
-            except (json.JSONDecodeError, IOError):
+            except (OSError, json.JSONDecodeError):
                 continue
 
             if not isinstance(items, list):
@@ -325,7 +329,8 @@ def _build_export_lookup(export_dir: Path) -> dict:
                 if resource_type == "workflow_job_templates":
                     nodes = item.get("nodes", [])
                     null_nodes = [
-                        n for n in nodes
+                        n
+                        for n in nodes
                         if isinstance(n, dict) and n.get("unified_job_template") is None
                     ]
                     meta["wf_total_nodes"] = len(nodes)
@@ -353,8 +358,10 @@ def _build_export_lookup(export_dir: Path) -> dict:
 
                 if resource_type == "inventories":
                     for inv_field in (
-                        "total_hosts", "has_active_failures",
-                        "pending_deletion", "total_inventory_sources",
+                        "total_hosts",
+                        "has_active_failures",
+                        "pending_deletion",
+                        "total_inventory_sources",
                         "inventory_sources_with_failures",
                     ):
                         inv_val = item.get(inv_field)
@@ -366,7 +373,9 @@ def _build_export_lookup(export_dir: Path) -> dict:
     return lookup
 
 
-def _build_user_email_lookup(export_dir: Path, org_mapper: OrganizationMapper, source_config=None) -> dict[str, list[str]]:
+def _build_user_email_lookup(
+    export_dir: Path, org_mapper: OrganizationMapper, source_config: Any = None
+) -> dict[str, list[str]]:
     """Build org_name -> [emails] mapping from export user data, excluding auditors and superusers.
 
     Strategy:
@@ -388,9 +397,9 @@ def _build_user_email_lookup(export_dir: Path, org_mapper: OrganizationMapper, s
     user_data: dict[int, dict] = {}
     for json_file in sorted(users_dir.glob("*.json")):
         try:
-            with open(json_file, "r") as f:
+            with open(json_file) as f:
                 items = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             continue
         if not isinstance(items, list):
             continue
@@ -436,7 +445,7 @@ def _build_user_email_lookup(export_dir: Path, org_mapper: OrganizationMapper, s
     return dict(org_emails)
 
 
-def _fetch_org_user_memberships(export_dir: Path, source_config) -> dict[int, list[str]]:
+def _fetch_org_user_memberships(export_dir: Path, source_config: Any) -> dict[int, list[str]]:
     """Fetch user→org membership from source API for all exported organizations.
 
     Calls GET /api/v2/organizations/{id}/users/?page_size=200 for each org,
@@ -447,6 +456,7 @@ def _fetch_org_user_memberships(export_dir: Path, source_config) -> dict[int, li
         organizations will have all org names in the list.
     """
     import urllib3
+
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     import httpx
 
@@ -458,9 +468,9 @@ def _fetch_org_user_memberships(export_dir: Path, source_config) -> dict[int, li
     org_list: list[tuple[int, str]] = []
     for json_file in sorted(orgs_dir.glob("*.json")):
         try:
-            with open(json_file, "r") as f:
+            with open(json_file) as f:
                 items = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             continue
         if not isinstance(items, list):
             continue
@@ -495,9 +505,7 @@ def _fetch_org_user_memberships(export_dir: Path, source_config) -> dict[int, li
         ) as client:
             for org_id, org_name in org_list:
                 try:
-                    _fetch_org_members(
-                        client, base_url, org_id, org_name, user_orgs_map
-                    )
+                    _fetch_org_members(client, base_url, org_id, org_name, user_orgs_map)
                 except Exception as e:
                     logger.warning(
                         "org_users_fetch_failed",
@@ -524,7 +532,7 @@ def _fetch_org_user_memberships(export_dir: Path, source_config) -> dict[int, li
 
 
 def _fetch_org_members(
-    client, base_url: str, org_id: int, org_name: str, user_orgs_map: dict[int, list[str]]
+    client: Any, base_url: str, org_id: int, org_name: str, user_orgs_map: dict[int, list[str]]
 ) -> None:
     """Fetch all user IDs for a single organization with pagination.
 
@@ -616,11 +624,11 @@ def _determine_resource_status(resource: dict) -> str:
     error_msg = (resource.get("error_message") or "").lower()
     sync_status = (resource.get("sync_status") or "").lower()
 
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     one_year_ago = now - timedelta(days=365)
     six_months_ago = now - timedelta(days=180)
 
-    def _parse_dt(dt_str: str):
+    def _parse_dt(dt_str: str) -> datetime | None:
         """Parse an ISO timestamp, return None on failure."""
         if not dt_str:
             return None
@@ -681,7 +689,7 @@ def _determine_resource_status(resource: dict) -> str:
                 return "Probably Stale"
 
         inv_name = resource.get("inventory_name", "")
-        if (not inv_name or inv_name == "N/A"):
+        if not inv_name or inv_name == "N/A":
             if not resource.get("ask_inventory_on_launch", False):
                 return "Probably Stale"
 
@@ -761,15 +769,17 @@ def _build_full_org_summary(
     """Build organization summary handling completed/failed/skipped/pending correctly."""
     from collections import defaultdict
 
-    org_summary: dict = defaultdict(lambda: {
-        "completed": 0,
-        "failed": 0,
-        "skipped": 0,
-        "pending": 0,
-        "total": 0,
-        "resource_types": set(),
-        "resources": [],
-    })
+    org_summary: dict = defaultdict(
+        lambda: {
+            "completed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "pending": 0,
+            "total": 0,
+            "resource_types": set(),
+            "resources": [],
+        }
+    )
 
     for resource in resources:
         resource_type = resource.get("resource_type")
@@ -910,21 +920,21 @@ def generate_enhanced_report(
         all_resources = []
 
         with get_session(migration_state.database_url) as session:
-            query = session.query(MigrationProgress).filter(
-                MigrationProgress.phase == "import"
-            )
+            query = session.query(MigrationProgress).filter(MigrationProgress.phase == "import")
             if resource_type:
                 query = query.filter(MigrationProgress.resource_type == resource_type)
 
             for record in query.all():
-                all_resources.append({
-                    "resource_type": record.resource_type,
-                    "source_id": record.source_id,
-                    "source_name": record.source_name,
-                    "status": record.status,
-                    "error_message": record.error_message,
-                    "phase": record.phase,
-                })
+                all_resources.append(
+                    {
+                        "resource_type": record.resource_type,
+                        "source_id": record.source_id,
+                        "source_name": record.source_name,
+                        "status": record.status,
+                        "error_message": record.error_message,
+                        "phase": record.phase,
+                    }
+                )
 
         echo_info(f"Found {len(all_resources)} total resources")
 
@@ -937,8 +947,7 @@ def generate_enhanced_report(
         if organization:
             org_lower = organization.lower()
             matched = {
-                name: data for name, data in org_summary.items()
-                if name.lower() == org_lower
+                name: data for name, data in org_summary.items() if name.lower() == org_lower
             }
             if not matched:
                 available = sorted(org_summary.keys())
@@ -992,15 +1001,26 @@ def generate_enhanced_report(
                 resource["last_updated"] = meta.get("last_updated", "")
 
                 for extra_key in (
-                    "playbook", "project_name", "inventory_name",
-                    "credential_names", "organization_name",
-                    "scm_type", "scm_url", "scm_branch",
-                    "wf_total_nodes", "wf_null_node_count", "wf_null_node_ids",
+                    "playbook",
+                    "project_name",
+                    "inventory_name",
+                    "credential_names",
+                    "organization_name",
+                    "scm_type",
+                    "scm_url",
+                    "scm_branch",
+                    "wf_total_nodes",
+                    "wf_null_node_count",
+                    "wf_null_node_ids",
                     "ask_inventory_on_launch",
-                    "source", "source_project",
-                    "schedule_enabled", "next_run",
-                    "total_hosts", "has_active_failures",
-                    "pending_deletion", "total_inventory_sources",
+                    "source",
+                    "source_project",
+                    "schedule_enabled",
+                    "next_run",
+                    "total_hosts",
+                    "has_active_failures",
+                    "pending_deletion",
+                    "total_inventory_sources",
                     "inventory_sources_with_failures",
                 ):
                     if extra_key in meta:
@@ -1111,7 +1131,13 @@ def generate_enhanced_report(
         # Step 6: Generate report in chosen format
         if output_format == "html":
             echo_info("Generating enhanced HTML report...")
-            report_content = _generate_enhanced_html(org_summary, migration_state, export_dir, org_mapper, source_config=ctx.config.source)
+            report_content = _generate_enhanced_html(
+                org_summary,
+                migration_state,
+                export_dir,
+                org_mapper,
+                source_config=ctx.config.source,
+            )
         elif output_format == "markdown":
             echo_info("Generating enhanced Markdown report...")
             report_content = _format_enhanced_markdown(org_summary, migration_state, error_counter)
@@ -1119,7 +1145,13 @@ def generate_enhanced_report(
             echo_info("Generating enhanced CSV report...")
             report_content = _format_enhanced_csv(org_summary)
         else:
-            report_content = _generate_enhanced_html(org_summary, migration_state, export_dir, org_mapper, source_config=ctx.config.source)
+            report_content = _generate_enhanced_html(
+                org_summary,
+                migration_state,
+                export_dir,
+                org_mapper,
+                source_config=ctx.config.source,
+            )
 
         output_path.write_text(report_content, encoding="utf-8")
 
@@ -1166,7 +1198,9 @@ def _print_enhanced_summary(org_summary: dict, error_counter: Counter) -> None:
 
     click.echo(f"  Organizations: {len(sorted_orgs)}")
     click.echo(f"  Total resources: {total_all}")
-    click.echo(f"  Completed: {total_completed} | Failed: {total_failed} | Skipped: {total_skipped} | Pending: {total_pending}")
+    click.echo(
+        f"  Completed: {total_completed} | Failed: {total_failed} | Skipped: {total_skipped} | Pending: {total_pending}"
+    )
     click.echo(f"  Probably Stale: {stalled_count}")
     click.echo(f"  Success rate: {rate}%")
     click.echo()
@@ -1206,9 +1240,9 @@ def _print_enhanced_summary(org_summary: dict, error_counter: Counter) -> None:
 # Markdown report
 # ---------------------------------------------------------------------------
 def _format_enhanced_markdown(
-    org_summary: dict,
-    migration_state,
-    error_counter: Counter,
+    org_summary: dict[str, Any],
+    migration_state: Any,
+    error_counter: Counter[Any],
 ) -> str:
     """Generate enhanced markdown report with organization breakdowns."""
     lines = [
@@ -1233,46 +1267,53 @@ def _format_enhanced_markdown(
     total_pending = sum(s["pending"] for _, s in sorted_orgs)
     total_all = sum(s["total"] for _, s in sorted_orgs)
     stalled_count = sum(
-        1 for _, s in sorted_orgs
+        1
+        for _, s in sorted_orgs
         for r in s["resources"]
         if r.get("resource_status") == "Probably Stale"
     )
     rate = round((total_completed / total_all) * 100) if total_all > 0 else 0
 
-    lines.extend([
-        "## Global Summary",
-        "",
-        f"- **Organizations:** {len(sorted_orgs)}",
-        f"- **Total resources:** {total_all}",
-        f"- **Completed:** {total_completed}",
-        f"- **Failed:** {total_failed}",
-        f"- **Skipped:** {total_skipped}",
-        f"- **Pending:** {total_pending}",
-        f"- **Probably Stale:** {stalled_count}",
-        f"- **Success rate:** {rate}%",
-        "",
-    ])
+    lines.extend(
+        [
+            "## Global Summary",
+            "",
+            f"- **Organizations:** {len(sorted_orgs)}",
+            f"- **Total resources:** {total_all}",
+            f"- **Completed:** {total_completed}",
+            f"- **Failed:** {total_failed}",
+            f"- **Skipped:** {total_skipped}",
+            f"- **Pending:** {total_pending}",
+            f"- **Probably Stale:** {stalled_count}",
+            f"- **Success rate:** {rate}%",
+            "",
+        ]
+    )
 
     # Error classification summary
     if error_counter:
-        lines.extend([
-            "## Error Classification Summary",
-            "",
-            "| Error Type | Count |",
-            "|------------|-------|",
-        ])
+        lines.extend(
+            [
+                "## Error Classification Summary",
+                "",
+                "| Error Type | Count |",
+                "|------------|-------|",
+            ]
+        )
         for key, count in error_counter.most_common(30):
             key_escaped = key.replace("|", "\\|")
             lines.append(f"| {key_escaped} | {count} |")
         lines.append("")
 
     # Organization summary table
-    lines.extend([
-        "## Summary by Organization",
-        "",
-        "| Organization | Total | Completed | Failed | Skipped | Pending | Prob. Stale | Success Rate |",
-        "|--------------|-------|-----------|--------|---------|---------|-------------|--------------|",
-    ])
+    lines.extend(
+        [
+            "## Summary by Organization",
+            "",
+            "| Organization | Total | Completed | Failed | Skipped | Pending | Prob. Stale | Success Rate |",
+            "|--------------|-------|-----------|--------|---------|---------|-------------|--------------|",
+        ]
+    )
 
     for org_name, summary in sorted_orgs:
         completed = summary["completed"]
@@ -1280,7 +1321,9 @@ def _format_enhanced_markdown(
         skipped = summary["skipped"]
         pending = summary["pending"]
         total = summary["total"]
-        org_stalled = sum(1 for r in summary["resources"] if r.get("resource_status") == "Probably Stale")
+        org_stalled = sum(
+            1 for r in summary["resources"] if r.get("resource_status") == "Probably Stale"
+        )
         org_rate = round((completed / total) * 100) if total > 0 else 0
 
         failed_str = f"**{failed}**" if failed > 0 else str(failed)
@@ -1322,8 +1365,12 @@ def _format_enhanced_markdown(
             resources = by_type[rtype]
             lines.append(f"### {rtype} ({len(resources)})")
             lines.append("")
-            lines.append("| Source ID | Name | Status | Error | Error Explanation | Resource Status | Last Modified |")
-            lines.append("|-----------|------|--------|-------|-------------------|-----------------|---------------|")
+            lines.append(
+                "| Source ID | Name | Status | Error | Error Explanation | Resource Status | Last Modified |"
+            )
+            lines.append(
+                "|-----------|------|--------|-------|-------------------|-----------------|---------------|"
+            )
 
             for resource in resources:
                 source_id = resource["source_id"]
@@ -1338,7 +1385,9 @@ def _format_enhanced_markdown(
                 if modified:
                     modified = modified.split("T")[0]
 
-                lines.append(f"| {source_id} | {source_name} | {status} | {error_key} | {explanation} | {res_status} | {modified} |")
+                lines.append(
+                    f"| {source_id} | {source_name} | {status} | {error_key} | {explanation} | {res_status} | {modified} |"
+                )
 
             lines.append("")
 
@@ -1356,25 +1405,27 @@ def _format_enhanced_csv(org_summary: dict) -> str:
     output = StringIO()
     writer = csv_module.writer(output)
 
-    writer.writerow([
-        "Organization",
-        "Resource Type",
-        "Source ID",
-        "Name",
-        "Migration Status",
-        "Error Classification",
-        "Error Explanation",
-        "Error Message",
-        "Resource Status in AAP",
-        "Last Modified",
-        "Created By",
-        "Last Modified By",
-        "Created",
-        "Last Job Run",
-        "Last Job Failed",
-        "Next Job Run",
-        "Sync Status",
-    ])
+    writer.writerow(
+        [
+            "Organization",
+            "Resource Type",
+            "Source ID",
+            "Name",
+            "Migration Status",
+            "Error Classification",
+            "Error Explanation",
+            "Error Message",
+            "Resource Status in AAP",
+            "Last Modified",
+            "Created By",
+            "Last Modified By",
+            "Created",
+            "Last Job Run",
+            "Last Job Failed",
+            "Next Job Run",
+            "Sync Status",
+        ]
+    )
 
     sorted_orgs = sorted(
         org_summary.items(),
@@ -1384,25 +1435,27 @@ def _format_enhanced_csv(org_summary: dict) -> str:
 
     for org_name, summary in sorted_orgs:
         for resource in summary["resources"]:
-            writer.writerow([
-                org_name,
-                resource["resource_type"],
-                resource["source_id"],
-                resource.get("source_name", "N/A"),
-                resource["status"],
-                resource.get("error_key", ""),
-                resource.get("error_explanation", ""),
-                resource.get("error_message", ""),
-                resource.get("resource_status", "Unknown"),
-                resource.get("modified", ""),
-                resource.get("created_by", "N/A"),
-                resource.get("modified_by", "N/A"),
-                resource.get("created", ""),
-                resource.get("last_job_run", ""),
-                resource.get("last_job_failed", ""),
-                resource.get("next_job_run", ""),
-                resource.get("sync_status", ""),
-            ])
+            writer.writerow(
+                [
+                    org_name,
+                    resource["resource_type"],
+                    resource["source_id"],
+                    resource.get("source_name", "N/A"),
+                    resource["status"],
+                    resource.get("error_key", ""),
+                    resource.get("error_explanation", ""),
+                    resource.get("error_message", ""),
+                    resource.get("resource_status", "Unknown"),
+                    resource.get("modified", ""),
+                    resource.get("created_by", "N/A"),
+                    resource.get("modified_by", "N/A"),
+                    resource.get("created", ""),
+                    resource.get("last_job_run", ""),
+                    resource.get("last_job_failed", ""),
+                    resource.get("next_job_run", ""),
+                    resource.get("sync_status", ""),
+                ]
+            )
 
     return output.getvalue()
 
@@ -1410,13 +1463,19 @@ def _format_enhanced_csv(org_summary: dict) -> str:
 # ---------------------------------------------------------------------------
 # HTML Generation
 # ---------------------------------------------------------------------------
-def _generate_enhanced_html(org_summary: dict, migration_state, export_dir: Path, org_mapper: OrganizationMapper, source_config=None) -> str:
+def _generate_enhanced_html(
+    org_summary: dict[str, Any],
+    migration_state: Any,
+    export_dir: Path,
+    org_mapper: OrganizationMapper,
+    source_config: Any = None,
+) -> str:
     """Generate the enhanced interactive HTML report."""
     from html import escape
 
     user_emails = _build_user_email_lookup(export_dir, org_mapper, source_config)
 
-    json_data = {
+    json_data: dict[str, Any] = {
         "metadata": {
             "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "migration_id": str(migration_state.migration_id),
@@ -1437,7 +1496,7 @@ def _generate_enhanced_html(org_summary: dict, migration_state, export_dir: Path
             "skipped": skipped,
             "pending": pending,
             "total": summary["total"],
-            "resource_types": sorted(list(summary["resource_types"])),
+            "resource_types": sorted(summary["resource_types"]),
             "resources": summary["resources"],
         }
 

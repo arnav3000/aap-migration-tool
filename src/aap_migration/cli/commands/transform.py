@@ -11,6 +11,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import click
 
@@ -90,7 +91,7 @@ def seed_builtin_credential_types(ctx: MigrationContext, state: MigrationState) 
             logger.info(
                 "credential_type_mappings_already_exist",
                 count=len(existing_mappings),
-                message="Credential types already migrated in earlier phase - using existing mappings"
+                message="Credential types already migrated in earlier phase - using existing mappings",
             )
             return len(existing_mappings)
 
@@ -99,7 +100,7 @@ def seed_builtin_credential_types(ctx: MigrationContext, state: MigrationState) 
         # when credential_types are actually migrated.
         logger.info(
             "credential_type_mappings_not_found",
-            message="No credential type mappings found - will be created when credential_types are migrated"
+            message="No credential type mappings found - will be created when credential_types are migrated",
         )
         return 0
 
@@ -280,7 +281,7 @@ def transform(
         defer_project_sync=defer_project_sync,
     )
 
-    async def run_transform():
+    async def run_transform() -> None:
         import logging
 
         # Suppress console logging for cleaner output
@@ -322,7 +323,7 @@ def transform(
             # This ensures credentials pass dependency validation during transformation
             if ctx.config_path:
                 try:
-                    state = ctx.migration_state
+                    state: Any = ctx.migration_state
                     seeded = seed_builtin_credential_types(ctx, state)
                     logger.info("checked_credential_type_mappings", count=seeded)
                 except Exception as e:
@@ -373,7 +374,7 @@ def transform(
                     )
 
                     # Create progress callback
-                    def progress_callback(rtype: str, stats: dict):
+                    def progress_callback(rtype: str, stats: dict[str, Any]) -> None:
                         if progress_enabled:
                             total_skipped = (
                                 stats.get("skipped_pending_deletion", 0)
@@ -692,12 +693,24 @@ def transform(
                             if rtype == "hosts" and ctx.config_path:
                                 try:
                                     state = ctx.migration_state
+                                    # Preload inventory membership once per batch
+                                    # (single IN query) instead of per host.
+                                    batch_inventory_ids = {
+                                        host.get("inventory")
+                                        for host in transformed_batch
+                                        if host.get("inventory")
+                                    }
+                                    known_inventories = (
+                                        state.bulk_has_source_mappings(
+                                            "inventories", batch_inventory_ids
+                                        )
+                                        if batch_inventory_ids
+                                        else set()
+                                    )
                                     filtered_batch = []
                                     for host in transformed_batch:
                                         inventory_id = host.get("inventory")
-                                        if inventory_id and state.has_source_mapping(
-                                            "inventories", inventory_id
-                                        ):
+                                        if inventory_id and inventory_id in known_inventories:
                                             filtered_batch.append(host)
                                         else:
                                             logger.info(
@@ -727,7 +740,9 @@ def transform(
                                         for resource in transformed_batch:
                                             source_id = resource.get("_source_id")
                                             if source_id:
-                                                await transformer.populate_target_id_from_target(
+                                                await cast(
+                                                    Any, transformer
+                                                ).populate_target_id_from_target(
                                                     resource,
                                                     ctx.target_client,
                                                     state,

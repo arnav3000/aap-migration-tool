@@ -8,6 +8,7 @@ and importing them to target AAP independently.
 import asyncio
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import click
 
@@ -24,7 +25,6 @@ from aap_migration.cli.utils import (
     step_progress,
 )
 from aap_migration.migration.auditor_roles import (
-    AuditorRolesSummary,
     assign_auditor_roles,
     create_preflight_failure_summary,
     preflight_gateway_access,
@@ -56,9 +56,7 @@ logger = get_logger(__name__)
 # ============================================
 
 
-def should_trigger_deferred_constructed_syncs(
-    dry_run: bool, types_to_import: list[str]
-) -> bool:
+def should_trigger_deferred_constructed_syncs(dry_run: bool, types_to_import: list[str]) -> bool:
     """Return True when deferred constructed-inventory sync should run.
 
     Sync is tied to host_group_memberships being part of this import request
@@ -84,7 +82,7 @@ async def _run_deferred_constructed_syncs(ctx: MigrationContext) -> None:
         )
         # force=True: re-sync even if needs_constructed_sync was cleared by an
         # earlier premature sync (hosts present but group memberships empty).
-        deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs(
+        deferred_results = await cast(Any, inv_source_importer).trigger_deferred_constructed_syncs(
             force=True
         )
         if deferred_results:
@@ -128,6 +126,7 @@ def get_importer_dependencies(resource_type: str) -> dict[str, str]:
         # We don't need a real client/state here, just the class metadata
         # But create_importer requires them, so we'll import the class directly
         from aap_migration.migration.importer import (
+            ApplicationImporter,
             CredentialImporter,
             CredentialTypeImporter,
             ExecutionEnvironmentImporter,
@@ -138,12 +137,11 @@ def get_importer_dependencies(resource_type: str) -> dict[str, str]:
             JobTemplateImporter,
             LabelImporter,
             NotificationTemplateImporter,
-            ApplicationImporter,
-            SettingsImporter,
             OrganizationImporter,
             ProjectImporter,
             RBACImporter,
             ScheduleImporter,
+            SettingsImporter,
             TeamImporter,
             UserImporter,
             WorkflowImporter,
@@ -231,7 +229,9 @@ def build_dependency_closure(
     # Sort by migration_order to ensure dependencies come first
     sorted_types = sorted(
         needed_types,
-        key=lambda t: RESOURCE_REGISTRY.get(t).migration_order if t in RESOURCE_REGISTRY else 999,
+        key=lambda t: cast(Any, RESOURCE_REGISTRY.get(t)).migration_order
+        if t in RESOURCE_REGISTRY
+        else 999,
     )
 
     return sorted_types
@@ -413,7 +413,7 @@ def export(
         parallel_types=parallel_types_enabled,
     )
 
-    async def run_export():
+    async def run_export() -> None:
         import logging
         from datetime import datetime
 
@@ -518,7 +518,7 @@ def export(
                     )
 
                 # Get count from API WITH FILTERS
-                count = await temp_exporter.get_count(
+                count = await cast(Any, temp_exporter).get_count(
                     endpoint, filters=count_filters if count_filters else None
                 )
                 description = rtype.replace("_", " ").title()
@@ -554,7 +554,7 @@ def export(
                     )
 
                     # Create progress callback to update display
-                    def progress_callback(rtype: str, stats: dict):
+                    def progress_callback(rtype: str, stats: dict[str, Any]) -> None:
                         phase_id = rtype  # We use resource_type as phase_id
                         progress.update_phase(
                             phase_id, stats.get("exported", 0), stats.get("failed", 0)
@@ -811,7 +811,9 @@ def export(
         loop.run_until_complete(run_export())
 
 
-def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tuple[bool, dict]:
+def validate_pre_import_state(
+    input_dir: Path, state: Any, yes: bool = False
+) -> tuple[bool, dict[str, Any]]:
     """Validate database state before import to prevent duplicates.
 
     Checks for missing ID mappings that could cause duplicate resource creation.
@@ -824,7 +826,7 @@ def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tupl
     Returns:
         Tuple of (should_continue, validation_stats)
     """
-    validation_stats = {
+    validation_stats: dict[str, Any] = {
         "transformed_count": 0,
         "mapped_count": 0,
         "missing_mappings": 0,
@@ -1127,7 +1129,9 @@ def import_cmd(
         from aap_migration.validation import DependencyValidator
 
         validator = DependencyValidator(ctx.migration_state, input_dir)
-        validation = validator.validate_all(requested_types if requested_types != available_types else None)
+        validation = validator.validate_all(
+            requested_types if requested_types != available_types else None
+        )
         validator.display_validation_report(validation)
 
         # Exit after showing validation report
@@ -1186,7 +1190,7 @@ def import_cmd(
         # This is critical for credential_types to be imported before credentials, etc.
         types_to_import = sorted(
             requested_types,
-            key=lambda t: RESOURCE_REGISTRY.get(t).migration_order
+            key=lambda t: cast(Any, RESOURCE_REGISTRY.get(t)).migration_order
             if t in RESOURCE_REGISTRY
             else 999,
         )
@@ -1274,13 +1278,13 @@ def import_cmd(
 
     async def batch_precheck_resources(
         resource_type: str,
-        resources: list[dict],
-        importer,
-        client,
-        state,
-        progress,
+        resources: list[dict[str, Any]],
+        importer: Any,
+        client: Any,
+        state: Any,
+        progress: Any,
         phase_id: str,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
         Proactively check which resources already exist in target environment.
 
@@ -1343,9 +1347,9 @@ def import_cmd(
 
         # Extract identifiers from resources
         # Track duplicates to report them in migration report
-        resource_identifiers = []
-        resource_by_identifier = {}
-        duplicates_skipped = []  # Track duplicates for reporting
+        resource_identifiers: list[Any] = []
+        resource_by_identifier: dict[Any, Any] = {}
+        duplicates_skipped: list[Any] = []  # Track duplicates for reporting
 
         # PRE-LOAD FK MAPPINGS: Load source_id -> target_id dicts for FK fields
         # used in composite keys. This avoids O(N) database calls per resource.
@@ -1378,7 +1382,12 @@ def import_cmd(
                 parent_mappings = state.get_all_mappings_dict(parent_resource_type)
             else:
                 # For unified_job_template, load mappings from all possible parent types
-                for ptype in ("job_templates", "workflow_job_templates", "projects", "inventory_sources"):
+                for ptype in (
+                    "job_templates",
+                    "workflow_job_templates",
+                    "projects",
+                    "inventory_sources",
+                ):
                     parent_mappings.update(state.get_all_mappings_dict(ptype))
             logger.info(
                 "loaded_fk_mappings_for_precheck",
@@ -1399,12 +1408,18 @@ def import_cmd(
                 if resource_type in ORGANIZATION_SCOPED_RESOURCES:
                     source_org = resource.get("organization")
                     # Translate source org ID to target org ID for key matching
-                    org = org_mappings.get(source_org, source_org) if source_org is not None else None
+                    org = (
+                        org_mappings.get(source_org, source_org) if source_org is not None else None
+                    )
                     # For credentials, include credential_type in uniqueness check
                     # AAP constraint: (name, organization, credential_type) must be unique
                     if resource_type == "credentials":
                         source_cred_type = resource.get("credential_type")
-                        cred_type = cred_type_mappings.get(source_cred_type, source_cred_type) if source_cred_type is not None else None
+                        cred_type = (
+                            cred_type_mappings.get(source_cred_type, source_cred_type)
+                            if source_cred_type is not None
+                            else None
+                        )
                         dict_key = (identifier, org, cred_type)
                     else:
                         # Other org-scoped resources: (name, org) is unique
@@ -1414,7 +1429,11 @@ def import_cmd(
                     parent_field = PARENT_SCOPED_RESOURCES[resource_type]
                     source_parent = resource.get(parent_field)
                     # Translate source parent ID to target parent ID for key matching
-                    parent_id = parent_mappings.get(source_parent, source_parent) if source_parent is not None else None
+                    parent_id = (
+                        parent_mappings.get(source_parent, source_parent)
+                        if source_parent is not None
+                        else None
+                    )
                     dict_key = (identifier, parent_id) if parent_id is not None else identifier
                 else:
                     # Use name only for globally unique resources
@@ -1468,13 +1487,15 @@ def import_cmd(
                         reason=reason,
                     )
 
-                    duplicates_skipped.append({
-                        "source_id": source_id,
-                        "name": identifier,
-                        "organization": org,
-                        "parent_id": parent_id,
-                        "kept_source_id": existing_source_id,
-                    })
+                    duplicates_skipped.append(
+                        {
+                            "source_id": source_id,
+                            "name": identifier,
+                            "organization": org,
+                            "parent_id": parent_id,
+                            "kept_source_id": existing_source_id,
+                        }
+                    )
 
                     logger.warning(
                         "duplicate_resource_skipped",
@@ -1767,7 +1788,7 @@ def import_cmd(
                 state.mark_skipped(
                     resource_type=resource_type,
                     source_id=source_id,
-                    reason=f"Pre-existing in target (found in batch precheck)",
+                    reason="Pre-existing in target (found in batch precheck)",
                     target_id=existing["id"],
                     target_name=existing.get(identifier_field),
                     source_name=identifier,
@@ -1807,7 +1828,7 @@ def import_cmd(
 
         return to_import
 
-    async def run_import():
+    async def run_import() -> None:
         # PRE-IMPORT VALIDATION: Check for missing mappings to prevent duplicates
         should_continue, validation_stats = validate_pre_import_state(
             input_dir, ctx.migration_state, yes
@@ -1824,7 +1845,7 @@ def import_cmd(
         total_imported = 0
         total_failed = 0
         total_skipped = 0
-        skipped_no_importer = []
+        skipped_no_importer: list[str] = []
 
         # Track detailed stats per resource type
         run_stats = {}
@@ -1969,7 +1990,9 @@ def import_cmd(
                         # Fallback: Look up source_id from database by name if missing
                         if source_id is None:
                             resource_name = resource.get("name", "")
-                            mapping = ctx.migration_state.get_mapping_by_name(rtype, resource_name)
+                            mapping: Any = ctx.migration_state.get_mapping_by_name(
+                                rtype, resource_name
+                            )
                             if mapping:
                                 source_id = mapping.source_id
                                 resource["_source_id"] = source_id
@@ -1991,14 +2014,18 @@ def import_cmd(
 
                     # Snapshot auditor source IDs BEFORE import — _import_parallel
                     # pops _source_id from each dict, so post-import reads get None.
-                    auditor_source_snapshot = [
-                        {
-                            "username": r.get("username", "unknown"),
-                            "source_id": r.get("_source_id", r.get("id", 0)),
-                        }
-                        for r in transformed_resources
-                        if r.get("is_system_auditor") is True
-                    ] if rtype == "users" else []
+                    auditor_source_snapshot = (
+                        [
+                            {
+                                "username": r.get("username", "unknown"),
+                                "source_id": r.get("_source_id", r.get("id", 0)),
+                            }
+                            for r in transformed_resources
+                            if r.get("is_system_auditor") is True
+                        ]
+                        if rtype == "users"
+                        else []
+                    )
 
                     if not dry_run:
                         # Create appropriate importer using factory
@@ -2010,7 +2037,7 @@ def import_cmd(
                                 ctx.config.performance,
                                 ctx.config.resource_mappings,
                             )
-                            importer.input_dir = input_dir
+                            cast(Any, importer).input_dir = input_dir
                         except NotImplementedError:
                             logger.info(
                                 "skipping_no_importer",
@@ -2061,7 +2088,9 @@ def import_cmd(
                         }
 
                         method_name = method_map.get(rtype)
-                        echo_info(f"Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}")
+                        echo_info(
+                            f"Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}"
+                        )
                         if method_name and hasattr(importer, method_name):
                             # Proactive batch pre-check: query target to find existing resources
                             # This avoids "already exists" errors and shows accurate progress
@@ -2082,10 +2111,16 @@ def import_cmd(
                             skipped_count = len(transformed_resources) - len(resources_to_import)
 
                             if resources_to_import:
-                                echo_info(f"🔄 Starting import for {rtype}: {len(resources_to_import)} resources")
+                                echo_info(
+                                    f"🔄 Starting import for {rtype}: {len(resources_to_import)} resources"
+                                )
+
                                 # Create progress callback for live updates
                                 def update_progress(
-                                    success: int, failed: int, skipped: int, phase_id=phase_id
+                                    success: int,
+                                    failed: int,
+                                    skipped: int,
+                                    phase_id: str = phase_id,
                                 ) -> None:
                                     """Update progress display in real-time."""
                                     progress.update_phase(phase_id, success, failed, skipped)
@@ -2095,7 +2130,9 @@ def import_cmd(
                                 results = await method(
                                     resources_to_import, progress_callback=update_progress
                                 )
-                                echo_info(f"✅ {method_name} completed: {len(results) if results else 0} results")
+                                echo_info(
+                                    f"✅ {method_name} completed: {len(results) if results else 0} results"
+                                )
 
                                 # Calculate actual imported, failed, and skipped from results
                                 imported_count = len(
@@ -2142,7 +2179,9 @@ def import_cmd(
                                         f"assigning Gateway Platform Auditor roles..."
                                     )
                                     try:
-                                        role_def_id = await preflight_gateway_access(ctx.target_client)
+                                        role_def_id = await preflight_gateway_access(
+                                            ctx.target_client
+                                        )
                                     except RuntimeError as gw_err:
                                         logger.error(
                                             "gateway_preflight_failed",
@@ -2155,13 +2194,17 @@ def import_cmd(
                                     if role_def_id is not None:
                                         auditor_users = []
                                         for snap in auditor_source_snapshot:
-                                            mapping = ctx.migration_state.get_id_mapping("users", snap["source_id"])
+                                            mapping = ctx.migration_state.get_id_mapping(
+                                                "users", snap["source_id"]
+                                            )
                                             if mapping:
-                                                auditor_users.append({
-                                                    "username": snap["username"],
-                                                    "source_id": snap["source_id"],
-                                                    "target_id": mapping["target_id"],
-                                                })
+                                                auditor_users.append(
+                                                    {
+                                                        "username": snap["username"],
+                                                        "source_id": snap["source_id"],
+                                                        "target_id": mapping["target_id"],
+                                                    }
+                                                )
 
                                         if auditor_users:
                                             auditor_summary = await assign_auditor_roles(
@@ -2173,9 +2216,9 @@ def import_cmd(
                                             )
                                             if auditor_summary.failed:
                                                 auditor_failed_count = len(auditor_summary.failed)
-                                                for f in auditor_summary.failed:
+                                                for auditor_failure in auditor_summary.failed:
                                                     echo_warning(
-                                                        f"   ⚠ auditor_assignment_failed: {f.username} — {f.error}"
+                                                        f"   ⚠ auditor_assignment_failed: {auditor_failure.username} — {auditor_failure.error}"
                                                     )
                                     else:
                                         auditor_summary = create_preflight_failure_summary(
@@ -2191,17 +2234,17 @@ def import_cmd(
                                             f"have functional auditor access on AAP 2.6.\n\n"
                                             f"Affected users:"
                                         )
-                                        for f in auditor_summary.failed:
-                                            echo_error(f"   • {f.username}")
+                                        for auditor_failure in auditor_summary.failed:
+                                            echo_error(f"   • {auditor_failure.username}")
                                         echo_error(
                                             f"\nAction required: use a Gateway-capable token\n"
                                             f"(length 32, from AAP 2.6 UI) and re-run, or:\n"
                                             f"   python tools/remediate_auditor_roles.py --data-dir <path>\n"
                                             f"{'='*60}"
                                         )
-                                        for f in auditor_summary.failed:
+                                        for auditor_failure in auditor_summary.failed:
                                             echo_warning(
-                                                f"   ⚠ auditor_assignment_failed: {f.username} — {f.error}"
+                                                f"   ⚠ auditor_assignment_failed: {auditor_failure.username} — {auditor_failure.error}"
                                             )
                                 if auditor_failed_count > 0:
                                     total_failed += auditor_failed_count
@@ -2291,7 +2334,7 @@ def import_cmd(
                                         skipped=base_skipped + skipped,
                                     )
 
-                                result = await importer.import_hosts_bulk(
+                                result = await cast(Any, importer).import_hosts_bulk(
                                     inventory_id=target_inv_id,
                                     hosts=inv_hosts,
                                     progress_callback=bulk_progress,
@@ -2420,11 +2463,21 @@ def import_cmd(
                 click.echo()
                 if len([r for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0]) == 1:
                     # Single resource type failed
-                    failed_rtype = next(r[0] for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0)
-                    click.echo(click.style(f"   aap-bridge migration-report --resource-type {failed_rtype}", fg="yellow", bold=True))
+                    failed_rtype = next(
+                        r[0] for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0
+                    )
+                    click.echo(
+                        click.style(
+                            f"   aap-bridge migration-report --resource-type {failed_rtype}",
+                            fg="yellow",
+                            bold=True,
+                        )
+                    )
                 else:
                     # Multiple resource types failed
-                    click.echo(click.style("   aap-bridge migration-report", fg="yellow", bold=True))
+                    click.echo(
+                        click.style("   aap-bridge migration-report", fg="yellow", bold=True)
+                    )
                 click.echo()
                 click.echo("=" * 80)
 

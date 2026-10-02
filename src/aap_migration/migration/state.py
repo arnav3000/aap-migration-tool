@@ -10,7 +10,7 @@ import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func
 
@@ -95,7 +95,7 @@ class MigrationState:
         """Context manager entry."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Context manager exit."""
         # No cleanup needed as sessions are managed per operation
         pass
@@ -305,7 +305,7 @@ class MigrationState:
                         max_id=result,
                     )
 
-                    return result
+                    return cast(int | None, result)
 
             except Exception as e:
                 logger.error(
@@ -696,7 +696,9 @@ class MigrationState:
                             progress.status = "completed"
                         progress.phase = "import"  # Mark phase as import when target_id is set
                         progress.target_id = target_id
-                        progress.error_message = None  # Clear any previous error (e.g., from a retry)
+                        progress.error_message = (
+                            None  # Clear any previous error (e.g., from a retry)
+                        )
                         progress.completed_at = datetime.now(UTC)
 
                     # Update or create ID mapping IN THE SAME TRANSACTION
@@ -1306,12 +1308,14 @@ class MigrationState:
                         if m.target_id in seen_target_ids:
                             continue
                         seen_target_ids.add(m.target_id)
-                        results.append({
-                            "source_id": m.source_id,
-                            "target_id": m.target_id,
-                            "source_name": m.source_name,
-                            "target_name": m.target_name,
-                        })
+                        results.append(
+                            {
+                                "source_id": m.source_id,
+                                "target_id": m.target_id,
+                                "source_name": m.source_name,
+                                "target_name": m.target_name,
+                            }
+                        )
 
                     logger.info(
                         "pending_constructed_syncs_found",
@@ -1326,6 +1330,7 @@ class MigrationState:
                     error=str(e),
                 )
                 raise StateError(f"Failed to get pending constructed syncs: {e}") from e
+
     def clear_constructed_sync_flag(
         self,
         source_id: int,
@@ -1369,9 +1374,7 @@ class MigrationState:
                     source_id=source_id,
                     error=str(e),
                 )
-                raise StateError(
-                    f"Failed to clear constructed sync flag: {e}"
-                ) from e
+                raise StateError(f"Failed to clear constructed sync flag: {e}") from e
 
     def get_id_mapping(
         self,
@@ -1597,7 +1600,7 @@ class MigrationState:
                     if mapping:
                         session.expunge(mapping)
 
-                    return mapping
+                    return cast(IDMapping | None, mapping)
 
             except Exception as e:
                 logger.error(
@@ -1772,7 +1775,7 @@ class MigrationState:
                         mappings_reset=mapping_count,
                     )
 
-                    return progress_count
+                    return cast(int, progress_count)
 
             except Exception as e:
                 logger.error(
@@ -1833,7 +1836,7 @@ class MigrationState:
                         progress_reset=progress_count,
                     )
 
-                    return mapping_count
+                    return cast(int, mapping_count)
 
             except Exception as e:
                 logger.error(
@@ -2028,6 +2031,59 @@ class MigrationState:
                     error=str(e),
                 )
                 raise StateError(f"Failed to check source mapping: {e}") from e
+
+    def bulk_has_source_mappings(
+        self,
+        resource_type: str,
+        source_ids: set[Any] | list[Any] | tuple[Any, ...],
+    ) -> set[int]:
+        """Return the subset of *source_ids* present in id_mappings.
+
+        Single-query batch counterpart of :meth:`has_source_mapping` for
+        per-batch membership preloading (avoids N+1 queries when filtering
+        e.g. hosts by inventory). One ``IN`` query in a single session;
+        same lock discipline as :meth:`has_source_mapping`.
+
+        Args:
+            resource_type: Type of resource (e.g., 'inventories', 'hosts')
+            source_ids: Source system resource IDs to check
+
+        Returns:
+            Subset of *source_ids* found in id_mappings (regardless of
+            target_id); empty set when *source_ids* is empty
+        """
+        ids = {int(source_id) for source_id in source_ids if source_id is not None}
+        if not ids:
+            return set()
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    rows = (
+                        session.query(IDMapping.source_id)
+                        .filter(
+                            IDMapping.resource_type == resource_type,
+                            IDMapping.source_id.in_(ids),
+                        )
+                        .all()
+                    )
+                    found = {row[0] for row in rows}
+
+                    logger.debug(
+                        "checked_bulk_source_mappings",
+                        resource_type=resource_type,
+                        requested=len(ids),
+                        found=len(found),
+                    )
+
+                    return found
+
+            except Exception as e:
+                logger.error(
+                    "Failed to check bulk source mappings",
+                    resource_type=resource_type,
+                    error=str(e),
+                )
+                raise StateError(f"Failed to check bulk source mappings: {e}") from e
 
     def get_source_mapping_count(self, resource_type: str) -> int:
         """

@@ -6,7 +6,7 @@ with efficient pagination and filtering.
 
 import asyncio
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.client.base_client import BaseAPIClient
 from aap_migration.config import AAPInstanceConfig
@@ -78,20 +78,20 @@ class AAPSourceClient(BaseAPIClient):
             if not version:
                 logger.warning(
                     "version_not_found_in_config",
-                    message="Version field not found in /config/ response, using fallback"
+                    message="Version field not found in /config/ response, using fallback",
                 )
                 # Try to extract from ansible_version or default to 2.4.0
                 version = config_data.get("ansible_version", "2.4.0")
 
             self._version_cache = version
             logger.info("aap_version_detected", version=version, url=self.base_url)
-            return version
+            return cast(str, version)
 
         except Exception as e:
             logger.error(
                 "version_detection_failed",
                 error=str(e),
-                message="Failed to detect AAP version, defaulting to 2.4.0"
+                message="Failed to detect AAP version, defaulting to 2.4.0",
             )
             # Default to 2.4.0 if detection fails
             self._version_cache = "2.4.0"
@@ -171,7 +171,7 @@ class AAPSourceClient(BaseAPIClient):
             Total count of resources
         """
         response = await self.get(endpoint, params={"page_size": 1})
-        return response.get("count", 0)
+        return cast(int, response.get("count", 0))
 
     async def get_all_resources_parallel(
         self,
@@ -300,7 +300,7 @@ class AAPSourceClient(BaseAPIClient):
                     raise result
 
                 # result is (page_num, resources_list)
-                _returned_page, resources = result
+                _returned_page, resources = cast(tuple[int, list[dict[str, Any]]], result)
                 for resource in resources:
                     yield resource
                     total_yielded += 1
