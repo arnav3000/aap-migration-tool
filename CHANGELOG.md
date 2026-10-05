@@ -8,6 +8,26 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Fixed** — Filtered-import dependency closure now derives from the canonical
+  importer registry, covering instances, memberships, credential input
+  sources, and system job templates where the old 19-key copy returned empty
+  deps. Schedule-only filtered imports now pull candidate template parents
+  (job/workflow templates, projects, inventory sources) for the polymorphic
+  unified job template. Filtered imports may therefore include more types
+  than before; this is the intended under-import fix.
+- **Fixed** — Registry drift gate and leaf import failures are now fully
+  fail-closed in the dependency closure: only unknown resource types degrade
+  to empty deps. Any other failure (including malformed DEPENDENCIES) aborts
+  instead of silently pruning the closure. Callers that coded against
+  never-raise `get_importer_dependencies` can now see `AssertionError`,
+  `ImportError`, `AttributeError`, or `TypeError` propagate.
+- **Changed** — Intentional non-pure-move deltas inside the importer split:
+  parallel import preserves caller dicts (strips `_source_id` on a copy
+  instead of popping), and dependency-name lookup for enriched API errors
+  now performs real database reads (previously always missed) with
+  per-instance caching. Enriched error strings now carry source names where
+  available.
+
 ## [0.4.0] - 2026-04-14
 
 ### Added
