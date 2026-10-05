@@ -52,37 +52,16 @@ class WorkflowImporter(ResourceImporter):
         failed_workflow_template_ids: set[int] = set()
 
         try:
-            from aap_migration.migration.database import get_session
-            from aap_migration.migration.models import MigrationProgress
+            failed_job_template_ids = self.state.get_failed_source_ids("job_templates")
+            failed_workflow_template_ids = self.state.get_failed_source_ids(
+                "workflow_job_templates"
+            )
 
-            with get_session(self.state.database_url) as session:
-                # Get all failed job templates
-                failed_jobs = (
-                    session.query(MigrationProgress.source_id)
-                    .filter(
-                        MigrationProgress.resource_type == "job_templates",
-                        MigrationProgress.status == "failed",
-                    )
-                    .all()
-                )
-                failed_job_template_ids = {row.source_id for row in failed_jobs}
-
-                # Get all failed workflow templates
-                failed_workflows = (
-                    session.query(MigrationProgress.source_id)
-                    .filter(
-                        MigrationProgress.resource_type == "workflow_job_templates",
-                        MigrationProgress.status == "failed",
-                    )
-                    .all()
-                )
-                failed_workflow_template_ids = {row.source_id for row in failed_workflows}
-
-                logger.info(
-                    "Loaded failed dependencies for validation",
-                    failed_job_templates=len(failed_job_template_ids),
-                    failed_workflow_templates=len(failed_workflow_template_ids),
-                )
+            logger.info(
+                "Loaded failed dependencies for validation",
+                failed_job_templates=len(failed_job_template_ids),
+                failed_workflow_templates=len(failed_workflow_template_ids),
+            )
         except Exception as e:
             logger.warning(
                 "Failed to query failed dependencies, will skip validation",

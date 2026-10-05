@@ -7,11 +7,15 @@ thread safety.
 """
 
 import os
+import sqlite3
+import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import Engine, create_engine, event, pool, text
+from sqlalchemy.exc import OperationalError as _SAOperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from aap_migration.client.exceptions import ConfigurationError, StateError
@@ -21,20 +25,59 @@ from aap_migration.utils.logging import get_logger
 logger = get_logger(__name__)
 
 # Global engine and session factory (initialized on first use)
+# Legacy singletons (kept for callers without an explicit URL) plus a
+# per-URL registry so concurrent API jobs with different state DBs never
+# retarget each other's sessions. All mutations hold _registry_lock.
 _engine: Engine | None = None
 _SessionFactory: sessionmaker | None = None
+_engines: dict[str, Engine] = {}
+_factories: dict[str, sessionmaker] = {}
+_registry_lock = threading.Lock()
+# Legacy singletons are frozen on first init: later init_database() calls for
+# a different URL register in the per-URL registry but never retarget the
+# globals, so callers without an explicit URL keep a stable binding.
+_legacy_url: str | None = None
+_MAX_REGISTRY_ENTRIES = 64
 
 
-def _enable_sqlite_foreign_keys(dbapi_conn, connection_record):
+def _adopt_legacy_locked(database_url: str) -> None:
+    """Point legacy globals at *database_url* iff it is the frozen first URL.
+
+    Legacy singletons are frozen to the first URL ever initialized; later
+    URLs register per-URL but never retarget the globals. Must hold
+    ``_registry_lock``.
     """
-    Enable foreign key constraints for SQLite connections.
+    global _engine, _SessionFactory, _legacy_url
+    if _legacy_url is None:
+        _legacy_url = database_url
+        _engine = _engines[database_url]
+        _SessionFactory = _factories[database_url]
+    elif database_url == _legacy_url:
+        _engine = _engines[database_url]
+        _SessionFactory = _factories[database_url]
+    else:
+        logger.warning(
+            "init_database retarget ignored: legacy globals frozen to first URL",
+            first_url=_legacy_url,
+            new_url=database_url,
+        )
 
-    SQLite has foreign keys disabled by default. This event handler
-    enables them for each new connection.
-    """
-    cursor = dbapi_conn.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.close()
+
+def _configure_sqlite(dbapi_conn: Any, connection_record: Any) -> None:
+    """Enable WAL + busy timeout + FK so threads share state DBs safely."""
+    try:
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA busy_timeout=30000;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+    except Exception as exc:
+        # Fail open (the DB still works) but log loudly: without WAL and
+        # the busy timeout, concurrent jobs hit "database is locked"
+        # immediately instead of waiting, and the root cause would never
+        # appear in logs.
+        logger.warning("sqlite_pragmas_failed; running without WAL/busy-timeout", error=str(exc))
 
 
 def create_database_engine(
@@ -78,10 +121,10 @@ def create_database_engine(
                 database_url,
                 echo=echo,
                 poolclass=pool.NullPool,  # No connection pooling for SQLite
-                connect_args={"check_same_thread": False},  # Allow multi-threaded access
+                connect_args={"check_same_thread": False, "timeout": 30},
             )
-            # Enable foreign keys for SQLite
-            event.listen(engine, "connect", _enable_sqlite_foreign_keys)
+            # WAL + busy timeout + FK so concurrent jobs share DBs safely.
+            event.listen(engine, "connect", _configure_sqlite)
 
         elif is_postgresql:
             # PostgreSQL-specific configuration
@@ -132,7 +175,10 @@ def init_database(
     Initialize the migration database.
 
     Creates all tables if they don't exist. This is idempotent and safe
-    to call multiple times.
+    to call multiple times. Engines are kept in a per-URL registry guarded
+    by a lock so concurrent API jobs with different state DBs never flip
+    each other's sessions; the legacy globals are frozen to the first URL
+    for callers that omit one.
 
     Args:
         database_url: Database connection URL
@@ -148,11 +194,31 @@ def init_database(
     Raises:
         ConfigurationError: If database initialization fails
     """
-    global _engine, _SessionFactory
+    global _engine, _SessionFactory, _legacy_url
 
     try:
-        # Create engine
-        _engine = create_database_engine(
+        with _registry_lock:
+            existing = _engines.get(database_url)
+        if existing is not None:
+            # Ensure tables exist for this URL without rebuilding. Runs
+            # outside the lock: create_all round-trips the DB and must not
+            # stall every thread's get_engine/get_session path.
+            Base.metadata.create_all(existing)
+            with _registry_lock:
+                current = _engines.get(database_url)
+                if current is not None:
+                    _adopt_legacy_locked(database_url)
+                    return current
+                # Evicted mid-flight: re-register our handle (a disposed
+                # engine re-opens its pool on next use, so this stays valid).
+                _engines[database_url] = existing
+                _factories.setdefault(
+                    database_url, sessionmaker(bind=existing, expire_on_commit=False)
+                )
+                _adopt_legacy_locked(database_url)
+                return existing
+        # Create engine outside the lock (may do I/O), then publish.
+        engine = create_database_engine(
             database_url,
             echo=echo,
             pool_size=pool_size,
@@ -162,10 +228,48 @@ def init_database(
         )
 
         # Create all tables
-        Base.metadata.create_all(_engine)
+        Base.metadata.create_all(engine)
 
         # Create session factory
-        _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False)
+        factory = sessionmaker(bind=engine, expire_on_commit=False)
+        to_dispose: Engine | None = None
+        with _registry_lock:
+            # Another thread may have won the race; reuse theirs and
+            # dispose ours (outside the lock) to avoid leaking a pool.
+            if database_url in _engines:
+                to_dispose = engine
+                _adopt_legacy_locked(database_url)
+                published = _engines[database_url]
+            else:
+                if len(_engines) >= _MAX_REGISTRY_ENTRIES:
+                    victim = next((u for u in _engines if u != _legacy_url), None)
+                    if victim is None:
+                        # Every entry is legacy-pinned: refuse to evict the
+                        # frozen engine legacy callers are bound to; grow
+                        # past the cap instead of disposing a live engine.
+                        logger.warning(
+                            "engine registry full and all entries legacy-pinned; "
+                            "growing past cap instead of evicting",
+                        )
+                    else:
+                        to_dispose = _engines.pop(victim)
+                        _factories.pop(victim, None)
+                        logger.warning(
+                            "engine registry full; evicted oldest non-legacy entry",
+                            evicted_url=victim,
+                        )
+                _engines[database_url] = engine
+                _factories[database_url] = factory
+                _adopt_legacy_locked(database_url)
+                published = engine
+
+        # Dispose outside the lock: dispose() waits for checked-out
+        # connections (up to pool_timeout) and must not stall the registry.
+        if to_dispose is not None:
+            try:
+                to_dispose.dispose()
+            except Exception:
+                pass
 
         logger.info(
             "Database initialized successfully",
@@ -173,7 +277,7 @@ def init_database(
             tables=len(Base.metadata.tables),
         )
 
-        return _engine
+        return published
 
     except Exception as e:
         logger.error("Failed to initialize database", error=str(e), database_url=database_url)
@@ -182,10 +286,11 @@ def init_database(
 
 def get_engine(database_url: str | None = None, echo: bool = False) -> Engine:
     """
-    Get the global database engine.
+    Get the database engine for *database_url* (per-URL registry).
 
     If the engine hasn't been initialized yet, this will initialize it.
-    If database_url is not provided, uses the already-initialized engine.
+    If database_url is not provided, uses the frozen first/legacy engine
+    (legacy behavior for callers without an explicit URL).
 
     Args:
         database_url: Database connection URL (optional if already initialized)
@@ -199,12 +304,21 @@ def get_engine(database_url: str | None = None, echo: bool = False) -> Engine:
     """
     global _engine
 
-    if _engine is None:
-        if database_url is None:
-            raise ConfigurationError(
-                "Database engine not initialized. Call init_database() first or provide database_url."
-            )
+    if database_url is not None:
+        with _registry_lock:
+            engine = _engines.get(database_url)
+        if engine is not None:
+            return engine
         init_database(database_url, echo=echo)
+        with _registry_lock:
+            engine = _engines.get(database_url)
+        assert engine is not None, "Engine should be initialized by init_database()"
+        return engine
+
+    if _engine is None:
+        raise ConfigurationError(
+            "Database engine not initialized. Call init_database() first or provide database_url."
+        )
 
     # Assert for type checker - init_database() guarantees _engine is not None
     assert _engine is not None, "Engine should be initialized by init_database()"
@@ -251,18 +365,40 @@ def get_session(database_url: str | None = None) -> Generator[Session, None, Non
     Raises:
         StateError: If database operation fails
     """
-    # Ensure engine is initialized
+    # Ensure engine is initialized and bind to this URL's factory (never
+    # the legacy global, which may point at another job's DB).
     get_engine(database_url)
-
-    # Get session factory
-    session_factory = get_session_factory()
+    if database_url is not None:
+        with _registry_lock:
+            session_factory = _factories.get(database_url)
+        if session_factory is None:
+            raise ConfigurationError("Session factory not initialized. Call init_database() first.")
+    else:
+        # Get session factory
+        session_factory = get_session_factory()
 
     # Create session
     session = session_factory()
 
     try:
         yield session
-        session.commit()
+        try:
+            session.commit()
+        except (_SAOperationalError, sqlite3.OperationalError) as exc:
+            # Fail loudly on sqlite locked/busy: the yielded transaction's
+            # writes must never be rolled back and then re-committed as an
+            # empty (successful) transaction. Roll back and raise so the
+            # caller retries the whole unit of work instead.
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            msg = str(exc).lower()
+            if "locked" in msg or "busy" in msg:
+                raise StateError(
+                    "Database is locked by a concurrent reader/writer; retry the operation"
+                ) from exc
+            raise
         logger.debug("Database session committed successfully")
 
     except Exception as e:
@@ -298,12 +434,14 @@ def reset_database(database_url: str) -> None:
         Base.metadata.create_all(engine)
         logger.info("Database tables recreated", database_url=database_url)
 
-        # Dispose of the engine
-        engine.dispose()
-
     except Exception as e:
         logger.error("Failed to reset database", error=str(e), database_url=database_url)
         raise ConfigurationError(f"Failed to reset database: {e}") from e
+    finally:
+        try:
+            engine.dispose()
+        except Exception:
+            pass
 
 
 def validate_database_connection(database_url: str) -> bool:
@@ -318,10 +456,15 @@ def validate_database_connection(database_url: str) -> bool:
     """
     try:
         engine = create_database_engine(database_url)
-        with engine.connect() as conn:
-            # Execute a simple query to verify connection
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
+        try:
+            with engine.connect() as conn:
+                # Execute a simple query to verify connection
+                conn.execute(text("SELECT 1"))
+        finally:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
         logger.info("Database connection validated successfully", database_url=database_url)
         return True
 

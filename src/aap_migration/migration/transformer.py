@@ -11,7 +11,7 @@ import json
 import secrets
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
@@ -46,7 +46,7 @@ def generate_temp_ssh_key() -> str:
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    return pem.decode("utf-8")
+    return cast(str, pem.decode("utf-8"))
 
 
 def generate_temp_encrypted_ssh_key(passphrase: str) -> str:
@@ -71,7 +71,38 @@ def generate_temp_encrypted_ssh_key(passphrase: str) -> str:
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.BestAvailableEncryption(passphrase.encode("utf-8")),
     )
-    return pem.decode("utf-8")
+    return cast(str, pem.decode("utf-8"))
+
+
+def filter_hosts_to_known_inventories(
+    batch: list[dict[str, Any]], state: Any
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep hosts whose inventory is recorded in id_mappings.
+
+    Single home for the batch-preload + membership rule shared by the CLI
+    transform path and the parallel transformer: preloads inventory
+    membership with one ``IN`` query, then drops hosts pointing at
+    non-exported inventories (e.g. ``pending_deletion``). Membership uses
+    :meth:`MigrationState.present_source_ids`, so str/int asymmetry is
+    coerced once, centrally. Returns the kept batch and the skipped count.
+    """
+    inventory_ids = {host.get("inventory") for host in batch if host.get("inventory")}
+    known = state.present_source_ids("inventories", inventory_ids) if inventory_ids else set()
+    kept: list[dict[str, Any]] = []
+    for host in batch:
+        inventory_id = host.get("inventory")
+        if inventory_id in known:
+            kept.append(host)
+        else:
+            logger.info(
+                "host_skipped_missing_inventory",
+                resource_type="hosts",
+                source_id=host.get("_source_id"),
+                source_name=host.get("name"),
+                inventory_id=inventory_id,
+                message="Host's inventory not in id_mappings",
+            )
+    return kept, len(batch) - len(kept)
 
 
 # =============================================================================
@@ -165,6 +196,20 @@ class DataTransformer:
     # Fields that are REQUIRED dependencies - if missing, raise SkipResourceError
     # Optional dependencies (in DEPENDENCIES but not here) just log a warning
     REQUIRED_DEPENDENCIES: set[str] = set()
+
+    async def populate_target_id_from_target(
+        self,
+        data: dict[str, Any],
+        target_client: Any,
+        state: Any,
+        source_id: int,
+    ) -> dict[str, Any]:
+        """Pre-populate ID mappings from the target (default: no-op).
+
+        Only credential transformers override this; the default keeps the
+        base factory seam typed so callers need no cast.
+        """
+        return data
 
     def __init__(
         self,
@@ -329,6 +374,21 @@ class DataTransformer:
 
         source_id = data.get("_source_id") or data.get("id")
 
+        # Preload dependency membership grouped by resource type (one IN query
+        # per type) instead of one query per dependency field.
+        needed: dict[str, set[int]] = {}
+        for field, dep_resource_type in self.DEPENDENCIES.items():
+            dep_source_id = data.get(field)
+
+            # Skip if field is not set or is None/0
+            if not dep_source_id:
+                continue
+            needed.setdefault(dep_resource_type, set()).add(dep_source_id)
+        present: dict[str, set[Any]] = {
+            dep_resource_type: (self.state.present_source_ids(dep_resource_type, dep_ids))
+            for dep_resource_type, dep_ids in needed.items()
+        }
+
         for field, dep_resource_type in self.DEPENDENCIES.items():
             dep_source_id = data.get(field)
 
@@ -336,8 +396,8 @@ class DataTransformer:
             if not dep_source_id:
                 continue
 
-            # Check if the dependency exists in id_mappings
-            if not self.state.has_source_mapping(dep_resource_type, dep_source_id):
+            # Plain membership: present_source_ids already coerced str/int.
+            if dep_source_id not in present.get(dep_resource_type, set()):
                 if field in self.REQUIRED_DEPENDENCIES:
                     # Required dependency is missing - skip this resource
                     logger.warning(
@@ -355,7 +415,7 @@ class DataTransformer:
                         f"{resource_type} {source_id} references non-exported "
                         f"{dep_resource_type} {dep_source_id}",
                         resource_type=resource_type,
-                        source_id=source_id,
+                        source_id=cast(int, source_id),
                         missing_dependency=f"{dep_resource_type}:{dep_source_id}",
                     )
                 else:
@@ -1081,9 +1141,7 @@ class CredentialTransformer(DataTransformer):
                     error=str(e),
                 )
 
-    def _apply_credential_type_field_mappings(
-        self, data: dict[str, Any], source_id: int
-    ) -> None:
+    def _apply_credential_type_field_mappings(self, data: dict[str, Any], source_id: int) -> None:
         """Apply credential type-specific field mappings for AAP version compatibility.
 
         Handles schema differences between AAP versions for specific credential types.
@@ -1128,14 +1186,14 @@ class CredentialTransformer(DataTransformer):
 
             # AAP 2.6 doesn't accept these fields - remove them
             fields_to_remove = [
-                "api_version",      # API version selection removed in 2.6
-                "namespace",        # Namespace handling changed
-                "role_id",          # AppRole auth changed
-                "secret_id",        # AppRole auth changed
-                "default_auth_path", # Auth path handling changed
+                "api_version",  # API version selection removed in 2.6
+                "namespace",  # Namespace handling changed
+                "role_id",  # AppRole auth changed
+                "secret_id",  # AppRole auth changed
+                "default_auth_path",  # Auth path handling changed
                 "kubernetes_role",  # Kubernetes auth changed
-                "username",         # User auth changed
-                "password",         # User auth changed
+                "username",  # User auth changed
+                "password",  # User auth changed
             ]
 
             for field in fields_to_remove:
@@ -1151,8 +1209,8 @@ class CredentialTransformer(DataTransformer):
                     source_name=data.get("name"),
                     removed_fields=removed_fields,
                     message="Removed incompatible HashiCorp Vault fields for AAP 2.6 - "
-                            "credential will be created with basic auth (url, token, cacert). "
-                            "Advanced auth methods (AppRole, Kubernetes, namespace) must be reconfigured manually.",
+                    "credential will be created with basic auth (url, token, cacert). "
+                    "Advanced auth methods (AppRole, Kubernetes, namespace) must be reconfigured manually.",
                 )
 
     def _apply_specific_transformations(
@@ -1194,7 +1252,7 @@ class CredentialTransformer(DataTransformer):
                 raise SkipResourceError(
                     f"Credential {source_id} depends on unmapped external credential type {cred_type_id}",
                     resource_type=resource_type,
-                    source_id=source_id,
+                    source_id=cast(int, source_id),
                     missing_dependency=f"credential_types:{cred_type_id}",
                 )
 
@@ -1262,7 +1320,7 @@ class CredentialTransformer(DataTransformer):
                 )
 
         # Apply credential type-specific input field mappings (e.g., HashiCorp Vault)
-        self._apply_credential_type_field_mappings(data, source_id)
+        self._apply_credential_type_field_mappings(data, cast(int, source_id))
 
         # Handle encrypted fields - generate temporary values so creation succeeds
         if "inputs" in data:
@@ -1885,7 +1943,7 @@ class CredentialTypeTransformer(DataTransformer):
 
             # Map legacy names to new names (e.g. CyberArk)
             name = data.get("name")
-            new_name = self._get_name_mapping(name)
+            new_name = self._get_name_mapping(cast(str, name))
 
             if name != new_name:
                 logger.info(
@@ -2132,7 +2190,7 @@ class ScheduleTransformer(DataTransformer):
 
     # Cache for template launch configuration (loaded from exported data)
     # Maps (resource_type, source_id) -> dict of ask_*_on_launch fields
-    _template_launch_config_cache: dict[tuple[str, int], dict[str, bool]] | None = None
+    _template_launch_config_cache: dict[tuple[str, int], dict[str, Any]] | None = None
 
     # Field name to ask_*_on_launch attribute mapping
     _FIELD_TO_LAUNCH_FLAG = {
@@ -2150,7 +2208,7 @@ class ScheduleTransformer(DataTransformer):
         "job_slice_count": "ask_job_slice_count_on_launch",
     }
 
-    def _load_template_launch_config(self) -> dict[tuple[str, int], dict[str, bool]]:
+    def _load_template_launch_config(self) -> dict[tuple[str, int], dict[str, Any]]:
         """Load ask_*_on_launch fields from exported template data.
 
         Reads job_templates and workflow_job_templates from the input_dir
@@ -2163,7 +2221,7 @@ class ScheduleTransformer(DataTransformer):
         if self._template_launch_config_cache is not None:
             return self._template_launch_config_cache
 
-        cache: dict[tuple[str, int], dict[str, bool]] = {}
+        cache: dict[tuple[str, int], dict[str, Any]] = {}
         self._template_launch_config_cache = cache
 
         if not self.input_dir:
@@ -2193,7 +2251,7 @@ class ScheduleTransformer(DataTransformer):
                             continue
 
                         # Extract all ask_*_on_launch fields
-                        launch_config = {}
+                        launch_config: dict[str, Any] = {}
                         for key, value in template.items():
                             if key.startswith("ask_") and key.endswith("_on_launch"):
                                 launch_config[key] = bool(value)
@@ -2201,7 +2259,9 @@ class ScheduleTransformer(DataTransformer):
                         # CRITICAL FIX: Also capture survey_enabled for schedule extra_data validation
                         # Schedules with survey-enabled templates must preserve survey variable values
                         # even when ask_variables_on_launch=False
-                        launch_config["survey_enabled"] = bool(template.get("survey_enabled", False))
+                        launch_config["survey_enabled"] = bool(
+                            template.get("survey_enabled", False)
+                        )
 
                         # Extract survey variable names for granular filtering
                         # Only preserve extra_data variables that are defined in the survey spec
@@ -2238,9 +2298,7 @@ class ScheduleTransformer(DataTransformer):
 
         return cache
 
-    def _get_template_launch_config(
-        self, ujt_type: str, ujt_id: int
-    ) -> dict[str, bool] | None:
+    def _get_template_launch_config(self, ujt_type: str, ujt_id: int) -> dict[str, Any] | None:
         """Get the launch configuration for a specific template.
 
         Args:
@@ -2253,9 +2311,7 @@ class ScheduleTransformer(DataTransformer):
         cache = self._load_template_launch_config()
         return cache.get((ujt_type, int(ujt_id)))
 
-    def _check_prompt_on_launch(
-        self, ujt_type: str, ujt_id: int, field: str
-    ) -> bool:
+    def _check_prompt_on_launch(self, ujt_type: str, ujt_id: int, field: str) -> bool:
         """Check if a template allows prompting for a specific field at launch.
 
         Args:
@@ -2277,7 +2333,7 @@ class ScheduleTransformer(DataTransformer):
             # Template not found in exports - be permissive, don't strip
             return True
 
-        return config.get(launch_flag, False)
+        return cast(bool, config.get(launch_flag, False))
 
     def _strip_non_promptable_overrides(
         self,
@@ -2346,12 +2402,12 @@ class ScheduleTransformer(DataTransformer):
                 min_val = 0
 
         if q_type == "integer":
-            if isinstance(default, (int, float)) and default >= min_val:
+            if isinstance(default, int | float) and default >= min_val:
                 return int(default)
             return int(min_val) if min_val else 0
 
         if q_type == "float":
-            if isinstance(default, (int, float)) and default >= min_val:
+            if isinstance(default, int | float) and default >= min_val:
                 return float(default)
             return float(min_val) if min_val else 0.0
 
@@ -2553,7 +2609,8 @@ class ScheduleTransformer(DataTransformer):
             # Example: /api/v2/job_templates/14/ → "job_templates"
             # Example: /api/v2/projects/8/ → "projects"
             import re
-            match = re.search(r'/api/v2/([^/]+)/\d+/', ujt_url)
+
+            match = re.search(r"/api/v2/([^/]+)/\d+/", ujt_url)
             if match:
                 # Extract resource type from URL (already plural in URL)
                 url_resource_type = match.group(1)
@@ -2593,7 +2650,7 @@ class ScheduleTransformer(DataTransformer):
             raise SkipResourceError(
                 f"Schedule {source_id} has unknown unified_job_template type",
                 resource_type=resource_type,
-                source_id=source_id,
+                source_id=cast(int, source_id),
                 missing_dependency="unified_job_template:unknown_type",
             )
 
@@ -2611,7 +2668,7 @@ class ScheduleTransformer(DataTransformer):
             raise SkipResourceError(
                 f"Schedule {source_id} references non-exported {ujt_type} {ujt_id}",
                 resource_type=resource_type,
-                source_id=source_id,
+                source_id=cast(int, source_id),
                 missing_dependency=f"{ujt_type}:{ujt_id}",
             )
 
@@ -2656,7 +2713,7 @@ class WorkflowNodeTransformer(DataTransformer):
 
     # Cache for template launch configuration (loaded from exported data)
     # Maps (resource_type, source_id) -> dict of ask_*_on_launch fields
-    _template_launch_config_cache: dict[tuple[str, int], dict[str, bool]] | None = None
+    _template_launch_config_cache: dict[tuple[str, int], dict[str, Any]] | None = None
 
     # Field name to ask_*_on_launch attribute mapping
     _FIELD_TO_LAUNCH_FLAG = {
@@ -2674,7 +2731,7 @@ class WorkflowNodeTransformer(DataTransformer):
         "job_slice_count": "ask_job_slice_count_on_launch",
     }
 
-    def _load_template_launch_config(self) -> dict[tuple[str, int], dict[str, bool]]:
+    def _load_template_launch_config(self) -> dict[tuple[str, int], dict[str, Any]]:
         """Load ask_*_on_launch fields from exported template data.
 
         Reads job_templates and workflow_job_templates from the input_dir
@@ -2687,7 +2744,7 @@ class WorkflowNodeTransformer(DataTransformer):
         if self._template_launch_config_cache is not None:
             return self._template_launch_config_cache
 
-        cache: dict[tuple[str, int], dict[str, bool]] = {}
+        cache: dict[tuple[str, int], dict[str, Any]] = {}
         self._template_launch_config_cache = cache
 
         if not self.input_dir:
@@ -2717,7 +2774,7 @@ class WorkflowNodeTransformer(DataTransformer):
                             continue
 
                         # Extract all ask_*_on_launch fields
-                        launch_config = {}
+                        launch_config: dict[str, Any] = {}
                         for key, value in template.items():
                             if key.startswith("ask_") and key.endswith("_on_launch"):
                                 launch_config[key] = bool(value)
@@ -2725,7 +2782,9 @@ class WorkflowNodeTransformer(DataTransformer):
                         # CRITICAL FIX: Also capture survey_enabled for workflow node extra_data validation
                         # Workflow nodes with survey-enabled templates must preserve survey variable values
                         # even when ask_variables_on_launch=False
-                        launch_config["survey_enabled"] = bool(template.get("survey_enabled", False))
+                        launch_config["survey_enabled"] = bool(
+                            template.get("survey_enabled", False)
+                        )
 
                         # Extract survey variable names for granular filtering
                         # Only preserve extra_data variables that are defined in the survey spec
@@ -2759,9 +2818,7 @@ class WorkflowNodeTransformer(DataTransformer):
 
         return cache
 
-    def _get_template_launch_config(
-        self, ujt_type: str, ujt_id: int
-    ) -> dict[str, bool] | None:
+    def _get_template_launch_config(self, ujt_type: str, ujt_id: int) -> dict[str, Any] | None:
         """Get the launch configuration for a specific template.
 
         Args:
@@ -2851,7 +2908,7 @@ class WorkflowNodeTransformer(DataTransformer):
                             "job_template": "job_templates",
                             "workflow_job_template": "workflow_job_templates",
                         }
-                        ujt_type = type_map.get(api_type)
+                        ujt_type = type_map.get(cast(str, api_type))
 
             if ujt_type:
                 data = self._strip_non_promptable_overrides(data, ujt_type, ujt_id)
@@ -3045,17 +3102,19 @@ class ApplicationTransformer(DataTransformer):
         # Handle client secret
         # AAP masks secrets with "************" when exporting, but we need to detect
         # if a secret exists and mark it for regeneration
-        if 'client_secret' in data and data['client_secret']:
+        if "client_secret" in data and data["client_secret"]:
             # Redact the actual secret value (even if already masked)
-            data['client_secret'] = "***REDACTED_WILL_BE_REGENERATED***"
+            data["client_secret"] = "***REDACTED_WILL_BE_REGENERATED***"
             # Mark for secret regeneration during import
-            data['_requires_new_secret'] = True
+            data["_requires_new_secret"] = True
 
         # Add migration notes
-        data['_migration_notes'] = {
-            'client_secret_action': 'will_be_auto_generated' if data.get('_requires_new_secret') else 'none',
-            'redirect_uris_action': 'review_for_environment',
-            'external_systems_action': 'update_with_new_client_id_secret'
+        data["_migration_notes"] = {
+            "client_secret_action": (
+                "will_be_auto_generated" if data.get("_requires_new_secret") else "none"
+            ),
+            "redirect_uris_action": "review_for_environment",
+            "external_systems_action": "update_with_new_client_id_secret",
         }
 
         return data
@@ -3074,14 +3133,27 @@ class SettingsTransformer(DataTransformer):
 
     # Patterns for identifying sensitive settings
     SENSITIVE_PATTERNS = [
-        'PASSWORD', 'SECRET', 'KEY', 'TOKEN', 'PRIVATE',
-        'CLIENT_SECRET', 'BIND_PASSWORD', 'SOCIAL_AUTH'
+        "PASSWORD",
+        "SECRET",
+        "KEY",
+        "TOKEN",
+        "PRIVATE",
+        "CLIENT_SECRET",
+        "BIND_PASSWORD",
+        "SOCIAL_AUTH",
     ]
 
     # Patterns for environment-specific settings
     ENVIRONMENT_PATTERNS = [
-        'URL', 'URI', 'HOST', 'PATH', 'DOMAIN', 'SERVER',
-        'EMAIL_HOST', 'LDAP', 'SMTP'  # LDAP catches all LDAP settings (schema can differ between AAP versions)
+        "URL",
+        "URI",
+        "HOST",
+        "PATH",
+        "DOMAIN",
+        "SERVER",
+        "EMAIL_HOST",
+        "LDAP",
+        "SMTP",  # LDAP catches all LDAP settings (schema can differ between AAP versions)
     ]
 
     def _apply_specific_transformations(
@@ -3102,47 +3174,47 @@ class SettingsTransformer(DataTransformer):
             Categorized settings data
         """
         # Extract metadata
-        metadata = data.pop('_migration_metadata', {})
+        metadata = data.pop("_migration_metadata", {})
 
         # Categorize settings
         categorized = {
-            'safe_to_copy': {},
-            'review_required': {},
-            'sensitive': {},
-            '_migration_metadata': metadata
+            "safe_to_copy": {},
+            "review_required": {},
+            "sensitive": {},
+            "_migration_metadata": metadata,
         }
 
         for key, value in data.items():
             # Skip internal fields
-            if key.startswith('_'):
+            if key.startswith("_"):
                 continue
 
             # Check if sensitive
             if any(pattern in key for pattern in self.SENSITIVE_PATTERNS):
-                categorized['sensitive'][key] = {
-                    '_original_value_redacted': True,
-                    '_action': 'provide_new_value_manually',
-                    '_placeholder': f'***PROVIDE_{key}***'
+                categorized["sensitive"][key] = {
+                    "_original_value_redacted": True,
+                    "_action": "provide_new_value_manually",
+                    "_placeholder": f"***PROVIDE_{key}***",
                 }
             # Check if environment-specific
             elif any(pattern in key for pattern in self.ENVIRONMENT_PATTERNS):
-                categorized['review_required'][key] = {
-                    'source_value': value,
-                    '_action': 'review_and_adapt_for_target_environment'
+                categorized["review_required"][key] = {
+                    "source_value": value,
+                    "_action": "review_and_adapt_for_target_environment",
                 }
             # Safe to copy
             else:
-                categorized['safe_to_copy'][key] = value
+                categorized["safe_to_copy"][key] = value
 
         # Add summary
-        categorized['_summary'] = {
-            'total_settings': len(data),
-            'safe_to_copy_count': len(categorized['safe_to_copy']),
-            'review_required_count': len(categorized['review_required']),
-            'sensitive_count': len(categorized['sensitive']),
-            'auto_import_percentage': round(
-                len(categorized['safe_to_copy']) / len(data) * 100, 1
-            ) if len(data) > 0 else 0
+        categorized["_summary"] = {
+            "total_settings": len(data),
+            "safe_to_copy_count": len(categorized["safe_to_copy"]),
+            "review_required_count": len(categorized["review_required"]),
+            "sensitive_count": len(categorized["sensitive"]),
+            "auto_import_percentage": (
+                round(len(categorized["safe_to_copy"]) / len(data) * 100, 1) if len(data) > 0 else 0
+            ),
         }
 
         return categorized

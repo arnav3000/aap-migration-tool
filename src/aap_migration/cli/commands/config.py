@@ -7,6 +7,7 @@ migration configuration.
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -88,7 +89,7 @@ def validate(ctx: MigrationContext, check_connectivity: bool) -> None:
 
 def _display_config_summary(config: MigrationConfig) -> None:
     """Display configuration summary."""
-    rows = [
+    rows: list[list[Any]] = [
         ["Source URL", config.source.url],
         ["Target URL", config.target.url],
         ["State DB Path", str(config.state.db_path)],
@@ -161,7 +162,7 @@ def _validate_settings(config: MigrationConfig) -> None:
 def _test_connectivity(ctx: MigrationContext) -> None:
     """Test connectivity to source and target AAP instances."""
 
-    async def test_connections():
+    async def test_connections() -> None:
         # Test source connection
         echo_info("Testing source AAP connection...")
         try:

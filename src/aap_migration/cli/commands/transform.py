@@ -11,6 +11,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -24,7 +25,11 @@ from aap_migration.cli.utils import (
 )
 from aap_migration.migration.parallel_transformer import ParallelTransformCoordinator
 from aap_migration.migration.state import MigrationState
-from aap_migration.migration.transformer import SkipResourceError, create_transformer
+from aap_migration.migration.transformer import (
+    SkipResourceError,
+    create_transformer,
+    filter_hosts_to_known_inventories,
+)
 from aap_migration.reporting.live_progress import MigrationProgressDisplay
 from aap_migration.utils.logging import get_logger
 
@@ -90,7 +95,7 @@ def seed_builtin_credential_types(ctx: MigrationContext, state: MigrationState) 
             logger.info(
                 "credential_type_mappings_already_exist",
                 count=len(existing_mappings),
-                message="Credential types already migrated in earlier phase - using existing mappings"
+                message="Credential types already migrated in earlier phase - using existing mappings",
             )
             return len(existing_mappings)
 
@@ -99,7 +104,7 @@ def seed_builtin_credential_types(ctx: MigrationContext, state: MigrationState) 
         # when credential_types are actually migrated.
         logger.info(
             "credential_type_mappings_not_found",
-            message="No credential type mappings found - will be created when credential_types are migrated"
+            message="No credential type mappings found - will be created when credential_types are migrated",
         )
         return 0
 
@@ -280,7 +285,7 @@ def transform(
         defer_project_sync=defer_project_sync,
     )
 
-    async def run_transform():
+    async def run_transform() -> None:
         import logging
 
         # Suppress console logging for cleaner output
@@ -322,7 +327,7 @@ def transform(
             # This ensures credentials pass dependency validation during transformation
             if ctx.config_path:
                 try:
-                    state = ctx.migration_state
+                    state: Any = ctx.migration_state
                     seeded = seed_builtin_credential_types(ctx, state)
                     logger.info("checked_credential_type_mappings", count=seeded)
                 except Exception as e:
@@ -373,7 +378,7 @@ def transform(
                     )
 
                     # Create progress callback
-                    def progress_callback(rtype: str, stats: dict):
+                    def progress_callback(rtype: str, stats: dict[str, Any]) -> None:
                         if progress_enabled:
                             total_skipped = (
                                 stats.get("skipped_pending_deletion", 0)
@@ -692,24 +697,10 @@ def transform(
                             if rtype == "hosts" and ctx.config_path:
                                 try:
                                     state = ctx.migration_state
-                                    filtered_batch = []
-                                    for host in transformed_batch:
-                                        inventory_id = host.get("inventory")
-                                        if inventory_id and state.has_source_mapping(
-                                            "inventories", inventory_id
-                                        ):
-                                            filtered_batch.append(host)
-                                        else:
-                                            logger.info(
-                                                "host_skipped_missing_inventory",
-                                                resource_type="hosts",
-                                                source_id=host.get("_source_id"),
-                                                source_name=host.get("name"),
-                                                inventory_id=inventory_id,
-                                                message="Host's inventory not in id_mappings",
-                                            )
-                                            skipped_missing_inventory += 1
-                                    transformed_batch = filtered_batch
+                                    transformed_batch, skipped = filter_hosts_to_known_inventories(
+                                        transformed_batch, state
+                                    )
+                                    skipped_missing_inventory += skipped
                                 except Exception as e:
                                     logger.warning(
                                         "host_filtering_failed",

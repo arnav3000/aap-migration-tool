@@ -4,7 +4,7 @@ This client provides methods to create resources in AAP 2.5+ with
 Platform Gateway support (required for AAP 2.6+) and bulk operations.
 """
 
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.client.base_client import BaseAPIClient
 from aap_migration.client.exceptions import ConflictError
@@ -89,20 +89,20 @@ class AAPTargetClient(BaseAPIClient):
             if not version:
                 logger.warning(
                     "version_not_found_in_config",
-                    message="Version field not found in /config/ response, using fallback"
+                    message="Version field not found in /config/ response, using fallback",
                 )
                 # Try to extract from ansible_version or default to 2.6.0
                 version = config_data.get("ansible_version", "2.6.0")
 
             self._version_cache = version
             logger.info("aap_version_detected", version=version, url=self.base_url)
-            return version
+            return cast(str, version)
 
         except Exception as e:
             logger.error(
                 "version_detection_failed",
                 error=str(e),
-                message="Failed to detect AAP version, defaulting to 2.6.0"
+                message="Failed to detect AAP version, defaulting to 2.6.0",
             )
             # Default to 2.6.0 if detection fails
             self._version_cache = "2.6.0"
@@ -531,7 +531,7 @@ class AAPTargetClient(BaseAPIClient):
         """
         endpoint = f"{resource_type}/"
         response = await self.get(endpoint, params={"page_size": 1})
-        return response.get("count", 0)
+        return cast(int, response.get("count", 0))
 
     @retry_api_call
     async def list_resources(
@@ -695,7 +695,7 @@ class AAPTargetClient(BaseAPIClient):
                 plugin_type=plugin_type,
                 authenticator_id=result.get("id"),
             )
-            return result
+            return cast(dict[str, Any], result)
 
         except Exception as e:
             logger.error(
@@ -723,7 +723,7 @@ class AAPTargetClient(BaseAPIClient):
             )
             response.raise_for_status()
             data = response.json()
-            return data.get("results", [])
+            return cast(list[dict[str, Any]], data.get("results", []))
 
         except Exception as e:
             logger.error("gateway_authenticators_list_failed", error=str(e))
@@ -805,7 +805,7 @@ class AAPTargetClient(BaseAPIClient):
                 map_type=map_type,
                 authenticator_id=authenticator_id,
             )
-            return result
+            return cast(dict[str, Any], result)
 
         except Exception as e:
             logger.error(
