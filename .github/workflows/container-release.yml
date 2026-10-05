@@ -91,7 +91,7 @@ jobs:
 
       - name: Login to Quay.io
         if: always()
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.QUAY_USERNAME }}
