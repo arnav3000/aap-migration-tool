@@ -467,43 +467,12 @@ class ResourceImporter(BaseLookupMixin):
     ) -> None:
         """Add notification association warnings to resource records in database.
 
-        Updates the error_message field for completed resources to include warnings
-        about incomplete notification associations. These warnings appear in migration reports.
-
-        Args:
-            resource_type: Type of resource (job_templates, workflow_job_templates)
-            warnings_by_source_id: Dict mapping source_id -> list of warning messages
+        Delegates to :meth:`MigrationState.append_notification_warnings`,
+        the single home for this update (same completed-only, append-only
+        semantics, plus state-lock discipline).
         """
         try:
-            from aap_migration.migration.database import get_session
-            from aap_migration.migration.models import MigrationProgress
-
-            with get_session(self.state.database_url) as session:
-                for source_id, warnings in warnings_by_source_id.items():
-                    progress = (
-                        session.query(MigrationProgress)
-                        .filter_by(resource_type=resource_type, source_id=source_id)
-                        .first()
-                    )
-
-                    if progress and progress.status == "completed":
-                        # Append warnings to existing error_message
-                        warning_text = "WARNING: " + "; ".join(warnings)
-                        if progress.error_message:
-                            progress.error_message = f"{progress.error_message}\n{warning_text}"
-                        else:
-                            progress.error_message = warning_text
-
-                        logger.info(
-                            "notification_warning_added_to_report",
-                            resource_type=resource_type,
-                            source_id=source_id,
-                            source_name=progress.source_name,
-                            warning_count=len(warnings),
-                        )
-
-                session.commit()
-
+            self.state.append_notification_warnings(resource_type, warnings_by_source_id)
         except Exception as e:
             logger.error(
                 "failed_to_add_notification_warnings",

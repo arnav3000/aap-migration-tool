@@ -91,9 +91,9 @@ def retry_on_network_error(
 
         # Return appropriate wrapper based on function type
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper  # type: ignore
+            return async_wrapper  # type: ignore[no-any-return]
         else:
-            return sync_wrapper  # type: ignore
+            return sync_wrapper  # type: ignore[return-value]
 
     return decorator
 
@@ -150,9 +150,9 @@ def retry_on_server_error(
             return _inner()
 
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper  # type: ignore
+            return async_wrapper  # type: ignore[no-any-return]
         else:
-            return sync_wrapper  # type: ignore
+            return sync_wrapper  # type: ignore[return-value]
 
     return decorator
 
@@ -213,9 +213,9 @@ def retry_with_backoff(
             return _inner()
 
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper  # type: ignore
+            return async_wrapper  # type: ignore[return-value]
         else:
-            return sync_wrapper  # type: ignore
+            return sync_wrapper  # type: ignore[return-value]
 
     return decorator
 
@@ -257,8 +257,13 @@ async def retry_with_rate_limit_handling(
                 )
                 raise
 
-            # Use Retry-After header if available, otherwise exponential backoff
-            wait_time = e.retry_after if e.retry_after else min(min_wait * (2**attempt), max_wait)
+            # Use Retry-After header if available (capped at max_wait so a
+            # far-future HTTP-date cannot park the FIFO worker), otherwise
+            # exponential backoff.
+            if e.retry_after:
+                wait_time = min(e.retry_after, max_wait)
+            else:
+                wait_time = min(min_wait * (2**attempt), max_wait)
 
             logger.warning(
                 "rate_limit_retrying",
@@ -399,9 +404,9 @@ def retry_on_gateway_error(
 
         # Return appropriate wrapper based on function type
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper  # type: ignore
+            return async_wrapper  # type: ignore[return-value]
         else:
-            return sync_wrapper  # type: ignore
+            return sync_wrapper  # type: ignore[return-value]
 
     return decorator
 

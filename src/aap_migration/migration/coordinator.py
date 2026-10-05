@@ -6,7 +6,7 @@ in proper dependency order.
 """
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.aap_target_client import AAPTargetClient
@@ -183,7 +183,7 @@ class MigrationCoordinator:
         self.schema_comparisons: dict[str, ComparisonResult] = {}
         self.schema_comparator = SchemaComparator()
 
-        self.metrics = {
+        self.metrics: dict[str, Any] = {
             "start_time": None,
             "end_time": None,
             "phases_completed": 0,
@@ -242,6 +242,7 @@ class MigrationCoordinator:
         if report_path:
             try:
                 import os
+
                 os.makedirs(os.path.dirname(report_path), exist_ok=True)
                 with open(report_path, "w") as f:
                     f.write(report)
@@ -328,6 +329,7 @@ class MigrationCoordinator:
             logger.info("pre_migration_credential_check_starting")
             try:
                 import os
+
                 os.makedirs(report_dir, exist_ok=True)
                 credential_report_path = os.path.join(report_dir, "credential-comparison.md")
 
@@ -355,7 +357,7 @@ class MigrationCoordinator:
                 else:
                     logger.info(
                         "all_credentials_present",
-                        total_credentials=credential_comparison['total_target'],
+                        total_credentials=credential_comparison["total_target"],
                         message="All source credentials already exist in target",
                     )
 
@@ -813,7 +815,9 @@ class MigrationCoordinator:
 
         return stats
 
-    async def _execute_bulk_host_migration(self, exporter, transformer, importer) -> dict[str, int]:
+    async def _execute_bulk_host_migration(
+        self, exporter: Any, transformer: Any, importer: Any
+    ) -> dict[str, int]:
         """Execute bulk host migration using AAP 2.6 bulk operations.
 
         Args:
@@ -833,7 +837,7 @@ class MigrationCoordinator:
         }
 
         # Group hosts by inventory for bulk import
-        hosts_by_inventory = {}
+        hosts_by_inventory: dict[int, list[dict[str, Any]]] = {}
         seen_source_ids: set[int] = set()  # Dedup parallel page overlaps
 
         async for host in exporter.export():
@@ -1034,7 +1038,7 @@ class MigrationCoordinator:
             # Get all resource types from migration phases
             resource_types = []
             for phase in self.MIGRATION_PHASES:
-                resource_types.extend(phase["resource_types"])
+                resource_types.extend(cast(list[str], phase["resource_types"]))
 
         logger.info(
             "schema_comparison_started",
@@ -1142,19 +1146,24 @@ class MigrationCoordinator:
         Returns:
             Migration summary dictionary
         """
-        duration = None
+        duration: float | None = None
         if self.metrics["start_time"] and self.metrics["end_time"]:
-            duration = (self.metrics["end_time"] - self.metrics["start_time"]).total_seconds()
+            duration = (
+                cast(datetime, self.metrics["end_time"])
+                - cast(datetime, self.metrics["start_time"])
+            ).total_seconds()
 
         summary = {
             "migration_id": self.state.migration_id,
             "status": "completed"
             if self.metrics["phases_failed"] == 0
             else "completed_with_errors",
-            "start_time": self.metrics["start_time"].isoformat()
+            "start_time": cast(datetime, self.metrics["start_time"]).isoformat()
             if self.metrics["start_time"]
             else None,
-            "end_time": self.metrics["end_time"].isoformat() if self.metrics["end_time"] else None,
+            "end_time": cast(datetime, self.metrics["end_time"]).isoformat()
+            if self.metrics["end_time"]
+            else None,
             "duration_seconds": duration,
             "phases_completed": self.metrics["phases_completed"],
             "phases_failed": self.metrics["phases_failed"],
@@ -1210,5 +1219,5 @@ class MigrationCoordinator:
         )
 
         # Execute remaining phases
-        only_phases = [p["name"] for p in remaining_phases]
+        only_phases: list[str] = [cast(str, p["name"]) for p in remaining_phases]
         return await self.migrate_all(only_phases=only_phases)

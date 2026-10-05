@@ -5,7 +5,7 @@ using AppRole authentication for managing AAP credentials.
 """
 
 import time
-from typing import Any
+from typing import Any, cast
 
 import hvac
 from hvac.exceptions import VaultError as HvacVaultError
@@ -186,7 +186,7 @@ class VaultClient:
                 version=response.get("data", {}).get("version"),
             )
 
-            return response
+            return cast(dict[str, Any], response)
 
         except HvacVaultError as e:
             logger.error("vault_write_failed", path=full_path, error=str(e))
@@ -225,7 +225,7 @@ class VaultClient:
 
             logger.info("vault_secret_read", path=full_path, fields=list(secret_data.keys()))
 
-            return secret_data
+            return cast(dict[str, Any], secret_data)
 
         except HvacVaultError as e:
             logger.error("vault_read_failed", path=full_path, error=str(e))
@@ -267,7 +267,7 @@ class VaultClient:
 
             logger.info("vault_secret_deleted", path=full_path)
 
-            return response
+            return cast(dict[str, Any], response)
 
         except HvacVaultError as e:
             logger.error("vault_delete_failed", path=full_path, error=str(e))
@@ -298,7 +298,7 @@ class VaultClient:
 
             logger.info("vault_secrets_listed", path=full_path, count=len(secrets))
 
-            return secrets
+            return cast(list[str], secrets)
 
         except HvacVaultError as e:
             # Empty path returns 404
@@ -336,7 +336,7 @@ class VaultClient:
         Returns:
             Dictionary of results with success/failure information
         """
-        results = {
+        results: dict[str, Any] = {
             "successful": [],
             "failed": [],
         }

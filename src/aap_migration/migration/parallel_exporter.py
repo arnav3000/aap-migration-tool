@@ -84,7 +84,7 @@ class ParallelExportCoordinator:
         Returns:
             Export statistics for this resource type
         """
-        stats = {
+        stats: dict[str, Any] = {
             "resource_type": resource_type,
             "exported": 0,
             "failed": 0,

@@ -7,6 +7,7 @@ and other common CLI patterns.
 
 import functools
 from collections.abc import Callable
+from typing import Any, cast
 
 import click
 
@@ -39,11 +40,11 @@ def pass_context(f: Callable) -> Callable:
 
     @click.pass_context
     @functools.wraps(f)
-    def wrapper(click_ctx: click.Context, *args, **kwargs):
+    def wrapper(click_ctx: click.Context, *args: Any, **kwargs: Any) -> Any:
         migration_ctx: MigrationContext = click_ctx.obj
         return f(migration_ctx, *args, **kwargs)
 
-    return wrapper
+    return cast(Callable[..., Any], wrapper)
 
 
 def handle_errors(f: Callable) -> Callable:
@@ -63,12 +64,18 @@ def handle_errors(f: Callable) -> Callable:
     """
 
     @functools.wraps(f)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return f(*args, **kwargs)
 
         except click.exceptions.Exit:
             # Let Exit exceptions pass through (they're intentional exits)
+            raise
+
+        except click.exceptions.ClickException:
+            # Intentional CLI failures (e.g. retry reporting failed types,
+            # operator cancel) keep their message and nonzero exit code
+            # instead of being relabeled "Unexpected Error".
             raise
 
         except ConfigurationError as e:
@@ -127,7 +134,7 @@ def requires_config(f: Callable) -> Callable:
     """
 
     @functools.wraps(f)
-    def wrapper(ctx: MigrationContext, *args, **kwargs):
+    def wrapper(ctx: MigrationContext, *args: Any, **kwargs: Any) -> Any:
         if ctx.config_path is None:
             click.echo(
                 "Error: Configuration file required. Use --config option or set AAP_BRIDGE_CONFIG.",
@@ -167,7 +174,7 @@ def confirm_action(
 
     def decorator(f: Callable) -> Callable:
         @functools.wraps(f)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             # Skip confirmation if --yes flag is present
             ctx = click.get_current_context()
             if ctx.params.get("yes", False):

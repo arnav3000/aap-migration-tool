@@ -8,6 +8,7 @@ and importing them to target AAP independently.
 import asyncio
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import click
 
@@ -82,7 +83,9 @@ async def _run_deferred_constructed_syncs(ctx: MigrationContext) -> None:
         )
         # force=True: re-sync even if needs_constructed_sync was cleared by an
         # earlier premature sync (hosts present but group memberships empty).
-        deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs(force=True)
+        deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs(  # type: ignore[attr-defined]
+            force=True
+        )
         if deferred_results:
             synced = sum(1 for r in deferred_results if r.get("status") == "synced")
             failed_syncs = sum(1 for r in deferred_results if r.get("status") == "failed")
@@ -259,7 +262,9 @@ def build_dependency_closure(
     # Sort by migration_order to ensure dependencies come first
     sorted_types = sorted(
         needed_types,
-        key=lambda t: RESOURCE_REGISTRY.get(t).migration_order if t in RESOURCE_REGISTRY else 999,
+        key=lambda t: cast(Any, RESOURCE_REGISTRY.get(t)).migration_order
+        if t in RESOURCE_REGISTRY
+        else 999,
     )
 
     return sorted_types
@@ -441,7 +446,7 @@ def export(
         parallel_types=parallel_types_enabled,
     )
 
-    async def run_export():
+    async def run_export() -> None:
         import logging
         from datetime import datetime
 
@@ -546,7 +551,7 @@ def export(
                     )
 
                 # Get count from API WITH FILTERS
-                count = await temp_exporter.get_count(
+                count = await cast(Any, temp_exporter).get_count(
                     endpoint, filters=count_filters if count_filters else None
                 )
                 description = rtype.replace("_", " ").title()
@@ -582,7 +587,7 @@ def export(
                     )
 
                     # Create progress callback to update display
-                    def progress_callback(rtype: str, stats: dict):
+                    def progress_callback(rtype: str, stats: dict[str, Any]) -> None:
                         phase_id = rtype  # We use resource_type as phase_id
                         progress.update_phase(
                             phase_id, stats.get("exported", 0), stats.get("failed", 0)
@@ -839,7 +844,9 @@ def export(
         loop.run_until_complete(run_export())
 
 
-def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tuple[bool, dict]:
+def validate_pre_import_state(
+    input_dir: Path, state: Any, yes: bool = False
+) -> tuple[bool, dict[str, Any]]:
     """Validate database state before import to prevent duplicates.
 
     Checks for missing ID mappings that could cause duplicate resource creation.
@@ -852,7 +859,7 @@ def validate_pre_import_state(input_dir: Path, state, yes: bool = False) -> tupl
     Returns:
         Tuple of (should_continue, validation_stats)
     """
-    validation_stats = {
+    validation_stats: dict[str, Any] = {
         "transformed_count": 0,
         "mapped_count": 0,
         "missing_mappings": 0,
@@ -1216,9 +1223,7 @@ def import_cmd(
         # This is critical for credential_types to be imported before credentials, etc.
         types_to_import = sorted(
             requested_types,
-            key=lambda t: (
-                RESOURCE_REGISTRY.get(t).migration_order if t in RESOURCE_REGISTRY else 999
-            ),
+            key=lambda t: (RESOURCE_REGISTRY[t].migration_order if t in RESOURCE_REGISTRY else 999),
         )
 
     # Filter by phase if specified
@@ -1304,13 +1309,13 @@ def import_cmd(
 
     async def batch_precheck_resources(
         resource_type: str,
-        resources: list[dict],
-        importer,
-        client,
-        state,
-        progress,
+        resources: list[dict[str, Any]],
+        importer: Any,
+        client: Any,
+        state: Any,
+        progress: Any,
         phase_id: str,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
         Proactively check which resources already exist in target environment.
 
@@ -1373,9 +1378,9 @@ def import_cmd(
 
         # Extract identifiers from resources
         # Track duplicates to report them in migration report
-        resource_identifiers = []
-        resource_by_identifier = {}
-        duplicates_skipped = []  # Track duplicates for reporting
+        resource_identifiers: list[Any] = []
+        resource_by_identifier: dict[Any, Any] = {}
+        duplicates_skipped: list[Any] = []  # Track duplicates for reporting
 
         # PRE-LOAD FK MAPPINGS: Load source_id -> target_id dicts for FK fields
         # used in composite keys. This avoids O(N) database calls per resource.
@@ -1851,7 +1856,7 @@ def import_cmd(
 
         return to_import
 
-    async def run_import():
+    async def run_import() -> None:
         # PRE-IMPORT VALIDATION: Check for missing mappings to prevent duplicates
         should_continue, validation_stats = validate_pre_import_state(
             input_dir, ctx.migration_state, yes
@@ -1868,7 +1873,7 @@ def import_cmd(
         total_imported = 0
         total_failed = 0
         total_skipped = 0
-        skipped_no_importer = []
+        skipped_no_importer: list[str] = []
 
         # Track detailed stats per resource type
         run_stats = {}
@@ -2013,7 +2018,9 @@ def import_cmd(
                         # Fallback: Look up source_id from database by name if missing
                         if source_id is None:
                             resource_name = resource.get("name", "")
-                            mapping = ctx.migration_state.get_mapping_by_name(rtype, resource_name)
+                            mapping: Any = ctx.migration_state.get_mapping_by_name(
+                                rtype, resource_name
+                            )
                             if mapping:
                                 source_id = mapping.source_id
                                 resource["_source_id"] = source_id
@@ -2059,7 +2066,7 @@ def import_cmd(
                                 ctx.config.performance,
                                 ctx.config.resource_mappings,
                             )
-                            importer.input_dir = input_dir
+                            cast(Any, importer).input_dir = input_dir
                         except NotImplementedError:
                             logger.info(
                                 "skipping_no_importer",
@@ -2139,7 +2146,10 @@ def import_cmd(
 
                                 # Create progress callback for live updates
                                 def update_progress(
-                                    success: int, failed: int, skipped: int, phase_id=phase_id
+                                    success: int,
+                                    failed: int,
+                                    skipped: int,
+                                    phase_id: str = phase_id,
                                 ) -> None:
                                     """Update progress display in real-time."""
                                     progress.update_phase(phase_id, success, failed, skipped)
@@ -2235,9 +2245,9 @@ def import_cmd(
                                             )
                                             if auditor_summary.failed:
                                                 auditor_failed_count = len(auditor_summary.failed)
-                                                for f in auditor_summary.failed:
+                                                for auditor_failure in auditor_summary.failed:
                                                     echo_warning(
-                                                        f"   ⚠ auditor_assignment_failed: {f.username} — {f.error}"
+                                                        f"   ⚠ auditor_assignment_failed: {auditor_failure.username} — {auditor_failure.error}"
                                                     )
                                     else:
                                         auditor_summary = create_preflight_failure_summary(
@@ -2253,17 +2263,17 @@ def import_cmd(
                                             f"have functional auditor access on AAP 2.6.\n\n"
                                             f"Affected users:"
                                         )
-                                        for f in auditor_summary.failed:
-                                            echo_error(f"   • {f.username}")
+                                        for auditor_failure in auditor_summary.failed:
+                                            echo_error(f"   • {auditor_failure.username}")
                                         echo_error(
                                             f"\nAction required: use a Gateway-capable token\n"
                                             f"(length 32, from AAP 2.6 UI) and re-run, or:\n"
                                             f"   python tools/remediate_auditor_roles.py --data-dir <path>\n"
                                             f"{'=' * 60}"
                                         )
-                                        for f in auditor_summary.failed:
+                                        for auditor_failure in auditor_summary.failed:
                                             echo_warning(
-                                                f"   ⚠ auditor_assignment_failed: {f.username} — {f.error}"
+                                                f"   ⚠ auditor_assignment_failed: {auditor_failure.username} — {auditor_failure.error}"
                                             )
                                 if auditor_failed_count > 0:
                                     total_failed += auditor_failed_count
@@ -2353,7 +2363,7 @@ def import_cmd(
                                         skipped=base_skipped + skipped,
                                     )
 
-                                result = await importer.import_hosts_bulk(
+                                result = await cast(Any, importer).import_hosts_bulk(
                                     inventory_id=target_inv_id,
                                     hosts=inv_hosts,
                                     progress_callback=bulk_progress,

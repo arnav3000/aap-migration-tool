@@ -6,7 +6,9 @@ This module provides commands for executing migrations from source AAP to target
 
 import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import click
 
@@ -62,7 +64,7 @@ PHASE1_RESOURCE_TYPES = [
 
 # Phase 2: Project SCM Patching + Automation Definitions
 # (Logic phase, no resources to import - handled by import --phase phase2)
-PHASE2_RESOURCE_TYPES = []
+PHASE2_RESOURCE_TYPES: list[str] = []
 
 # Phase 3 resources (now part of Phase 2 logic, but kept for reference/imports)
 PHASE3_RESOURCE_TYPES = [
@@ -74,7 +76,8 @@ PHASE3_RESOURCE_TYPES = [
     "settings",  # Global system settings
 ]
 
-async def _map_managed_credential_types(source_client, target_client, state) -> int:
+
+async def _map_managed_credential_types(source_client: Any, target_client: Any, state: Any) -> int:
     """Create ID mappings for managed (built-in) credential types.
 
     Managed credential types (Machine, Source Control, Vault, etc.) exist on both
@@ -148,7 +151,7 @@ def _scan_scm_inventory_source_projects(xformed_dir: Path) -> set[int]:
     Returns:
         Set of project source IDs referenced by SCM inventory sources
     """
-    referenced_projects = set()
+    referenced_projects: set[int] = set()
     inv_sources_dir = xformed_dir / "inventory_sources"
 
     if not inv_sources_dir.exists():
@@ -187,6 +190,43 @@ def _scan_scm_inventory_source_projects(xformed_dir: Path) -> set[int]:
     return referenced_projects
 
 
+def _call_command(command: str, ctx: MigrationContext, **kwargs: Any) -> Any:
+    """Invoke a CLI subcommand programmatically without the API service layer.
+
+    The Stack 2/5 refactor briefly routed through
+    ``aap_migration.api.services._core.call_command``, which does not exist
+    in-tree (Stack 3 lands the API layer). Until a shared core exists outside
+    ``api.*`` (e.g. ``aap_migration/core/``), invoke the click commands
+    directly so both CLI and future API workers share this helper instead of
+    CLI depending on an API-private module.
+    """
+    if command == "prep":
+        from aap_migration.cli.commands.prep import prep as prep_cmd
+
+        sub_ctx = click.Context(prep_cmd)
+        sub_ctx.obj = ctx
+        return sub_ctx.invoke(prep_cmd, **kwargs)
+    if command == "export":
+        from aap_migration.cli.commands.export_import import export
+
+        sub_ctx = click.Context(export)
+        sub_ctx.obj = ctx
+        return sub_ctx.invoke(export, **kwargs)
+    if command == "transform":
+        from aap_migration.cli.commands.transform import transform as transform_cmd
+
+        sub_ctx = click.Context(transform_cmd)
+        sub_ctx.obj = ctx
+        return sub_ctx.invoke(transform_cmd, **kwargs)
+    if command == "import":
+        from aap_migration.cli.commands.export_import import import_cmd
+
+        sub_ctx = click.Context(import_cmd)
+        sub_ctx.obj = ctx
+        return sub_ctx.invoke(import_cmd, **kwargs)
+    raise ValueError(f"Unknown migration subcommand: {command}")
+
+
 def _run_migration_workflow(
     ctx: MigrationContext,
     resource_type: tuple[str, ...],
@@ -194,6 +234,8 @@ def _run_migration_workflow(
     resume: bool,
     skip_prep: bool = False,
     phase: str = "all",
+    should_abort: Callable[[], bool] | None = None,
+    base_dir: Path | None = None,
 ) -> None:
     """Execute the four-phase migration workflow: prep → export → transform → import.
 
@@ -208,17 +250,39 @@ def _run_migration_workflow(
         resume: Resume from checkpoint
         skip_prep: Skip the prep phase (use existing schemas)
         phase: Import phase - "phase1" (up to projects), "phase2" (patching), "phase3" (job_templates), or "all"
+        should_abort: Optional zero-arg callable polled before each mutating
+            phase (export/transform/import/patch). When it returns True the
+            workflow raises ``click.ClickException`` (nonzero exit) so an
+            operator cancel is never reported as success; completed phases
+            are kept and remaining phases are skipped. CLI callers omit
+            it (no polling); API workers pass their cancel flag.
     """
-    from aap_migration.cli.commands.export_import import export, import_cmd
     from aap_migration.cli.commands.patch_projects import patch_project_scm_details
-    from aap_migration.cli.commands.prep import prep as prep_cmd
-    from aap_migration.cli.commands.transform import transform as transform_cmd
     from aap_migration.resources import get_exportable_types, get_importable_types
 
-    # Define directories for workflow
-    schemas_dir = Path("schemas")
-    export_dir = Path("exports")
-    xformed_dir = Path("xformed")
+    def _check_abort(label: str) -> None:
+        """Raise when the caller's abort hook fires (API cancel).
+
+        A cancelled migration must never report success: raising
+        ``click.ClickException`` makes the process exit nonzero so any
+        supervisor using the returncode==0-means-success contract records
+        the run as cancelled, not completed. Completed phases are kept;
+        remaining phases are skipped.
+        """
+        if should_abort is not None and should_abort():
+            echo_warning(f"Cancel requested: stopping before {label}; later phases skipped.")
+            raise click.ClickException(
+                f"Migration cancelled by operator before {label}; "
+                "completed phases kept, remaining phases skipped."
+            )
+
+    # Define directories for workflow. CLI callers omit base_dir (CWD
+    # behavior preserved); API workers pass their isolated job workdir so
+    # sequential migrates never share exports in the server CWD.
+    _root = base_dir if base_dir is not None else Path.cwd()
+    schemas_dir = _root / "schemas"
+    export_dir = _root / "exports"
+    xformed_dir = _root / "xformed"
 
     # ============================================
     # PHASE 0: PREP (Optional)
@@ -227,11 +291,10 @@ def _run_migration_workflow(
         echo_info("Phase 0: Discovering endpoints and generating schemas...")
         click.echo()
 
-        # Call prep command programmatically
-        prep_ctx = click.Context(prep_cmd)
-        prep_ctx.obj = ctx
-        prep_ctx.invoke(
-            prep_cmd,
+        # Call prep command programmatically via _call_command (direct in-process click dispatch)
+        _call_command(
+            "prep",
+            ctx,
             output_dir=schemas_dir,
             force=force,
         )
@@ -271,15 +334,14 @@ def _run_migration_workflow(
     # ============================================
     # PHASE 1: EXPORT
     # ============================================
+    _check_abort("export")
     echo_info("Phase 1: Exporting RAW data from AAP 2.3...")
     click.echo()
 
-    # Call export command programmatically
-    # Create a Click context for export command
-    export_ctx = click.Context(export)
-    export_ctx.obj = ctx
-    export_ctx.invoke(
-        export,
+    # Call export command programmatically via _call_command (direct in-process click dispatch)
+    _call_command(
+        "export",
+        ctx,
         resource_type=resource_types,
         output=export_dir,
         force=force,
@@ -294,17 +356,17 @@ def _run_migration_workflow(
     # ============================================
     # PHASE 2: TRANSFORM
     # ============================================
+    _check_abort("transform")
     echo_info("Phase 2: Transforming data for AAP 2.6 compatibility...")
     click.echo()
 
-    # Call transform command programmatically
-    transform_ctx = click.Context(transform_cmd)
-    transform_ctx.obj = ctx
-    transform_ctx.invoke(
-        transform_cmd,
+    # Call transform command programmatically via _call_command (direct in-process click dispatch)
+    _call_command(
+        "transform",
+        ctx,
         input_dir=export_dir,
         output_dir=xformed_dir,
-        schema_file=Path("schemas/schema_comparison.json"),
+        schema_file=schemas_dir / "schema_comparison.json",
         force=force,
         resource_type=resource_types if resource_types != list(FULLY_SUPPORTED_TYPES) else (),
         quiet=False,
@@ -318,17 +380,16 @@ def _run_migration_workflow(
     # ============================================
     # PHASE 3: IMPORT
     # ============================================
-    # Import context
-    import_ctx = click.Context(import_cmd)
-    import_ctx.obj = ctx
-
-    # Helper to run import for specific types
-    def run_import(types, phase_label, import_phase=None):
+    # Helper to run import for specific types. An abort raises
+    # ClickException (nonzero exit) instead of returning normally.
+    def run_import(types: list[str], phase_label: str, import_phase: str | None = None) -> None:
         if not types:
             return
+        _check_abort(f"import ({phase_label})")
         echo_info(f"Phase 3 ({phase_label}): Importing resources...")
-        import_ctx.invoke(
-            import_cmd,
+        _call_command(
+            "import",
+            ctx,
             resource_type=types,
             input_dir=xformed_dir,
             force=force,
@@ -349,13 +410,17 @@ def _run_migration_workflow(
         run_import(types, "Infrastructure & Projects", import_phase="phase1")
 
     elif phase == "phase2":
+        _check_abort("import (phase2)")
         # Patch Projects + Import Phase 3 resources
-        echo_info("Phase 2 (Patching + Automation Import): Patching Projects and Importing Automation Definitions...")
+        echo_info(
+            "Phase 2 (Patching + Automation Import): Patching Projects and Importing Automation Definitions..."
+        )
 
         # CRITICAL: Reinitialize HTTP clients before phase2
         # If phase1 was run previously, its event loop closed and clients are invalid
-        from aap_migration.client.aap_target_client import AAPTargetClient
         from aap_migration.client.aap_source_client import AAPSourceClient
+        from aap_migration.client.aap_target_client import AAPTargetClient
+
         ctx._target_client = AAPTargetClient(
             config=ctx.config.target,
             rate_limit=ctx.config.performance.rate_limit,
@@ -374,8 +439,9 @@ def _run_migration_workflow(
         )
 
         # Call import_cmd with phase2 to trigger combined logic
-        import_ctx.invoke(
-            import_cmd,
+        _call_command(
+            "import",
+            ctx,
             input_dir=xformed_dir,
             force=force,
             resume=resume,
@@ -392,6 +458,7 @@ def _run_migration_workflow(
         run_import(types1, "Infrastructure & Projects", import_phase="phase1")
 
         # 2. Patch Projects (Phase 2 logic) - Smart conditional patching
+        _check_abort("project patching")
         should_patch = False
         patch_all = False
         scm_project_ids = None
@@ -416,7 +483,7 @@ def _run_migration_workflow(
                 echo_info("Phase 2 (Patching): Patching all migrated projects...")
             else:
                 echo_info(
-                    f"Phase 2 (Patching): Patching {len(scm_project_ids)} "
+                    f"Phase 2 (Patching): Patching {len(cast(set[int], scm_project_ids))} "
                     f"projects referenced by SCM inventory sources..."
                 )
 
@@ -425,6 +492,7 @@ def _run_migration_workflow(
             # client's connection pool invalid. We need a fresh client for this new
             # asyncio.run() context.
             from aap_migration.client.aap_target_client import AAPTargetClient
+
             ctx._target_client = AAPTargetClient(
                 config=ctx.config.target,
                 rate_limit=ctx.config.performance.rate_limit,
@@ -434,7 +502,7 @@ def _run_migration_workflow(
                 max_keepalive_connections=ctx.config.performance.http_max_keepalive_connections,
             )
 
-            async def run_patch():
+            async def run_patch() -> None:
                 await patch_project_scm_details(
                     ctx,
                     xformed_dir,
@@ -461,6 +529,7 @@ def _run_migration_workflow(
         # The patch phase closed its event loop, making clients invalid
         from aap_migration.client.aap_source_client import AAPSourceClient
         from aap_migration.client.aap_target_client import AAPTargetClient
+
         ctx._target_client = AAPTargetClient(
             config=ctx.config.target,
             rate_limit=ctx.config.performance.rate_limit,
@@ -513,7 +582,7 @@ def _run_migration_workflow(
                 session.query(MigrationProgress)
                 .filter(
                     MigrationProgress.status == "failed",
-                    MigrationProgress.resource_type.in_(resource_types)
+                    MigrationProgress.resource_type.in_(resource_types),
                 )
                 .count()
             )
@@ -524,7 +593,7 @@ def _run_migration_workflow(
                     session.query(MigrationProgress.resource_type)
                     .filter(
                         MigrationProgress.status == "failed",
-                        MigrationProgress.resource_type.in_(resource_types)
+                        MigrationProgress.resource_type.in_(resource_types),
                     )
                     .distinct()
                     .all()
@@ -539,9 +608,17 @@ def _run_migration_workflow(
                 click.echo()
 
                 if len(failed_rtypes) == 1:
-                    click.echo(click.style(f"   aap-bridge migration-report --resource-type {failed_rtypes[0]}", fg="yellow", bold=True))
+                    click.echo(
+                        click.style(
+                            f"   aap-bridge migration-report --resource-type {failed_rtypes[0]}",
+                            fg="yellow",
+                            bold=True,
+                        )
+                    )
                 else:
-                    click.echo(click.style("   aap-bridge migration-report", fg="yellow", bold=True))
+                    click.echo(
+                        click.style("   aap-bridge migration-report", fg="yellow", bold=True)
+                    )
 
                 click.echo()
                 click.echo("=" * 80)
@@ -583,7 +660,14 @@ def _run_migration_workflow(
     help="Import phase: phase1 (up to projects), phase2 (patch projects and automation definitions), all (complete)",
 )
 @click.pass_context
-def migrate(ctx, resource_type, force, resume, skip_prep, phase) -> None:
+def migrate(
+    ctx: Any,
+    resource_type: tuple[str, ...],
+    force: bool,
+    resume: bool,
+    skip_prep: bool,
+    phase: str,
+) -> None:
     """Execute migration from AAP 2.3 to 2.6.
 
     Runs the complete four-phase workflow:
@@ -667,7 +751,7 @@ def status(ctx: MigrationContext) -> None:
         state = ctx.migration_state
 
         # Overall progress
-        completed_phases = []
+        completed_phases: list[str] = []
         pending_phases = MIGRATION_PHASES.copy()
 
         rows = []
@@ -756,7 +840,7 @@ def resume(
 
         click.echo()
 
-    async def resume_migration():
+    async def resume_migration() -> None:
         _coordinator = MigrationCoordinator(
             config=ctx.config,
             source_client=ctx.source_client,

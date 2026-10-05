@@ -3,7 +3,7 @@
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.schema.models import ComparisonResult
 from aap_migration.utils.logging import get_logger
@@ -141,7 +141,7 @@ def load_comparison(schema_file: Path | str) -> dict[str, Any]:
         generated_at=data.get("generated_at"),
     )
 
-    return data
+    return cast(dict[str, Any], data)
 
 
 def load_schemas(schemas_dir: Path | str, version: str = "2.3") -> dict[str, dict[str, Any]]:
@@ -176,7 +176,7 @@ def load_schemas(schemas_dir: Path | str, version: str = "2.3") -> dict[str, dic
         resource_types=len(schemas),
     )
 
-    return schemas
+    return cast(dict[str, dict[str, Any]], schemas)
 
 
 def schema_files_exist(schemas_dir: Path | str) -> bool:

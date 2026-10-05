@@ -12,7 +12,11 @@ from typing import Any
 from aap_migration.client.aap_target_client import AAPTargetClient
 from aap_migration.config import MigrationConfig, PerformanceConfig
 from aap_migration.migration.state import MigrationState
-from aap_migration.migration.transformer import SkipResourceError, create_transformer
+from aap_migration.migration.transformer import (
+    SkipResourceError,
+    create_transformer,
+    filter_hosts_to_known_inventories,
+)
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -74,7 +78,7 @@ class ParallelTransformCoordinator:
         Returns:
             Transform statistics for this resource type
         """
-        stats = {
+        stats: dict[str, Any] = {
             "resource_type": resource_type,
             "count": 0,
             "failed": 0,
@@ -225,17 +229,12 @@ class ParallelTransformCoordinator:
                         progress_callback(resource_type, stats)
 
                 # 3. Filter hosts whose inventory is not in id_mappings
+                # (shared helper with the CLI transform path).
                 if resource_type == "hosts":
-                    filtered_batch = []
-                    for host in transformed_batch:
-                        inventory_id = host.get("inventory")
-                        if inventory_id and self.migration_state.has_source_mapping(
-                            "inventories", inventory_id
-                        ):
-                            filtered_batch.append(host)
-                        else:
-                            stats["skipped_missing_inventory"] += 1
-                    transformed_batch = filtered_batch
+                    transformed_batch, skipped = filter_hosts_to_known_inventories(
+                        transformed_batch, self.migration_state
+                    )
+                    stats["skipped_missing_inventory"] += skipped
 
                 # 4. Pre-populate ID mappings from target (credentials/credential_types)
                 if resource_type in ["credentials", "credential_types"] and self.target_client:

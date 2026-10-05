@@ -22,9 +22,9 @@ import math
 import random
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, cast
 
 from aap_migration.client.exceptions import NetworkError, ServerError
 from aap_migration.migration.database import get_session
@@ -71,17 +71,43 @@ from aap_migration.validate.models import (
 logger = get_logger(__name__)
 
 FIELD_PRUNE = {
-    "id", "type", "url", "related", "summary_fields", "created", "modified",
-    "_source_id", "extra_vars", "survey_spec", "extra_data",
-    "notification_configuration", "inputs", "injectors", "variables", "nodes",
-    "last_job_run", "next_job_run", "last_job_failed", "status",
-    "last_update_failed", "last_updated", "current_job",
-    "local_path", "client_id",
+    "id",
+    "type",
+    "url",
+    "related",
+    "summary_fields",
+    "created",
+    "modified",
+    "_source_id",
+    "extra_vars",
+    "survey_spec",
+    "extra_data",
+    "notification_configuration",
+    "inputs",
+    "injectors",
+    "variables",
+    "nodes",
+    "last_job_run",
+    "next_job_run",
+    "last_job_failed",
+    "status",
+    "last_update_failed",
+    "last_updated",
+    "current_job",
+    "local_path",
+    "client_id",
     "opa_query_path",
-    "inventory_sources_with_failures", "total_hosts",
-    "capacity", "jobs_total", "policy_instance_percentage",
-    "next_run", "last_run",
-    "last_login", "dtstart", "dtend", "instances",
+    "inventory_sources_with_failures",
+    "total_hosts",
+    "capacity",
+    "jobs_total",
+    "policy_instance_percentage",
+    "next_run",
+    "last_run",
+    "last_login",
+    "dtstart",
+    "dtend",
+    "instances",
 }
 
 # Export/API alias → canonical comparison field name
@@ -110,9 +136,16 @@ FK_FIELDS: dict[str, str | None] = {
 }
 
 _ORG_SCOPED_TYPES = {
-    "projects", "inventories", "credentials", "job_templates",
-    "workflow_job_templates", "teams", "notification_templates",
-    "execution_environments", "labels", "applications",
+    "projects",
+    "inventories",
+    "credentials",
+    "job_templates",
+    "workflow_job_templates",
+    "teams",
+    "notification_templates",
+    "execution_environments",
+    "labels",
+    "applications",
 }
 
 # T4 host field sample: Cochran (99% confidence, 4.5% MoE) + fixed seed
@@ -189,10 +222,10 @@ def _inventory_id_from_obj(obj: dict) -> int | None:
 
 def _build_inventory_org_maps(
     exports: dict[str, list[dict]],
-) -> tuple[dict[str, tuple[str, Optional[int]]], dict[int, tuple[str, Optional[int]]]]:
+) -> tuple[dict[str, tuple[str, int | None]], dict[int, tuple[str, int | None]]]:
     """inventory name/id → (org_name, org_id) for parent-org resolution."""
-    by_name: dict[str, tuple[str, Optional[int]]] = {}
-    by_id: dict[int, tuple[str, Optional[int]]] = {}
+    by_name: dict[str, tuple[str, int | None]] = {}
+    by_id: dict[int, tuple[str, int | None]] = {}
     for inv in exports.get("inventories", []):
         org_name, org_id = _get_org_info(inv)
         if not org_name:
@@ -208,9 +241,9 @@ def _build_inventory_org_maps(
 
 def _org_from_inventory_parent(
     obj: dict,
-    inv_org_by_name: dict[str, tuple[str, Optional[int]]],
-    inv_org_by_id: dict[int, tuple[str, Optional[int]]],
-) -> tuple[str, Optional[int]]:
+    inv_org_by_name: dict[str, tuple[str, int | None]],
+    inv_org_by_id: dict[int, tuple[str, int | None]],
+) -> tuple[str, int | None]:
     inv_name = _parent_ref_name(obj, "inventory")
     if inv_name and inv_name in inv_org_by_name:
         return inv_org_by_name[inv_name]
@@ -222,11 +255,11 @@ def _org_from_inventory_parent(
 
 def _build_ujt_org_map(
     exports: dict[str, list[dict]],
-    inv_org_by_name: dict[str, tuple[str, Optional[int]]],
-    inv_org_by_id: dict[int, tuple[str, Optional[int]]],
-) -> dict[str, tuple[str, Optional[int]]]:
+    inv_org_by_name: dict[str, tuple[str, int | None]],
+    inv_org_by_id: dict[int, tuple[str, int | None]],
+) -> dict[str, tuple[str, int | None]]:
     """unified_job_template name → org (JT / WJT / project / inventory source)."""
-    ujt: dict[str, tuple[str, Optional[int]]] = {}
+    ujt: dict[str, tuple[str, int | None]] = {}
     for rtype in ("job_templates", "workflow_job_templates", "projects"):
         for obj in exports.get(rtype, []):
             org_name, org_id = _get_org_info(obj)
@@ -246,10 +279,10 @@ def _build_ujt_org_map(
 def _resolve_object_org(
     rtype: str,
     obj: dict,
-    inv_org_by_name: dict[str, tuple[str, Optional[int]]],
-    inv_org_by_id: dict[int, tuple[str, Optional[int]]],
-    ujt_org_by_name: dict[str, tuple[str, Optional[int]]],
-) -> tuple[str, Optional[int]]:
+    inv_org_by_name: dict[str, tuple[str, int | None]],
+    inv_org_by_id: dict[int, tuple[str, int | None]],
+    ujt_org_by_name: dict[str, tuple[str, int | None]],
+) -> tuple[str, int | None]:
     """Resolve organization, including via inventory / unified_job_template parents."""
     org_name, org_id = _get_org_info(obj)
     if org_name:
@@ -294,9 +327,9 @@ def _object_in_org_scope(
     rtype: str,
     obj: dict,
     selected: set[str],
-    inv_org_by_name: dict[str, tuple[str, Optional[int]]],
-    inv_org_by_id: dict[int, tuple[str, Optional[int]]],
-    ujt_org_by_name: dict[str, tuple[str, Optional[int]]],
+    inv_org_by_name: dict[str, tuple[str, int | None]],
+    inv_org_by_id: dict[int, tuple[str, int | None]],
+    ujt_org_by_name: dict[str, tuple[str, int | None]],
 ) -> bool:
     """Whether an export object belongs in an --orgs scoped run.
 
@@ -309,7 +342,11 @@ def _object_in_org_scope(
     if rtype == "organizations":
         return _object_display_name(obj) in selected
     org_name, _ = _resolve_object_org(
-        rtype, obj, inv_org_by_name, inv_org_by_id, ujt_org_by_name,
+        rtype,
+        obj,
+        inv_org_by_name,
+        inv_org_by_id,
+        ujt_org_by_name,
     )
     return bool(org_name) and org_name in selected
 
@@ -394,11 +431,7 @@ def _filter_obj_inventory_to_exports(
     """Keep DB inventory rows whose source_id remains in filtered exports."""
     allowed: dict[str, set[int]] = {}
     for rtype, objects in exports.items():
-        sids = {
-            sid
-            for sid in (_object_source_id(o) for o in objects)
-            if sid is not None
-        }
+        sids = {sid for sid in (_object_source_id(o) for o in objects) if sid is not None}
         allowed[rtype] = sids
 
     out: dict[str, list[tuple]] = {}
@@ -411,12 +444,7 @@ def _filter_obj_inventory_to_exports(
 
 
 def _object_display_name(obj: dict) -> str:
-    return (
-        obj.get("name")
-        or obj.get("username")
-        or obj.get("hostname")
-        or ""
-    )
+    return obj.get("name") or obj.get("username") or obj.get("hostname") or ""
 
 
 def _parent_ref_name(obj: dict, field: str) -> str:
@@ -544,9 +572,7 @@ def _classify_unmatched_gap(
             return "skipped", "skipped", explanation
         if status_val == "pending":
             return "unexplained", "pending", "Pending migration"
-        explanation = (
-            f"Status: {status_val}" if status_val else "Not tracked in migration DB"
-        )
+        explanation = f"Status: {status_val}" if status_val else "Not tracked in migration DB"
         return "unexplained", "pending", explanation
 
     if live_mode:
@@ -633,7 +659,7 @@ def _resolve_id_list_to_names(
         else:
             rid = item
         try:
-            rid_int = int(rid)
+            rid_int = int(cast(str, rid))
         except (TypeError, ValueError):
             names.append(str(rid))
             continue
@@ -671,11 +697,13 @@ def _schedules_display_value(obj: dict) -> list[dict[str, Any]]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        rows.append({
-            "name": str(item.get("name") or ""),
-            "rrule": str(item.get("rrule") or ""),
-            "enabled": bool(item.get("enabled", False)),
-        })
+        rows.append(
+            {
+                "name": str(item.get("name") or ""),
+                "rrule": str(item.get("rrule") or ""),
+                "enabled": bool(item.get("enabled", False)),
+            }
+        )
     return sorted(rows, key=lambda r: (r["name"], r["rrule"]))
 
 
@@ -691,9 +719,7 @@ def _notifications_display_value(
     nt_map = (name_maps or {}).get("notification_templates", {})
     out: dict[str, list[str]] = {}
     for key, val in raw.items():
-        label = _NOTIF_EVENT_LABELS.get(
-            key, key.replace("notification_templates_", "") or key
-        )
+        label = _NOTIF_EVENT_LABELS.get(key, key.replace("notification_templates_", "") or key)
         names: list[str] = []
         if not isinstance(val, list):
             continue
@@ -707,7 +733,7 @@ def _notifications_display_value(
             else:
                 rid = item
             try:
-                rid_int = int(rid)
+                rid_int = int(cast(str, rid))
             except (TypeError, ValueError):
                 names.append(str(rid))
                 continue
@@ -841,9 +867,7 @@ async def _enrich_related_nested(
             return
         async with sem:
             if want_schedules:
-                obj["schedules"] = await _fetch_related_page(
-                    client, f"{api}/{oid}/schedules/"
-                )
+                obj["schedules"] = await _fetch_related_page(client, f"{api}/{oid}/schedules/")
             if notif_types:
                 notifications: dict[str, list] = {}
                 for event in notif_types:
@@ -869,6 +893,7 @@ async def _enrich_related_nested(
 # ---------------------------------------------------------------------------
 # Export loading
 # ---------------------------------------------------------------------------
+
 
 def load_exports(
     export_dir: Path,
@@ -926,13 +951,10 @@ def load_exports(
 # Database queries
 # ---------------------------------------------------------------------------
 
+
 def _get_db_resource_types(database_url: str) -> list[str]:
     with get_session(database_url) as session:
-        rows = (
-            session.query(MigrationProgress.resource_type)
-            .distinct()
-            .all()
-        )
+        rows = session.query(MigrationProgress.resource_type).distinct().all()
         return sorted(r[0] for r in rows)
 
 
@@ -979,6 +1001,7 @@ def _query_object_inventory(
 # ---------------------------------------------------------------------------
 # Field data
 # ---------------------------------------------------------------------------
+
 
 def build_field_data(
     exports: dict[str, list[dict]],
@@ -1032,7 +1055,9 @@ async def _list_resources_safe(
     )
     try:
         target_objects = await target_client.list_resources(
-            rtype, filters=filters, page_size=page_size,
+            rtype,
+            filters=filters,
+            page_size=page_size,
         )
     except (AuthenticationError, AuthorizationError) as exc:
         elapsed = time.monotonic() - type_start
@@ -1079,7 +1104,7 @@ async def _list_resources_safe(
         elapsed_s=round(elapsed, 1),
         filters=filters or {},
     )
-    return target_objects
+    return cast(list[dict[Any, Any]], target_objects)
 
 
 def _dedupe_by_id(objects: list[dict]) -> list[dict]:
@@ -1103,7 +1128,9 @@ async def _resolve_target_org_ids(
     name_to_id: dict[str, int] = {}
     for name in organizations:
         found = await _list_resources_safe(
-            target_client, "organizations", filters={"name": name},
+            target_client,
+            "organizations",
+            filters={"name": name},
         )
         match = next((o for o in found if _object_display_name(o) == name), None)
         if match is None:
@@ -1128,7 +1155,9 @@ async def _fetch_by_organization_ids(
     for oid in org_ids:
         objects.extend(
             await _list_resources_safe(
-                target_client, rtype, filters={"organization": oid},
+                target_client,
+                rtype,
+                filters={"organization": oid},
             )
         )
     return _dedupe_by_id(objects)
@@ -1145,7 +1174,9 @@ async def _fetch_children_by_parent_ids(
     for pid in parent_ids:
         objects.extend(
             await _list_resources_safe(
-                target_client, rtype, filters={parent_field: pid},
+                target_client,
+                rtype,
+                filters={parent_field: pid},
             )
         )
     return _dedupe_by_id(objects)
@@ -1173,11 +1204,15 @@ async def _fetch_live_org_scoped(
         orgs: list[dict] = []
         for name, oid in org_name_to_id.items():
             rows = await _list_resources_safe(
-                target_client, "organizations", filters={"id": oid},
+                target_client,
+                "organizations",
+                filters={"id": oid},
             )
             if not rows:
                 rows = await _list_resources_safe(
-                    target_client, "organizations", filters={"name": name},
+                    target_client,
+                    "organizations",
+                    filters={"name": name},
                 )
             orgs.extend(rows)
         fetched["organizations"] = _dedupe_by_id(orgs)
@@ -1188,7 +1223,8 @@ async def _fetch_live_org_scoped(
 
     # Direct org-owned types (everything else that is not parent-scoped)
     org_owned = [
-        t for t in types
+        t
+        for t in types
         if t not in ORG_SCOPE_SKIP_TYPES
         and t != "organizations"
         and t not in INVENTORY_CHILD_TYPES
@@ -1197,7 +1233,9 @@ async def _fetch_live_org_scoped(
     ]
     for rtype in org_owned:
         fetched[rtype] = await _fetch_by_organization_ids(
-            target_client, rtype, org_ids,
+            target_client,
+            rtype,
+            org_ids,
         )
 
     # Parent inventories for children / inventory_sources used by schedules
@@ -1206,7 +1244,9 @@ async def _fetch_live_org_scoped(
     )
     if need_inventory_parents and not fetched.get("inventories"):
         invs = await _fetch_by_organization_ids(
-            target_client, "inventories", org_ids,
+            target_client,
+            "inventories",
+            org_ids,
         )
         if "inventories" in type_set:
             fetched["inventories"] = invs
@@ -1214,14 +1254,14 @@ async def _fetch_live_org_scoped(
     else:
         inventory_rows = fetched.get("inventories", [])
 
-    inv_ids = [
-        tid for tid in (_object_target_id(o) for o in inventory_rows)
-        if tid is not None
-    ]
+    inv_ids = [tid for tid in (_object_target_id(o) for o in inventory_rows) if tid is not None]
 
     for rtype in sorted(child_types):
         fetched[rtype] = await _fetch_children_by_parent_ids(
-            target_client, rtype, "inventory", inv_ids,
+            target_client,
+            rtype,
+            "inventory",
+            inv_ids,
         )
 
     if need_schedules:
@@ -1229,12 +1269,17 @@ async def _fetch_live_org_scoped(
         for ptype in ("job_templates", "workflow_job_templates", "projects"):
             if not fetched.get(ptype):
                 rows = await _fetch_by_organization_ids(
-                    target_client, ptype, org_ids,
+                    target_client,
+                    ptype,
+                    org_ids,
                 )
                 fetched[ptype] = rows
         if not fetched.get("inventory_sources"):
             rows = await _fetch_children_by_parent_ids(
-                target_client, "inventory_sources", "inventory", inv_ids,
+                target_client,
+                "inventory_sources",
+                "inventory",
+                inv_ids,
             )
             fetched["inventory_sources"] = rows
 
@@ -1245,17 +1290,23 @@ async def _fetch_live_org_scoped(
                 if tid is not None:
                     parent_ids.append(tid)
         fetched["schedules"] = await _fetch_children_by_parent_ids(
-            target_client, "schedules", "unified_job_template", parent_ids,
+            target_client,
+            "schedules",
+            "unified_job_template",
+            parent_ids,
         )
 
     if node_types or "workflow_job_templates" in type_set:
         if not fetched.get("workflow_job_templates"):
             rows = await _fetch_by_organization_ids(
-                target_client, "workflow_job_templates", org_ids,
+                target_client,
+                "workflow_job_templates",
+                org_ids,
             )
             fetched["workflow_job_templates"] = rows
         nodes = await _fetch_workflow_nodes_for_templates(
-            target_client, fetched.get("workflow_job_templates", []),
+            target_client,
+            fetched.get("workflow_job_templates", []),
         )
         fetched["workflow_nodes"] = nodes
         for ntype in node_types:
@@ -1278,7 +1329,8 @@ async def _fetch_workflow_nodes_for_templates(
         if wid is None:
             continue
         page = await _fetch_related_page(
-            target_client, f"workflow_job_templates/{wid}/workflow_nodes/",
+            target_client,
+            f"workflow_job_templates/{wid}/workflow_nodes/",
         )
         nodes.extend(page)
     return _dedupe_by_id(nodes)
@@ -1360,7 +1412,9 @@ async def fetch_live_target(
             types=types,
         )
         fetched = await _fetch_live_org_scoped(
-            target_client, types, organizations,
+            target_client,
+            types,
+            organizations,
         )
     else:
         fetched = await _fetch_live_all_types(target_client, types)
@@ -1422,9 +1476,7 @@ async def fetch_live_target(
         for obj in src_objects:
             sid = _object_source_id(obj)
             if sid is not None:
-                src_by_id[sid] = _extract_field_values(
-                    obj, merged_cols, src_name_maps
-                )
+                src_by_id[sid] = _extract_field_values(obj, merged_cols, src_name_maps)
 
         # Index live targets by identity key
         tgt_by_identity: dict[tuple, dict] = {}
@@ -1458,9 +1510,7 @@ async def fetch_live_target(
                 continue
             mapping[sid] = tid_int
             matched_tids.add(tid_int)
-            tgt_by_sid[sid] = _extract_field_values(
-                tgt_obj, merged_cols, tgt_name_maps
-            )
+            tgt_by_sid[sid] = _extract_field_values(tgt_obj, merged_cols, tgt_name_maps)
 
         extras: list[int] = []
         for obj in target_objects:
@@ -1496,6 +1546,7 @@ async def fetch_live_target(
 # ---------------------------------------------------------------------------
 # T4 host sampling
 # ---------------------------------------------------------------------------
+
 
 def _cochran_sample_size(
     population: int,
@@ -1634,14 +1685,16 @@ def build_t4_host_sampling(
     for inv in all_invs:
         sc = len(src_by_inv.get(inv, []))
         tc = len(tgt_by_inv.get(inv, []))
-        details.append(InventoryCountDetail(
-            inventory=inv,
-            source_id=src_inv_ids.get(inv),
-            target_id=tgt_inv_ids.get(inv),
-            source_count=sc,
-            target_count=tc,
-            delta=sc - tc,
-        ))
+        details.append(
+            InventoryCountDetail(
+                inventory=inv,
+                source_id=src_inv_ids.get(inv),
+                target_id=tgt_inv_ids.get(inv),
+                source_count=sc,
+                target_count=tc,
+                delta=sc - tc,
+            )
+        )
         if sc == tc:
             matching_inv += 1
         else:
@@ -1716,6 +1769,7 @@ def build_t4_host_sampling(
 # ValidationResult builder
 # ---------------------------------------------------------------------------
 
+
 def _get_obj_name(exports: dict[str, list[dict]], rtype: str, sid: int) -> str:
     for obj in exports.get(rtype, []):
         if _object_source_id(obj) == sid:
@@ -1727,7 +1781,7 @@ def _compute_field_parity(
     field_data: dict[str, dict],
     exports: dict[str, list[dict]],
     src_to_tgt: dict[str, dict[int, int]],
-    obj_to_org: dict[tuple[str, int], tuple[str, Optional[int]]],
+    obj_to_org: dict[tuple[str, int], tuple[str, int | None]],
 ) -> tuple[dict[str, T3FieldParity], dict[str, list[FieldFinding]]]:
     """Compare source vs target field values from live field_data.
 
@@ -1773,18 +1827,22 @@ def _compute_field_parity(
             for i, col in enumerate(cols):
                 sv = src_vals[i] if i < len(src_vals) else None
                 tv = tgt_vals[i] if i < len(tgt_vals) else None
-                if json.dumps(sv, separators=(",", ":"), default=str) != json.dumps(tv, separators=(",", ":"), default=str):
+                if json.dumps(sv, separators=(",", ":"), default=str) != json.dumps(
+                    tv, separators=(",", ":"), default=str
+                ):
                     has_mismatch = True
-                    findings.append(FieldFinding(
-                        name=obj_name,
-                        organization=org_name,
-                        source_id=sid,
-                        target_id=tid,
-                        field=col,
-                        source_value=_format_finding_value(sv),
-                        target_value=_format_finding_value(tv),
-                        tier="T3",
-                    ))
+                    findings.append(
+                        FieldFinding(
+                            name=obj_name,
+                            organization=org_name,
+                            source_id=sid,
+                            target_id=tid,
+                            field=col,
+                            source_value=_format_finding_value(sv),
+                            target_value=_format_finding_value(tv),
+                            tier="T3",
+                        )
+                    )
 
             if has_mismatch:
                 mismatching += 1
@@ -1815,10 +1873,7 @@ async def build_auditor_cross_check(
     """
     from aap_migration.migration.auditor_roles import list_platform_auditor_user_ids
 
-    source_auditors = [
-        u for u in exports.get("users", [])
-        if u.get("is_system_auditor") is True
-    ]
+    source_auditors = [u for u in exports.get("users", []) if u.get("is_system_auditor") is True]
 
     # Live target users (by username)
     if target_users is None and target_client is not None:
@@ -1838,9 +1893,7 @@ async def build_auditor_cross_check(
     gateway_ids: set[int] = set()
     gateway_error: str | None = None
     if target_client is not None:
-        _, gateway_ids, gateway_error = await list_platform_auditor_user_ids(
-            target_client
-        )
+        _, gateway_ids, gateway_error = await list_platform_auditor_user_ids(target_client)
 
     # Controller-flag set used only when Gateway listing fails
     controller_auditor_ids: set[int] = {
@@ -1876,14 +1929,16 @@ async def build_auditor_cross_check(
             except (TypeError, ValueError):
                 tid = None
         has_assignment = tid is not None and tid in assigned_ids
-        details.append(AuditorDetail(
-            username=username,
-            source_id=sid,
-            target_id=tid,
-            source_is_system_auditor=True,
-            gateway_has_platform_auditor=has_assignment,
-            match=has_assignment,
-        ))
+        details.append(
+            AuditorDetail(
+                username=username,
+                source_id=sid,
+                target_id=tid,
+                source_is_system_auditor=True,
+                gateway_has_platform_auditor=has_assignment,
+                match=has_assignment,
+            )
+        )
 
     # Extra assignees on target not present as source system auditors
     tid_to_username = {
@@ -1895,14 +1950,16 @@ async def build_auditor_cross_check(
         username = tid_to_username.get(tid, "")
         if username and username in source_usernames:
             continue
-        details.append(AuditorDetail(
-            username=username or f"user-{tid}",
-            source_id=None,
-            target_id=tid,
-            source_is_system_auditor=False,
-            gateway_has_platform_auditor=True,
-            match=False,
-        ))
+        details.append(
+            AuditorDetail(
+                username=username or f"user-{tid}",
+                source_id=None,
+                target_id=tid,
+                source_is_system_auditor=False,
+                gateway_has_platform_auditor=True,
+                match=False,
+            )
+        )
 
     mismatches = sum(1 for d in details if not d.match)
     result = AuditorCrossCheck(
@@ -1937,9 +1994,9 @@ def _build_extra_details(
     rtype: str,
     extra_ids: list[int],
     target_objects: list[dict],
-    inv_org_by_name: dict[str, tuple[str, Optional[int]]],
-    inv_org_by_id: dict[int, tuple[str, Optional[int]]],
-    ujt_org_by_name: dict[str, tuple[str, Optional[int]]],
+    inv_org_by_name: dict[str, tuple[str, int | None]],
+    inv_org_by_id: dict[int, tuple[str, int | None]],
+    ujt_org_by_name: dict[str, tuple[str, int | None]],
     *,
     max_details: int = EXTRA_DETAILS_MAX_PER_TYPE,
 ) -> tuple[list[ExtraDetail], bool, int]:
@@ -1960,26 +2017,34 @@ def _build_extra_details(
     omitted = max(0, len(extra_ids) - max_details) if truncated else 0
     details: list[ExtraDetail] = []
     for tid in extra_ids[:max_details]:
-        obj = by_id.get(tid)
+        obj = cast(dict[Any, Any], by_id.get(tid))
         if obj is None:
-            details.append(ExtraDetail(
-                name=f"id:{tid}",
-                organization="",
-                parent_type=rtype,
-                target_id=tid,
-            ))
+            details.append(
+                ExtraDetail(
+                    name=f"id:{tid}",
+                    organization="",
+                    parent_type=rtype,
+                    target_id=tid,
+                )
+            )
             continue
         name = _object_display_name(obj) or f"id:{tid}"
         org_name, _ = _resolve_object_org(
-            rtype, obj, inv_org_by_name, inv_org_by_id, ujt_org_by_name,
+            rtype,
+            obj,
+            inv_org_by_name,
+            inv_org_by_id,
+            ujt_org_by_name,
         )
-        details.append(ExtraDetail(
-            name=name,
-            organization=org_name,
-            parent_type=rtype,
-            parent_name=_extra_detail_parent_name(rtype, obj),
-            target_id=tid,
-        ))
+        details.append(
+            ExtraDetail(
+                name=name,
+                organization=org_name,
+                parent_type=rtype,
+                parent_name=_extra_detail_parent_name(rtype, obj),
+                target_id=tid,
+            )
+        )
     return details, truncated, omitted
 
 
@@ -1988,9 +2053,9 @@ _SYNC_ENTRY_TYPES = ("projects", "inventory_sources")
 
 def _build_sync_entries(
     live_fetched: dict[str, list[dict]],
-    inv_org_by_name: dict[str, tuple[str, Optional[int]]],
-    inv_org_by_id: dict[int, tuple[str, Optional[int]]],
-    ujt_org_by_name: dict[str, tuple[str, Optional[int]]],
+    inv_org_by_name: dict[str, tuple[str, int | None]],
+    inv_org_by_id: dict[int, tuple[str, int | None]],
+    ujt_org_by_name: dict[str, tuple[str, int | None]],
 ) -> list[SyncEntry]:
     """Build sync status rows for all live target projects and inventory sources."""
     entries: list[SyncEntry] = []
@@ -2000,17 +2065,23 @@ def _build_sync_entries(
             tid = _object_target_id(obj)
             name = _object_display_name(obj) or (f"id:{tid}" if tid is not None else "unknown")
             org_name, _ = _resolve_object_org(
-                rtype, obj, inv_org_by_name, inv_org_by_id, ujt_org_by_name,
+                rtype,
+                obj,
+                inv_org_by_name,
+                inv_org_by_id,
+                ujt_org_by_name,
             )
-            entries.append(SyncEntry(
-                name=name,
-                resource_type=rtype,
-                organization=org_name,
-                target_id=tid,
-                sync_status=sync_status,
-                failed=failed,
-                last_job_id=job_id,
-            ))
+            entries.append(
+                SyncEntry(
+                    name=name,
+                    resource_type=rtype,
+                    organization=org_name,
+                    target_id=tid,
+                    sync_status=sync_status,
+                    failed=failed,
+                    last_job_id=job_id,
+                )
+            )
     return entries
 
 
@@ -2096,7 +2167,7 @@ def _workflow_node_field_display(node: dict | None, field: str) -> str:
     val = node.get(field)
     if val in (None, "", [], {}):
         return "—"
-    if isinstance(val, (dict, list)):
+    if isinstance(val, dict | list):
         return json.dumps(val, sort_keys=True, default=str)
     return str(val)
 
@@ -2231,8 +2302,8 @@ def _build_workflow_comparisons(
         src_nodes = _extract_workflow_nodes_from_export(src_wjt)
         tgt_nodes_for_wjt = target_nodes_by_wjt.get(tid, [])
 
-        src_by_ident = { _node_identifier(n): n for n in src_nodes if _node_identifier(n) }
-        tgt_by_ident = { _node_identifier(n): n for n in tgt_nodes_for_wjt if _node_identifier(n) }
+        src_by_ident = {_node_identifier(n): n for n in src_nodes if _node_identifier(n)}
+        tgt_by_ident = {_node_identifier(n): n for n in tgt_nodes_for_wjt if _node_identifier(n)}
         all_identifiers = sorted(set(src_by_ident) | set(tgt_by_ident))
 
         node_rows: list[WorkflowNodeRow] = []
@@ -2351,12 +2422,11 @@ def build_validation_result(
     organizations: list[str] | None = None,
 ) -> ValidationResult:
     """Build ValidationResult from exports + DB state, or exports vs live target."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     live_mode = mode == "validate-live" and live_target_counts is not None
     t4 = t4_host_sampling or T4HostSampling()
     t4_ran = bool(
-        t4.total_hosts_source or t4.total_hosts_target or t4.inventories_checked
-        or t4.sample_size
+        t4.total_hosts_source or t4.total_hosts_target or t4.inventories_checked or t4.sample_size
     )
     if mode == "validate-live":
         tiers = ["T1", "T2", "T3-live"]
@@ -2384,7 +2454,7 @@ def build_validation_result(
         organizations=list(organizations or []),
     )
 
-    obj_to_org: dict[tuple[str, int], tuple[str, Optional[int]]] = {}
+    obj_to_org: dict[tuple[str, int], tuple[str, int | None]] = {}
     inv_org_by_name, inv_org_by_id = _build_inventory_org_maps(exports)
     ujt_org_by_name = _build_ujt_org_map(exports, inv_org_by_name, inv_org_by_id)
     for rtype, objects in exports.items():
@@ -2393,36 +2463,45 @@ def build_validation_result(
             if sid is None:
                 continue
             org_name, org_id = _resolve_object_org(
-                rtype, obj, inv_org_by_name, inv_org_by_id, ujt_org_by_name,
+                rtype,
+                obj,
+                inv_org_by_name,
+                inv_org_by_id,
+                ujt_org_by_name,
             )
             if org_name:
                 obj_to_org[(rtype, sid)] = (org_name, org_id)
 
     # Target-side org maps for Extra-on-target detail resolution (live only)
-    tgt_inv_org_by_name: dict[str, tuple[str, Optional[int]]] = {}
-    tgt_inv_org_by_id: dict[int, tuple[str, Optional[int]]] = {}
-    tgt_ujt_org_by_name: dict[str, tuple[str, Optional[int]]] = {}
+    tgt_inv_org_by_name: dict[str, tuple[str, int | None]] = {}
+    tgt_inv_org_by_id: dict[int, tuple[str, int | None]] = {}
+    tgt_ujt_org_by_name: dict[str, tuple[str, int | None]] = {}
     if live_mode and live_fetched:
         tgt_inv_org_by_name, tgt_inv_org_by_id = _build_inventory_org_maps(
             live_fetched,
         )
         tgt_ujt_org_by_name = _build_ujt_org_map(
-            live_fetched, tgt_inv_org_by_name, tgt_inv_org_by_id,
+            live_fetched,
+            tgt_inv_org_by_name,
+            tgt_inv_org_by_id,
         )
 
     # Build status lookup from migration_progress for missing explanations
     # (DB mode and live mode when import inventory is provided)
     status_by_id: dict[tuple[str, int], tuple[str, str]] = {}
     for rtype, rows in obj_inventory.items():
-        for sid, sname, status, err, tid in rows:
-            status_by_id[(rtype, sid)] = (status or "", err or "")
+        for sid, _sname, status, err, _tid in rows:
+            status_by_id[(rtype, cast(int, sid))] = (status or "", err or "")
 
     # Compute T3 field parity if field_data available
     per_type_t3: dict[str, T3FieldParity] = {}
     per_type_findings: dict[str, list[FieldFinding]] = {}
     if field_data:
         per_type_t3, per_type_findings = _compute_field_parity(
-            field_data, exports, src_to_tgt, obj_to_org,
+            field_data,
+            exports,
+            src_to_tgt,
+            obj_to_org,
         )
 
     GLOBAL_ORG = "Global / Unscoped"
@@ -2432,7 +2511,7 @@ def build_validation_result(
     per_type_results: list[PerTypeResult] = []
 
     # Organization name → (source_id, target_id) for Org Health src/tgt display
-    org_id_by_name: dict[str, tuple[Optional[int], Optional[int]]] = {}
+    org_id_by_name: dict[str, tuple[int | None, int | None]] = {}
     org_src_to_tgt = src_to_tgt.get("organizations", {})
     for org_obj in exports.get("organizations", []):
         oname = _object_display_name(org_obj)
@@ -2445,10 +2524,7 @@ def build_validation_result(
         stats = all_stats.get(rtype, {})
         mapping = src_to_tgt.get(rtype, {})
         src_objects = exports.get(rtype, [])
-        src_ids = [
-            sid for o in src_objects
-            if (sid := _object_source_id(o)) is not None
-        ]
+        src_ids = [sid for o in src_objects if (sid := _object_source_id(o)) is not None]
         src_count = len(src_ids)
         org_scoped = bool(organizations)
 
@@ -2460,7 +2536,7 @@ def build_validation_result(
             matched = len(mapping)
         missing = max(0, src_count - matched)
         if live_mode:
-            tgt_count = live_target_counts.get(rtype, 0)
+            tgt_count = cast(dict[str, int], live_target_counts).get(rtype, 0)
             extra_count = len((live_extra_ids or {}).get(rtype, []))
         elif org_scoped:
             # Inventory is already filtered to scoped export source IDs.
@@ -2486,15 +2562,15 @@ def build_validation_result(
                 continue
             org_info = obj_to_org.get((rtype, sid))
             org_name = org_info[0] if org_info else ""
-            org_key = (
-                org_info[0] if org_info
-                else (GLOBAL_ORG if rtype in UNSCOPED_TYPES else "")
-            )
+            org_key = org_info[0] if org_info else (GLOBAL_ORG if rtype in UNSCOPED_TYPES else "")
 
             if sid not in mapping:
                 obj_name = _object_display_name(obj) or str(sid)
                 bucket, _obj_status, explanation = _classify_unmatched_gap(
-                    status_by_id, rtype, sid, live_mode=live_mode,
+                    status_by_id,
+                    rtype,
+                    sid,
+                    live_mode=live_mode,
                 )
                 if bucket == "failed":
                     explained_failures += 1
@@ -2502,13 +2578,15 @@ def build_validation_result(
                     explained_skips += 1
                 else:
                     unexplained += 1
-                missing_details.append(MissingDetail(
-                    name=obj_name,
-                    organization=org_name,
-                    parent_type=rtype,
-                    source_id=sid,
-                    explanation=explanation,
-                ))
+                missing_details.append(
+                    MissingDetail(
+                        name=obj_name,
+                        organization=org_name,
+                        parent_type=rtype,
+                        source_id=sid,
+                        explanation=explanation,
+                    )
+                )
 
             if not org_key:
                 continue
@@ -2538,7 +2616,10 @@ def build_validation_result(
 
             if rtype not in org_type_counts[org_key]:
                 org_type_counts[org_key][rtype] = {
-                    "source": 0, "matched": 0, "missing": 0, "field_mismatches": 0,
+                    "source": 0,
+                    "matched": 0,
+                    "missing": 0,
+                    "field_mismatches": 0,
                 }
             otc = org_type_counts[org_key][rtype]
             otc["source"] += 1
@@ -2561,30 +2642,31 @@ def build_validation_result(
             )
 
         t3 = per_type_t3.get(rtype, T3FieldParity())
-        type_field_mm = t3.mismatching
 
-        per_type_results.append(PerTypeResult(
-            resource_type=rtype,
-            display_name=rtype.replace("_", " ").title(),
-            t1_counts=T1Counts(
-                source=src_count,
-                target=tgt_count,
-                delta=src_count - tgt_count,
-                explained_failures=explained_failures,
-                explained_skips=explained_skips,
-                unexplained=unexplained,
-            ),
-            t2_existence=T2Existence(
-                matched=matched,
-                missing_on_target=missing,
-                extra_on_target=extra_count,
-                missing_details=missing_details,
-                extra_details=extra_details,
-                extra_truncated=extra_truncated,
-                extra_truncated_count=extra_omitted,
-            ),
-            t3_field_parity=t3,
-        ))
+        per_type_results.append(
+            PerTypeResult(
+                resource_type=rtype,
+                display_name=rtype.replace("_", " ").title(),
+                t1_counts=T1Counts(
+                    source=src_count,
+                    target=tgt_count,
+                    delta=src_count - tgt_count,
+                    explained_failures=explained_failures,
+                    explained_skips=explained_skips,
+                    unexplained=unexplained,
+                ),
+                t2_existence=T2Existence(
+                    matched=matched,
+                    missing_on_target=missing,
+                    extra_on_target=extra_count,
+                    missing_details=missing_details,
+                    extra_details=extra_details,
+                    extra_truncated=extra_truncated,
+                    extra_truncated_count=extra_omitted,
+                ),
+                t3_field_parity=t3,
+            )
+        )
 
     # Distribute missing_details to per-org
     for ptr in per_type_results:
@@ -2601,7 +2683,7 @@ def build_validation_result(
             if org_key in per_org_data:
                 per_org_data[org_key].field_findings.append(ff)
                 if ff.source_id not in seen_sids:
-                    seen_sids.add(ff.source_id)
+                    seen_sids.add(cast(int, ff.source_id))
                     per_org_data[org_key].field_mismatches += 1
                     if org_key in org_type_counts and rtype in org_type_counts[org_key]:
                         org_type_counts[org_key][rtype]["field_mismatches"] += 1
@@ -2614,17 +2696,17 @@ def build_validation_result(
         )
         org_summary.explained_failures = explained_failures
         org_summary.explained_skips = explained_skips
-        org_summary.unexplained = max(
-            0, org_summary.missing - explained_failures - explained_skips
-        )
+        org_summary.unexplained = max(0, org_summary.missing - explained_failures - explained_skips)
         for rtype, counts in sorted(org_type_counts.get(org_key, {}).items()):
-            org_summary.per_type.append(OrgTypeRollup(
-                resource_type=rtype,
-                source=counts["source"],
-                matched=counts["matched"],
-                missing=counts["missing"],
-                field_mismatches=counts["field_mismatches"],
-            ))
+            org_summary.per_type.append(
+                OrgTypeRollup(
+                    resource_type=rtype,
+                    source=counts["source"],
+                    matched=counts["matched"],
+                    missing=counts["missing"],
+                    field_mismatches=counts["field_mismatches"],
+                )
+            )
 
     # Build object inventory
     object_inventory: dict[str, list[ObjectEntry]] = {}
@@ -2639,64 +2721,75 @@ def build_validation_result(
                     continue
                 obj_name = _object_display_name(obj)
                 org_info = obj_to_org.get((rtype, sid))
-                org_name = org_info[0] if org_info else (
-                    GLOBAL_ORG if rtype in UNSCOPED_TYPES else ""
+                org_name = (
+                    org_info[0] if org_info else (GLOBAL_ORG if rtype in UNSCOPED_TYPES else "")
                 )
                 tid = mapping.get(sid)
                 if tid is not None:
-                    entries.append(ObjectEntry(
-                        name=obj_name,
-                        organization=org_name,
-                        source_id=sid,
-                        target_id=tid,
-                        status="completed",
-                        error="",
-                    ))
+                    entries.append(
+                        ObjectEntry(
+                            name=obj_name,
+                            organization=org_name,
+                            source_id=sid,
+                            target_id=tid,
+                            status="completed",
+                            error="",
+                        )
+                    )
                 else:
                     # Same classification as T1/T2 gap accounting (do not mix
                     # unexplained live gaps into Failed)
                     _bucket, obj_status, explanation = _classify_unmatched_gap(
-                        status_by_id, rtype, sid, live_mode=True,
+                        status_by_id,
+                        rtype,
+                        sid,
+                        live_mode=True,
                     )
-                    entries.append(ObjectEntry(
-                        name=obj_name,
-                        organization=org_name,
-                        source_id=sid,
-                        status=obj_status,
-                        error=explanation[:200],
-                    ))
+                    entries.append(
+                        ObjectEntry(
+                            name=obj_name,
+                            organization=org_name,
+                            source_id=sid,
+                            status=obj_status,
+                            error=explanation[:200],
+                        )
+                    )
         else:
             inv_sids: set[int] = set()
             for sid, sname, status, err, tid in obj_inventory.get(rtype, []):
-                inv_sids.add(sid)
-                org_info = obj_to_org.get((rtype, sid))
-                org_name = org_info[0] if org_info else (
-                    GLOBAL_ORG if rtype in UNSCOPED_TYPES else ""
+                inv_sids.add(cast(int, sid))
+                org_info = obj_to_org.get((rtype, cast(int, sid)))
+                org_name = (
+                    org_info[0] if org_info else (GLOBAL_ORG if rtype in UNSCOPED_TYPES else "")
                 )
-                entries.append(ObjectEntry(
-                    name=sname or "",
-                    organization=org_name,
-                    source_id=sid,
-                    target_id=tid,
-                    status=status,
-                    error=err[:200] if err else "",
-                ))
+                entries.append(
+                    ObjectEntry(
+                        name=sname or "",
+                        organization=org_name,
+                        source_id=sid,
+                        target_id=tid,
+                        status=status,
+                        error=err[:200] if err else "",
+                    )
+                )
             for obj in exports.get(rtype, []):
                 sid = _object_source_id(obj)
                 if sid is None or sid in inv_sids:
                     continue
                 obj_name = _object_display_name(obj)
                 org_info = obj_to_org.get((rtype, sid))
-                org_name = org_info[0] if org_info else (
-                    GLOBAL_ORG if rtype in UNSCOPED_TYPES else ""
+                org_name = (
+                    org_info[0] if org_info else (GLOBAL_ORG if rtype in UNSCOPED_TYPES else "")
                 )
-                entries.append(ObjectEntry(
-                    name=obj_name,
-                    organization=org_name,
-                    source_id=sid,
-                    status="pending",
-                    error="Not tracked in migration DB",
-                ))
+                entries.append(
+                    ObjectEntry(
+                        name=obj_name,
+                        organization=org_name,
+                        source_id=sid,
+                        status="pending",
+                        error="Not tracked in migration DB",
+                    )
+                )
         object_inventory[rtype] = entries
 
     # Mark inventory entries that have field differences (status stays completed/etc.)
@@ -2764,9 +2857,7 @@ def _types_with_export_objects(
     """Keep only types that still have export objects after --orgs filter."""
     filtered = [t for t in types if exports.get(t)]
     if not filtered:
-        raise ValueError(
-            "No export objects remain after applying --orgs filter"
-        )
+        raise ValueError("No export objects remain after applying --orgs filter")
     return filtered
 
 
@@ -2828,8 +2919,11 @@ async def run_validation(
             fk_reference_types=sorted(fk_reference_exports.keys()),
         )
 
-    logger.info("validate_exports_loaded", types=len(exports),
-                total_objects=sum(len(v) for v in exports.values()))
+    logger.info(
+        "validate_exports_loaded",
+        types=len(exports),
+        total_objects=sum(len(v) for v in exports.values()),
+    )
 
     if live:
         if target_client is None:
@@ -2944,7 +3038,7 @@ async def run_validation(
 
         src_to_tgt = build_id_maps(migration_state, types)
 
-        all_stats: dict[str, dict] = {}
+        all_stats = {}
         for rtype in types:
             all_stats[rtype] = migration_state.get_migration_stats(rtype)
 
@@ -2975,8 +3069,10 @@ async def run_validation(
             sum(len(json.dumps(v, separators=(",", ":"))) for v in td["t"].values())
             for td in field_data.values()
         )
-        logger.info("validate_field_data",
-                     src_mb=round(fd_src / 1024 / 1024, 1),
-                     tgt_mb=round(fd_tgt / 1024 / 1024, 1))
+        logger.info(
+            "validate_field_data",
+            src_mb=round(fd_src / 1024 / 1024, 1),
+            tgt_mb=round(fd_tgt / 1024 / 1024, 1),
+        )
 
     return result, field_data
