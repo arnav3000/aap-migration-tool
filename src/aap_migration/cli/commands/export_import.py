@@ -24,7 +24,6 @@ from aap_migration.cli.utils import (
     step_progress,
 )
 from aap_migration.migration.auditor_roles import (
-    AuditorRolesSummary,
     assign_auditor_roles,
     create_preflight_failure_summary,
     preflight_gateway_access,
@@ -47,6 +46,7 @@ from aap_migration.resources import (
     normalize_resource_type,
 )
 from aap_migration.utils.logging import get_logger
+from aap_migration.validate.common import SCHEDULE_PARENT_TYPES
 
 logger = get_logger(__name__)
 
@@ -56,9 +56,7 @@ logger = get_logger(__name__)
 # ============================================
 
 
-def should_trigger_deferred_constructed_syncs(
-    dry_run: bool, types_to_import: list[str]
-) -> bool:
+def should_trigger_deferred_constructed_syncs(dry_run: bool, types_to_import: list[str]) -> bool:
     """Return True when deferred constructed-inventory sync should run.
 
     Sync is tied to host_group_memberships being part of this import request
@@ -84,9 +82,7 @@ async def _run_deferred_constructed_syncs(ctx: MigrationContext) -> None:
         )
         # force=True: re-sync even if needs_constructed_sync was cleared by an
         # earlier premature sync (hosts present but group memberships empty).
-        deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs(
-            force=True
-        )
+        deferred_results = await inv_source_importer.trigger_deferred_constructed_syncs(force=True)
         if deferred_results:
             synced = sum(1 for r in deferred_results if r.get("status") == "synced")
             failed_syncs = sum(1 for r in deferred_results if r.get("status") == "failed")
@@ -111,76 +107,81 @@ async def _run_deferred_constructed_syncs(ctx: MigrationContext) -> None:
 def get_importer_dependencies(resource_type: str) -> dict[str, str]:
     """Get the DEPENDENCIES dictionary from an importer class.
 
+    Derived from the canonical importer registry (single source of truth)
+    so this closure can never disagree with :func:`create_importer` about
+    which resource types exist. A local copy of this map drifted before
+    (missing instances, memberships, input sources, system job templates)
+    and silently under-imported filtered requests.
+
     Args:
         resource_type: Type of resource (e.g., 'inventory_sources')
 
     Returns:
         Dictionary mapping field names to resource types
         (e.g., {"organization": "organizations", "credential": "credentials"})
-        Returns empty dict if importer has no dependencies or doesn't exist.
+        Returns empty dict only when the resource type is unknown or the
+        importer declares no dependencies.
+
+    Raises:
+        AssertionError: Registry flags-vs-classes drift detected; the run
+            must abort rather than serve a partial table.
+        ImportError: A leaf importer module failed to import; the run must
+            abort rather than degrade to empty-deps silent under-import.
+        AttributeError: The importer class has no usable DEPENDENCIES
+            mapping (broken descriptor); treated as corruption, not absence.
+        TypeError: DEPENDENCIES is present but is not a dict; treated as
+            corruption, not absence.
+        ValueError: A DEPENDENCIES value names an unknown resource type;
+            treated as corruption, not absence (fail-closed, never degraded
+            to empty deps).
 
     Example:
         >>> get_importer_dependencies('inventory_sources')
         {'inventory': 'inventories', 'source_project': 'projects', 'credential': 'credentials'}
     """
+    # Fail-closed: only the KeyError unknown-type path degrades to {}.
+    # Every other failure (drift gate, leaf import, broken descriptor,
+    # malformed shape, unknown dep value) propagates so filtered imports
+    # abort instead of silently dropping a subtree.
+    from aap_migration.migration.importers._registry import (
+        get_importer_class,
+        get_resource_specs,
+    )
+
     try:
-        # Create a dummy importer instance to access class-level DEPENDENCIES
-        # We don't need a real client/state here, just the class metadata
-        # But create_importer requires them, so we'll import the class directly
-        from aap_migration.migration.importer import (
-            CredentialImporter,
-            CredentialTypeImporter,
-            ExecutionEnvironmentImporter,
-            HostImporter,
-            InventoryGroupImporter,
-            InventoryImporter,
-            InventorySourceImporter,
-            JobTemplateImporter,
-            LabelImporter,
-            NotificationTemplateImporter,
-            ApplicationImporter,
-            SettingsImporter,
-            OrganizationImporter,
-            ProjectImporter,
-            RBACImporter,
-            ScheduleImporter,
-            TeamImporter,
-            UserImporter,
-            WorkflowImporter,
-        )
-
-        # Map resource types to importer classes
-        importer_classes = {
-            "organizations": OrganizationImporter,
-            "labels": LabelImporter,
-            "users": UserImporter,
-            "teams": TeamImporter,
-            "credential_types": CredentialTypeImporter,
-            "credentials": CredentialImporter,
-            "projects": ProjectImporter,
-            "execution_environments": ExecutionEnvironmentImporter,
-            "inventories": InventoryImporter,
-            "inventory_sources": InventorySourceImporter,
-            "inventory_groups": InventoryGroupImporter,
-            "hosts": HostImporter,
-            "job_templates": JobTemplateImporter,
-            "workflow_job_templates": WorkflowImporter,
-            "schedules": ScheduleImporter,
-            "notification_templates": NotificationTemplateImporter,
-            "applications": ApplicationImporter,
-            "settings": SettingsImporter,
-            "rbac": RBACImporter,
-        }
-
-        importer_class = importer_classes.get(resource_type)
-        if importer_class:
-            return importer_class.DEPENDENCIES.copy()
-        else:
-            logger.warning(f"Unknown resource type '{resource_type}', no dependencies found")
-            return {}
-    except Exception as e:
-        logger.warning(f"Failed to get dependencies for {resource_type}: {e}")
+        importer_class = get_importer_class(resource_type)
+    except KeyError:
+        logger.warning(f"Unknown resource type '{resource_type}', no dependencies found")
         return {}
+    deps = importer_class.DEPENDENCIES
+    if not isinstance(deps, dict):
+        raise TypeError(
+            f"Importer DEPENDENCIES for '{resource_type}' is not a dict: {type(deps).__name__}"
+        )
+    result = dict(deps)
+    # Fail-closed on poisoned values: a DEPENDENCIES entry naming an unknown
+    # resource (leaf typo or live-table mutation) must abort, never degrade
+    # to a pruned closure via the KeyError->{ } path in build_dependency_closure.
+    known_types = set(get_resource_specs().keys())
+    unknown_values = sorted({v for v in result.values() if v not in known_types})
+    if unknown_values:
+        raise ValueError(
+            f"Importer DEPENDENCIES for '{resource_type}' names unknown "
+            f"resource type(s): {', '.join(unknown_values)}"
+        )
+    return result
+
+
+# Polymorphic unified-job-template parents that never appear in a leaf
+# DEPENDENCIES map because the field is resolved manually per record
+# (see ScheduleImporter._resolve_dependencies and the transformer that sets
+# _ujt_resource_type). Single source of truth is
+# ``aap_migration.validate.common.SCHEDULE_PARENT_TYPES``; this alias exists
+# only for backward compatibility (tests and any external importers).
+# ``system_job_templates`` is intentionally excluded: the transformer maps
+# that UJT type but marks it "Not migrated usually" (transformer.py), so
+# schedule-only imports do not pull it by default.
+SCHEDULE_UJT_PARENT_TYPES: tuple[str, ...] = SCHEDULE_PARENT_TYPES
 
 
 def build_dependency_closure(
@@ -204,6 +205,7 @@ def build_dependency_closure(
     """
     # Track all types we need to import (set for deduplication)
     needed_types = set()
+    available_set = set(all_available_types)
 
     # Queue for BFS traversal
     queue = list(requested_types)
@@ -216,17 +218,43 @@ def build_dependency_closure(
             continue
         visited.add(current_type)
 
-        # Add this type to needed set (if it's available)
-        if current_type in all_available_types:
-            needed_types.add(current_type)
+        # Do not traverse through types that were not exported: following
+        # deps of an unavailable type would pull grandparents (e.g.
+        # organizations via an absent projects parent) while the per-record
+        # UJT resolution still fails with a stale source ID (API 400).
+        if current_type not in available_set:
+            if current_type in requested_types:
+                logger.warning(f"Requested resource type '{current_type}' not in export; skipping")
+            continue
 
-        # Get dependencies for this type
+        # Add this type to needed set (available by the guard above)
+        needed_types.add(current_type)
+
+        # Get dependencies for this type (fail-closed: unknown dep values
+        # raise ValueError via get_importer_dependencies and abort the run)
         deps = get_importer_dependencies(current_type)
 
         # Add dependency resource types to queue
         for dep_resource_type in deps.values():
             if dep_resource_type not in visited:
                 queue.append(dep_resource_type)
+
+        # Schedules carry a polymorphic unified_job_template that never
+        # appears in DEPENDENCIES (resolved manually per record). Pull the
+        # candidate parent types explicitly so schedule-only filtered
+        # imports do not silently drop template parents. Intersect with the
+        # export so an absent parent is surfaced instead of traversed.
+        if current_type == "schedules":
+            for ujt_parent in SCHEDULE_PARENT_TYPES:
+                if ujt_parent in visited:
+                    continue
+                if ujt_parent in available_set:
+                    queue.append(ujt_parent)
+                else:
+                    logger.warning(
+                        "schedule_ujt_parent_not_exported",
+                        parent_type=ujt_parent,
+                    )
 
     # Sort by migration_order to ensure dependencies come first
     sorted_types = sorted(
@@ -1127,7 +1155,9 @@ def import_cmd(
         from aap_migration.validation import DependencyValidator
 
         validator = DependencyValidator(ctx.migration_state, input_dir)
-        validation = validator.validate_all(requested_types if requested_types != available_types else None)
+        validation = validator.validate_all(
+            requested_types if requested_types != available_types else None
+        )
         validator.display_validation_report(validation)
 
         # Exit after showing validation report
@@ -1186,9 +1216,9 @@ def import_cmd(
         # This is critical for credential_types to be imported before credentials, etc.
         types_to_import = sorted(
             requested_types,
-            key=lambda t: RESOURCE_REGISTRY.get(t).migration_order
-            if t in RESOURCE_REGISTRY
-            else 999,
+            key=lambda t: (
+                RESOURCE_REGISTRY.get(t).migration_order if t in RESOURCE_REGISTRY else 999
+            ),
         )
 
     # Filter by phase if specified
@@ -1378,7 +1408,9 @@ def import_cmd(
                 parent_mappings = state.get_all_mappings_dict(parent_resource_type)
             else:
                 # For unified_job_template, load mappings from all possible parent types
-                for ptype in ("job_templates", "workflow_job_templates", "projects", "inventory_sources"):
+                # (canonical list; system_job_templates intentionally excluded,
+                # see SCHEDULE_PARENT_TYPES).
+                for ptype in SCHEDULE_PARENT_TYPES:
                     parent_mappings.update(state.get_all_mappings_dict(ptype))
             logger.info(
                 "loaded_fk_mappings_for_precheck",
@@ -1399,12 +1431,18 @@ def import_cmd(
                 if resource_type in ORGANIZATION_SCOPED_RESOURCES:
                     source_org = resource.get("organization")
                     # Translate source org ID to target org ID for key matching
-                    org = org_mappings.get(source_org, source_org) if source_org is not None else None
+                    org = (
+                        org_mappings.get(source_org, source_org) if source_org is not None else None
+                    )
                     # For credentials, include credential_type in uniqueness check
                     # AAP constraint: (name, organization, credential_type) must be unique
                     if resource_type == "credentials":
                         source_cred_type = resource.get("credential_type")
-                        cred_type = cred_type_mappings.get(source_cred_type, source_cred_type) if source_cred_type is not None else None
+                        cred_type = (
+                            cred_type_mappings.get(source_cred_type, source_cred_type)
+                            if source_cred_type is not None
+                            else None
+                        )
                         dict_key = (identifier, org, cred_type)
                     else:
                         # Other org-scoped resources: (name, org) is unique
@@ -1414,7 +1452,11 @@ def import_cmd(
                     parent_field = PARENT_SCOPED_RESOURCES[resource_type]
                     source_parent = resource.get(parent_field)
                     # Translate source parent ID to target parent ID for key matching
-                    parent_id = parent_mappings.get(source_parent, source_parent) if source_parent is not None else None
+                    parent_id = (
+                        parent_mappings.get(source_parent, source_parent)
+                        if source_parent is not None
+                        else None
+                    )
                     dict_key = (identifier, parent_id) if parent_id is not None else identifier
                 else:
                     # Use name only for globally unique resources
@@ -1468,13 +1510,15 @@ def import_cmd(
                         reason=reason,
                     )
 
-                    duplicates_skipped.append({
-                        "source_id": source_id,
-                        "name": identifier,
-                        "organization": org,
-                        "parent_id": parent_id,
-                        "kept_source_id": existing_source_id,
-                    })
+                    duplicates_skipped.append(
+                        {
+                            "source_id": source_id,
+                            "name": identifier,
+                            "organization": org,
+                            "parent_id": parent_id,
+                            "kept_source_id": existing_source_id,
+                        }
+                    )
 
                     logger.warning(
                         "duplicate_resource_skipped",
@@ -1767,7 +1811,7 @@ def import_cmd(
                 state.mark_skipped(
                     resource_type=resource_type,
                     source_id=source_id,
-                    reason=f"Pre-existing in target (found in batch precheck)",
+                    reason="Pre-existing in target (found in batch precheck)",
                     target_id=existing["id"],
                     target_name=existing.get(identifier_field),
                     source_name=identifier,
@@ -1990,15 +2034,20 @@ def import_cmd(
                         transformed_resources.append(resource)
 
                     # Snapshot auditor source IDs BEFORE import — _import_parallel
-                    # pops _source_id from each dict, so post-import reads get None.
-                    auditor_source_snapshot = [
-                        {
-                            "username": r.get("username", "unknown"),
-                            "source_id": r.get("_source_id", r.get("id", 0)),
-                        }
-                        for r in transformed_resources
-                        if r.get("is_system_auditor") is True
-                    ] if rtype == "users" else []
+                    # strips _source_id on a copy, so keep the snapshot for
+                    # post-import reads (caller dicts are preserved).
+                    auditor_source_snapshot = (
+                        [
+                            {
+                                "username": r.get("username", "unknown"),
+                                "source_id": r.get("_source_id", r.get("id", 0)),
+                            }
+                            for r in transformed_resources
+                            if r.get("is_system_auditor") is True
+                        ]
+                        if rtype == "users"
+                        else []
+                    )
 
                     if not dry_run:
                         # Create appropriate importer using factory
@@ -2061,7 +2110,9 @@ def import_cmd(
                         }
 
                         method_name = method_map.get(rtype)
-                        echo_info(f"Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}")
+                        echo_info(
+                            f"Processing {rtype}: method={method_name}, has_method={hasattr(importer, method_name) if method_name else False}"
+                        )
                         if method_name and hasattr(importer, method_name):
                             # Proactive batch pre-check: query target to find existing resources
                             # This avoids "already exists" errors and shows accurate progress
@@ -2082,7 +2133,10 @@ def import_cmd(
                             skipped_count = len(transformed_resources) - len(resources_to_import)
 
                             if resources_to_import:
-                                echo_info(f"🔄 Starting import for {rtype}: {len(resources_to_import)} resources")
+                                echo_info(
+                                    f"🔄 Starting import for {rtype}: {len(resources_to_import)} resources"
+                                )
+
                                 # Create progress callback for live updates
                                 def update_progress(
                                     success: int, failed: int, skipped: int, phase_id=phase_id
@@ -2095,7 +2149,9 @@ def import_cmd(
                                 results = await method(
                                     resources_to_import, progress_callback=update_progress
                                 )
-                                echo_info(f"✅ {method_name} completed: {len(results) if results else 0} results")
+                                echo_info(
+                                    f"✅ {method_name} completed: {len(results) if results else 0} results"
+                                )
 
                                 # Calculate actual imported, failed, and skipped from results
                                 imported_count = len(
@@ -2132,9 +2188,9 @@ def import_cmd(
                             # --- Post-phase: Gateway auditor role assignments (AAP 2.6+) ---
                             # Runs for BOTH fresh imports and re-runs (all users pre-existing)
                             if rtype == "users":
-                                # Use pre-captured snapshot — _source_id is popped by
-                                # _import_parallel during fresh import, so reading it
-                                # from transformed_resources post-import yields None.
+                                # Use pre-captured snapshot — _import_parallel
+                                # strips _source_id on a payload copy, so the
+                                # snapshot keeps post-import reads stable.
                                 auditor_failed_count = 0
                                 if auditor_source_snapshot:
                                     echo_info(
@@ -2142,7 +2198,9 @@ def import_cmd(
                                         f"assigning Gateway Platform Auditor roles..."
                                     )
                                     try:
-                                        role_def_id = await preflight_gateway_access(ctx.target_client)
+                                        role_def_id = await preflight_gateway_access(
+                                            ctx.target_client
+                                        )
                                     except RuntimeError as gw_err:
                                         logger.error(
                                             "gateway_preflight_failed",
@@ -2155,13 +2213,17 @@ def import_cmd(
                                     if role_def_id is not None:
                                         auditor_users = []
                                         for snap in auditor_source_snapshot:
-                                            mapping = ctx.migration_state.get_id_mapping("users", snap["source_id"])
+                                            mapping = ctx.migration_state.get_id_mapping(
+                                                "users", snap["source_id"]
+                                            )
                                             if mapping:
-                                                auditor_users.append({
-                                                    "username": snap["username"],
-                                                    "source_id": snap["source_id"],
-                                                    "target_id": mapping["target_id"],
-                                                })
+                                                auditor_users.append(
+                                                    {
+                                                        "username": snap["username"],
+                                                        "source_id": snap["source_id"],
+                                                        "target_id": mapping["target_id"],
+                                                    }
+                                                )
 
                                         if auditor_users:
                                             auditor_summary = await assign_auditor_roles(
@@ -2183,9 +2245,9 @@ def import_cmd(
                                         )
                                         auditor_failed_count = auditor_summary.auditor_count
                                         echo_error(
-                                            f"\n{'='*60}\n"
+                                            f"\n{'=' * 60}\n"
                                             f"❌ AUDITOR ROLE ASSIGNMENT BLOCKED\n"
-                                            f"{'='*60}\n"
+                                            f"{'=' * 60}\n"
                                             f"Gateway preflight failed: {preflight_error}\n\n"
                                             f"{auditor_summary.auditor_count} system auditor(s) will NOT\n"
                                             f"have functional auditor access on AAP 2.6.\n\n"
@@ -2197,7 +2259,7 @@ def import_cmd(
                                             f"\nAction required: use a Gateway-capable token\n"
                                             f"(length 32, from AAP 2.6 UI) and re-run, or:\n"
                                             f"   python tools/remediate_auditor_roles.py --data-dir <path>\n"
-                                            f"{'='*60}"
+                                            f"{'=' * 60}"
                                         )
                                         for f in auditor_summary.failed:
                                             echo_warning(
@@ -2420,11 +2482,21 @@ def import_cmd(
                 click.echo()
                 if len([r for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0]) == 1:
                     # Single resource type failed
-                    failed_rtype = next(r[0] for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0)
-                    click.echo(click.style(f"   aap-bridge migration-report --resource-type {failed_rtype}", fg="yellow", bold=True))
+                    failed_rtype = next(
+                        r[0] for r in phases if run_stats.get(r[0], {}).get("failed", 0) > 0
+                    )
+                    click.echo(
+                        click.style(
+                            f"   aap-bridge migration-report --resource-type {failed_rtype}",
+                            fg="yellow",
+                            bold=True,
+                        )
+                    )
                 else:
                     # Multiple resource types failed
-                    click.echo(click.style("   aap-bridge migration-report", fg="yellow", bold=True))
+                    click.echo(
+                        click.style("   aap-bridge migration-report", fg="yellow", bold=True)
+                    )
                 click.echo()
                 click.echo("=" * 80)
 
