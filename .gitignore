@@ -200,6 +200,7 @@ logs/
 exports/
 reports/
 schemas/
+!src/aap_migration/api/schemas/
 xformed/
 sql/
 tests/
@@ -304,3 +305,8 @@ container/diagnose_migration.sh
 # Customer migration datasets and validation evidence (NEVER track)
 container/CTOi-test/
 investigation/validate-dry-run/
+
+# REST API runtime artifacts (release/v1.x-rest-api)
+api_jobs/
+api_fernet.key
+console.log

@@ -6,8 +6,9 @@ concurrently to maximize throughput while respecting concurrency limits.
 
 import asyncio
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.config import ExportConfig, PerformanceConfig
@@ -17,6 +18,12 @@ from aap_migration.resources import get_endpoint
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+class HasGetStats(Protocol):
+    """Exporter seam: anything with stats (all factory exporters)."""
+
+    def get_stats(self) -> Mapping[str, Any]: ...
 
 
 class ParallelExportCoordinator:
@@ -84,7 +91,7 @@ class ParallelExportCoordinator:
         Returns:
             Export statistics for this resource type
         """
-        stats = {
+        stats: dict[str, Any] = {
             "resource_type": resource_type,
             "exported": 0,
             "failed": 0,
@@ -266,7 +273,7 @@ class ParallelExportCoordinator:
 
             # Sync stats from exporter to capture skipped items (e.g. from resume or filtering)
             # The coordinator tracks exported/failed, but exporter tracks what it skipped internally
-            exporter_stats = exporter.get_stats()
+            exporter_stats = cast(HasGetStats, exporter).get_stats()
             # Only add skipped count, as we tracked exported/failed ourselves
             stats["skipped"] += exporter_stats.get("skipped_count", 0)
 

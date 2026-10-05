@@ -7,7 +7,7 @@ concurrently to maximize throughput.
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from aap_migration.client.aap_target_client import AAPTargetClient
 from aap_migration.config import MigrationConfig, PerformanceConfig
@@ -16,6 +16,18 @@ from aap_migration.migration.transformer import SkipResourceError, create_transf
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+class HasPopulateTargetId(Protocol):
+    """Transformer seam: pre-populates ID mappings from the target."""
+
+    async def populate_target_id_from_target(
+        self,
+        data: dict[str, Any],
+        target_client: Any,
+        state: MigrationState,
+        source_id: int,
+    ) -> dict[str, Any]: ...
 
 
 class ParallelTransformCoordinator:
@@ -74,7 +86,7 @@ class ParallelTransformCoordinator:
         Returns:
             Transform statistics for this resource type
         """
-        stats = {
+        stats: dict[str, Any] = {
             "resource_type": resource_type,
             "count": 0,
             "failed": 0,
@@ -226,12 +238,20 @@ class ParallelTransformCoordinator:
 
                 # 3. Filter hosts whose inventory is not in id_mappings
                 if resource_type == "hosts":
+                    # Preload inventory membership once per batch (single IN
+                    # query) instead of one query per host (N+1).
+                    inventory_ids = {
+                        host.get("inventory") for host in transformed_batch if host.get("inventory")
+                    }
+                    known_inventories = (
+                        self.migration_state.bulk_has_source_mappings("inventories", inventory_ids)
+                        if inventory_ids
+                        else set()
+                    )
                     filtered_batch = []
                     for host in transformed_batch:
                         inventory_id = host.get("inventory")
-                        if inventory_id and self.migration_state.has_source_mapping(
-                            "inventories", inventory_id
-                        ):
+                        if inventory_id and inventory_id in known_inventories:
                             filtered_batch.append(host)
                         else:
                             stats["skipped_missing_inventory"] += 1
@@ -244,7 +264,9 @@ class ParallelTransformCoordinator:
                         for resource in transformed_batch:
                             source_id = resource.get("_source_id")
                             if source_id:
-                                await transformer.populate_target_id_from_target(
+                                await cast(
+                                    HasPopulateTargetId, transformer
+                                ).populate_target_id_from_target(
                                     resource,
                                     self.target_client,
                                     self.migration_state,

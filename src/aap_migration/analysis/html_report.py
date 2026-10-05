@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import html
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from aap_migration.analysis.dependency_analyzer import GlobalDependencyReport
@@ -56,12 +56,14 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
         for rtype, items in org_report.resources.items():
             if not items:
                 continue
-            resource_summary.append({
-                "type": rtype,
-                "display": _display_type(rtype),
-                "count": len(items),
-            })
-        resource_summary.sort(key=lambda x: x["display"])
+            resource_summary.append(
+                {
+                    "type": rtype,
+                    "display": _display_type(rtype),
+                    "count": len(items),
+                }
+            )
+        resource_summary.sort(key=lambda x: cast(str, x["display"]))
 
         # Dependencies grouped by source org, each dependency a resource with
         # the list of local resources that require it.
@@ -69,48 +71,58 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
         for dep_org, deps in sorted(org_report.dependencies.items()):
             resources = []
             for dep in deps:
-                resources.append({
-                    "type": dep.resource_type,
-                    "type_display": _display_type(dep.resource_type),
-                    "name": dep.resource_name,
-                    "id": dep.resource_id,
-                    "used_by": [
-                        {
-                            "type": _display_type(u["type"]),
-                            "name": u["name"],
-                            "id": u["id"],
-                        }
-                        for u in dep.required_by
-                    ],
-                })
+                resources.append(
+                    {
+                        "type": dep.resource_type,
+                        "type_display": _display_type(dep.resource_type),
+                        "name": dep.resource_name,
+                        "id": dep.resource_id,
+                        "used_by": [
+                            {
+                                "type": _display_type(u["type"]),
+                                "name": u["name"],
+                                "id": u["id"],
+                            }
+                            for u in dep.required_by
+                        ],
+                    }
+                )
             # Sort: by type then name for stable list order
-            resources.sort(key=lambda r: (r["type_display"], r["name"].lower()))
-            dependencies.append({
-                "org": dep_org,
-                "resource_count": len(resources),
-                "resources": resources,
-            })
+            resources.sort(
+                key=lambda r: (cast(str, r["type_display"]), cast(str, r["name"]).lower())
+            )
+            dependencies.append(
+                {
+                    "org": dep_org,
+                    "resource_count": len(resources),
+                    "resources": resources,
+                }
+            )
 
-        orgs_data.append({
-            "name": org_name,
-            "id": org_report.org_id,
-            "total_resources": org_report.resource_count,
-            "has_dependencies": org_report.has_cross_org_deps,
-            "required_before": org_report.required_migrations_before,
-            "resource_summary": resource_summary,
-            "dependencies": dependencies,
-        })
+        orgs_data.append(
+            {
+                "name": org_name,
+                "id": org_report.org_id,
+                "total_resources": org_report.resource_count,
+                "has_dependencies": org_report.has_cross_org_deps,
+                "required_before": org_report.required_migrations_before,
+                "resource_summary": resource_summary,
+                "dependencies": dependencies,
+            }
+        )
 
     # Phases
     phases_data = []
     for phase in report.migration_phases:
-        phases_data.append({
-            "phase": phase["phase"],
-            "description": phase["description"],
-            "orgs": phase["orgs"],
-            "has_cycle": phase.get("has_cycle", False),
-            "cycles": phase.get("cycles", []),
-        })
+        phases_data.append(
+            {
+                "phase": phase["phase"],
+                "description": phase["description"],
+                "orgs": phase["orgs"],
+                "has_cycle": phase.get("has_cycle", False),
+                "cycles": phase.get("cycles", []),
+            }
+        )
 
     # Cycles (top-level)
     cycles_data = list(getattr(report, "cycles", []) or [])
@@ -762,6 +774,11 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
             if (!e.target.closest('.org-dropdown')) {{
                 document.getElementById('orgDropdownMenu').classList.remove('open');
             }}
+            const orgItem = e.target.closest('li[data-org]');
+            if (orgItem && orgItem.dataset.org !== undefined) {{
+                activateTab('organizations');
+                selectOrg(orgItem.dataset.org);
+            }}
         }});
 
         // ---- tabs ----
@@ -834,8 +851,7 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                 indList.innerHTML = '<li class="empty-state" style="padding: 20px;">None</li>';
             }} else {{
                 indList.innerHTML = indOrgs.map(o =>
-                    '<li class="independent" onclick="activateTab(\\'organizations\\'); selectOrg(\\''
-                    + o.name.replace(/'/g, "\\\\'") + '\\')">'
+                    '<li class="independent" data-org="' + escapeHtml(o.name) + '">'
                     + '<div class="org-name">' + escapeHtml(o.name) + '</div>'
                     + '<div class="org-meta">' + o.total_resources + ' resources</div>'
                     + '</li>'
@@ -849,8 +865,7 @@ def generate_html_report(report: GlobalDependencyReport) -> str:
                     const reqs = o.required_before.length > 0
                         ? ' · Requires: ' + o.required_before.map(escapeHtml).join(', ')
                         : '';
-                    return '<li class="dependent" onclick="activateTab(\\'organizations\\'); selectOrg(\\''
-                        + o.name.replace(/'/g, "\\\\'") + '\\')">'
+                    return '<li class="dependent" data-org="' + escapeHtml(o.name) + '">'
                         + '<div class="org-name">' + escapeHtml(o.name) + '</div>'
                         + '<div class="org-meta">' + o.total_resources + ' resources' + reqs + '</div>'
                         + '</li>';

@@ -11,7 +11,7 @@ import functools
 import hashlib
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from aap_migration.client.exceptions import ConflictError
 from aap_migration.migration.state import MigrationState
@@ -110,7 +110,7 @@ def idempotent(
     key_fields: list[str],
     source_id_field: str = "id",
     source_name_field: str = "name",
-):
+) -> Callable[..., Any]:
     """Decorator to make a function idempotent using state tracking.
 
     This decorator wraps async functions to:
@@ -150,7 +150,7 @@ def idempotent(
 
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
-        async def wrapper(data: dict[str, Any], *args, **kwargs) -> dict[str, Any]:
+        async def wrapper(data: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
             # Extract source ID and name
             source_id = data.get(source_id_field)
             source_name = data.get(source_name_field, "")
@@ -190,7 +190,7 @@ def idempotent(
                     state.mark_completed(
                         resource_type=resource_type,
                         source_id=source_id,
-                        target_id=target_id,
+                        target_id=cast(int, target_id),
                     )
 
                     logger.debug(
@@ -200,7 +200,7 @@ def idempotent(
                         target_id=target_id,
                     )
 
-                return result
+                return cast(dict[str, Any], result)
 
             except ConflictError as e:
                 logger.warning(
@@ -231,7 +231,7 @@ def idempotent(
                             state.mark_completed(
                                 resource_type=resource_type,
                                 source_id=source_id,
-                                target_id=target_id,
+                                target_id=cast(int, target_id),
                             )
 
                         return existing
@@ -347,7 +347,7 @@ async def find_existing_resource(
             organization=organization,
         )
 
-        return result
+        return cast(dict[str, Any] | None, result)
 
     except Exception as e:
         logger.error(

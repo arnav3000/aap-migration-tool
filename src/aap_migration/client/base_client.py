@@ -6,8 +6,9 @@ rate limiting, retry logic, and comprehensive logging.
 
 import asyncio
 import time
-from typing import Any
-from urllib.parse import urljoin
+from datetime import UTC
+from typing import Any, cast
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -32,6 +33,34 @@ from aap_migration.utils.logging import (
 )
 
 logger = get_logger(__name__)
+
+
+def _parse_retry_after(value: str | None) -> int | None:
+    """Parse a Retry-After header value defensively (never raises).
+
+    Integer delay-seconds are used directly; otherwise an HTTP-date
+    (RFC 7231) is converted to a non-negative delta against now. Any
+    other shape returns None so callers fall back to default backoff.
+    """
+    if not value:
+        return None
+    try:
+        return max(0, int(value.strip()))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    try:
+        from datetime import datetime
+        from email.utils import parsedate_to_datetime
+
+        moment = parsedate_to_datetime(value.strip())
+        if moment is None:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        delta = (moment - datetime.now(UTC)).total_seconds()
+        return max(0, int(delta))
+    except Exception:
+        return None
 
 
 class BaseAPIClient:
@@ -99,7 +128,13 @@ class BaseAPIClient:
                 max_keepalive_connections=max_keepalive_connections,
             ),
             verify=verify_ssl,
-            follow_redirects=True,
+            # Fail closed on redirects: the stored URL was validated and
+            # re-verified at execution time, but a 302 to a metadata or
+            # internal address would otherwise be followed automatically
+            # with the bearer token attached (CWE-918). Redirects are
+            # followed manually in request() only for same-origin targets
+            # that pass reverify_execution_url().
+            follow_redirects=False,
         )
 
         logger.info(
@@ -231,7 +266,7 @@ class BaseAPIClient:
             )
         elif status_code == 429:
             retry_after = response.headers.get("Retry-After")
-            retry_seconds = int(retry_after) if retry_after else None
+            retry_seconds = _parse_retry_after(retry_after)
             raise RateLimitError(
                 message="Rate limit exceeded",
                 status_code=status_code,
@@ -277,6 +312,24 @@ class BaseAPIClient:
         """
         url = self._build_url(endpoint)
 
+        # DNS-rebind TOCTOU second half (#2, double-verify): context
+        # execution-time re-verification leaves a window before each fetch
+        # (rebind between job start and this request). Re-verify just
+        # before the bearer token is sent so a rebound hostname fails
+        # closed here instead of delivering the token to a metadata
+        # endpoint. Private RFC1918 hosts stay allowed: reverify only
+        # blocks metadata ranges/userinfo/scheme (strict private blocking
+        # remains opt-in), matching create/update validation.
+        try:
+            from aap_migration.utils.ssrf import reverify_execution_url_bounded
+
+            # Blocking DNS re-verify must stay off the server event loop:
+            # one slow hostname would otherwise stall all concurrent API
+            # traffic. to_thread keeps the FIFO-worker path unchanged.
+            await asyncio.to_thread(reverify_execution_url_bounded, self.base_url)
+        except ValueError as exc:
+            raise NetworkError(f"SSRF re-verification blocked request: {exc}") from exc
+
         # Apply rate limiting
         await self._rate_limit_wait()
 
@@ -299,6 +352,62 @@ class BaseAPIClient:
             response = await self.client.request(
                 method=method, url=url, params=params, json=json_data, **kwargs
             )
+            # Manual same-origin redirect following (fail closed). httpx is
+            # configured with follow_redirects=False so a validated URL
+            # answering with a cross-host 302 cannot pull the bearer token
+            # to an unvalidated target. Same-origin redirects that pass
+            # reverify_execution_url() are followed (bounded); anything
+            # else fails instead of leaking the request.
+            for _ in range(3):
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    break
+                location = response.headers.get("location")
+                if not location:
+                    break
+                target = (
+                    urljoin(url + "/", location)
+                    if not location.startswith(("http://", "https://"))
+                    else location
+                )
+                if urlparse(target).scheme not in ("http", "https"):
+                    raise NetworkError(f"Redirect to unsupported scheme blocked: {target}")
+                base_origin = urlparse(self.base_url)
+                target_origin = urlparse(target)
+
+                def _origin(u: Any) -> tuple:
+                    port = u.port
+                    if port is None:
+                        port = 443 if u.scheme == "https" else 80
+                    return (u.scheme.lower(), (u.hostname or "").lower(), port)
+
+                if _origin(base_origin) != _origin(target_origin):
+                    raise NetworkError(
+                        "Cross-origin redirect blocked for AAP client "
+                        f"({target_origin.hostname}); failing closed."
+                    )
+                try:
+                    from aap_migration.utils.ssrf import reverify_execution_url_bounded
+
+                    # Bounded variant (helper thread, 10s cap): this path
+                    # runs on the job's asyncio event-loop thread, where the
+                    # httpx per-request timeout does not cover blocking
+                    # getaddrinfo -- an unbounded check would head-of-line
+                    # block the single FIFO worker behind one poison host.
+                    # Offloaded via to_thread like the pre-request check
+                    # above so a slow redirect-target lookup cannot stall
+                    # concurrent API traffic.
+                    await asyncio.to_thread(reverify_execution_url_bounded, target)
+                except ValueError as exc:
+                    raise NetworkError(f"Redirect target blocked: {exc}") from exc
+                follow_method = "GET" if response.status_code == 303 else method
+                response = await self.client.request(
+                    method=follow_method,
+                    url=target,
+                    params=params if follow_method != "GET" else None,
+                    json=json_data if follow_method != "GET" else None,
+                    **kwargs,
+                )
+                url = target
 
             duration_ms = (time.time() - start_time) * 1000
 
@@ -341,7 +450,7 @@ class BaseAPIClient:
                 self._handle_error_response(response)
 
             # Return JSON response
-            return response.json() if response.text else {}
+            return cast(dict[str, Any], response.json()) if response.text else {}
 
         except httpx.NetworkError as e:
             logger.error("network_error", method=method, url=url, error=str(e))
