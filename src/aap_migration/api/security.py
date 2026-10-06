@@ -19,6 +19,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, HTTPException, Request
@@ -369,3 +370,29 @@ def require_api_key(
     if _auth_failure_count(bucket) > _AUTH_MAX_FAILURES:
         raise HTTPException(status_code=429, detail="Too many failed auth attempts")
     raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+def confine_path(path: str | Path, base: str | Path, *, label: str = "path") -> Path:
+    """Resolve *path* and require it to stay under *base*.
+
+    Raises ValueError when the resolved path escapes (``..`` traversal,
+    symlink escape, or absolute path outside the base). Returns the resolved
+    absolute Path otherwise. Used by routers/services to confine
+    caller-supplied artifact paths to their job directory.
+    """
+    base_resolved = Path(base).resolve()
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = base_resolved / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(base_resolved)
+    except ValueError as exc:
+        raise ValueError(f"{label} must stay under {base_resolved}") from exc
+    return resolved
+
+
+def redact_backend_error(exc: BaseException) -> str:
+    """Return a generic connectivity-failure message (no backend detail)."""
+    _ = exc
+    return "Connectivity test failed (see server logs for detail)"

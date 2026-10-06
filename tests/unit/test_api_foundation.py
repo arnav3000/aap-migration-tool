@@ -1113,8 +1113,12 @@ class TestFoundationHygiene:
     def test_dead_helpers_removed(self) -> None:
         from aap_migration.api import security
 
-        for name in ("_sweep_auth_failures", "confine_path", "redact_backend_error"):
-            assert not hasattr(security, name), name
+        # confine_path / redact_backend_error were restored: routers and
+        # services in this stack call them (jobs/iam artifact confinement,
+        # config/connections 502 redaction).
+        assert not hasattr(security, "_sweep_auth_failures")
+        assert callable(security.confine_path)
+        assert callable(security.redact_backend_error)
 
     def test_errors_live_in_neutral_module(self) -> None:
         import aap_migration.api._errors as errors
