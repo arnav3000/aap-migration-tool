@@ -170,7 +170,10 @@ def clear_startup_degraded_if_recovered() -> bool:
         db_path = init_api_db()
         pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
-        degraded.append(f"api-db: {exc}")
+        # Generic marker (CWE-209): the raw exception may embed absolute
+        # server paths; detail stays server-side in logs only.
+        log.warning("startup storage re-probe api-db failed: %s", exc)
+        degraded.append("api-db: storage-unhealthy")
     job_dir = os.environ.get("AAP_BRIDGE_JOB_DIR") or "./api_jobs"
     try:
         pathlib.Path(job_dir).mkdir(parents=True, exist_ok=True)
@@ -178,7 +181,8 @@ def clear_startup_degraded_if_recovered() -> bool:
         probe.write_text("ok")
         probe.unlink(missing_ok=True)
     except Exception as exc:
-        degraded.append(f"job-dir: {exc}")
+        log.warning("startup storage re-probe job-dir failed: %s", exc)
+        degraded.append("job-dir: storage-unhealthy")
     if degraded:
         set_startup_degraded("; ".join(degraded))
         return False

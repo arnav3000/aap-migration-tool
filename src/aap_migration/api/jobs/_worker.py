@@ -28,6 +28,7 @@ from aap_migration.api.jobs._console import (
 )
 from aap_migration.api.jobs._fences import daemon_thread_pool
 from aap_migration.api.jobs._records import JobRecord, JobUpdate, _normalize_result, _utcnow
+from aap_migration.api.jobs._scrub import _scrub_output
 from aap_migration.api.store import SNAPSHOT_FP, SNAPSHOT_STABLE, SNAPSHOT_TARGET_STABLE
 
 if TYPE_CHECKING:
@@ -528,48 +529,74 @@ class JobWorkerMixin:
                             detail = exc.format_message()
                         except Exception:
                             detail = str(exc)
-                        message = detail.strip() or "Job failed"
-                        # Truncate: polled payloads carry the actionable line;
-                        # full tracebacks stay server-side.
+                        # P0 #1: verbatim worker text must not reach pollers
+                        # scrubbed (console persist path already scrubs via
+                        # _persist_console; the pollable error field bypassed
+                        # it). Truncate: polled payloads carry the actionable
+                        # line; full tracebacks stay server-side.
+                        message = _scrub_output(detail.strip() or "Job failed")
                         live_dir = self._live_job_dir(job_id, job_dir)
                         self._fail(
                             job_id, live_dir, _bounded_output(buffer.getvalue()), message[:500]
                         )
-                except (ValueError, KeyError) as exc:
+                except (ValueError, KeyError, TypeError) as exc:
                     # Fail-fast domain (unknown job, pair drift, deleted
-                    # connection, corrupt snapshot, missing pin keys):
-                    # raised by our own guards with operator-actionable,
-                    # secret-free text. Preserve it so queued jobs fail
-                    # with guidance instead of a bare class name. Every
-                    # other exception kind stays limited to its bare name
-                    # below (backend detail must not leak). UnknownJobError
-                    # is a KeyError subclass, so chained-reference misses
-                    # keep their "Unknown job_id ..." detail here.
-                    log.error("job %s failed: %s", job_id, exc)
-                    try:
-                        detail = str(exc).strip()
-                    except Exception:
-                        detail = ""
-                    message = (
-                        f"{type(exc).__name__}: {detail}"[:500]
-                        if detail
-                        else f"{type(exc).__name__}"
-                    )
-                    live_dir = self._live_job_dir(job_id, job_dir)
-                    self._fail(
-                        job_id,
-                        live_dir,
-                        _bounded_output(buffer.getvalue()),
-                        message,
-                    )
+                    # connection, corrupt snapshot, missing pin keys, and
+                    # service/CLI wiring drift): raised by our own guards
+                    # with operator-actionable, secret-free text. Preserve
+                    # it so queued jobs fail with guidance instead of a
+                    # bare class name. TypeError belongs here ONLY for the
+                    # service-to-CLI layer (call_command allowlist
+                    # "Unknown parameter(s) ..." drift, which is what the
+                    # operator needs to fix). Every other TypeError -- bad
+                    # values, library bugs, path/SQL reprs that may format
+                    # secrets -- routes to the error_id redaction below
+                    # (P0 #1: verbatim worker text must not reach pollers).
+                    # UnknownJobError is a KeyError subclass, so
+                    # chained-reference misses keep their
+                    # "Unknown job_id ..." detail here.
+                    if isinstance(exc, TypeError) and "Unknown parameter(s)" not in str(exc):
+                        error_id = uuid.uuid4().hex[:12]
+                        log.error("job %s failed (error_id=%s)", job_id, error_id, exc_info=exc)
+                        live_dir = self._live_job_dir(job_id, job_dir)
+                        self._fail(
+                            job_id,
+                            live_dir,
+                            _bounded_output(buffer.getvalue()),
+                            f"{type(exc).__name__} (error_id={error_id}); see server logs.",
+                        )
+                    else:
+                        log.error("job %s failed: %s", job_id, exc)
+                        try:
+                            detail = str(exc).strip()
+                        except Exception:
+                            detail = ""
+                        # Scrub the preserved guidance text the same way as
+                        # ClickException detail (P0 #1): fail-fast messages
+                        # are secret-free by construction, but a future
+                        # backend-format change must not cross the poll
+                        # boundary unscrubbed.
+                        message = _scrub_output(
+                            f"{type(exc).__name__}: {detail}"[:500]
+                            if detail
+                            else f"{type(exc).__name__}"
+                        )
+                        live_dir = self._live_job_dir(job_id, job_dir)
+                        self._fail(
+                            job_id,
+                            live_dir,
+                            _bounded_output(buffer.getvalue()),
+                            message,
+                        )
                 except Exception as exc:  # noqa: BLE001 - surfaced via polling
-                    log.exception("job %s failed", job_id)
+                    error_id = uuid.uuid4().hex[:12]
+                    log.error("job %s failed (error_id=%s)", job_id, error_id, exc_info=exc)
                     live_dir = self._live_job_dir(job_id, job_dir)
                     self._fail(
                         job_id,
                         live_dir,
                         _bounded_output(buffer.getvalue()),
-                        f"{type(exc).__name__}",
+                        f"{type(exc).__name__} (error_id={error_id}); see server logs.",
                     )
                 except BaseException as exc:  # keep the single worker alive
                     try:
