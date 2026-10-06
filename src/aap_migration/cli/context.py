@@ -111,6 +111,71 @@ class MigrationContext:
 
         return self._migration_state
 
+    def replace_config(self, config: MigrationConfig) -> None:
+        """Explicit injection seam for pre-built configs (P2 #10).
+
+        The API layer builds an isolated job config per background job and
+        installs it here instead of assigning the private ``_config``
+        attribute, so a CLI-side rename of privates cannot silently break
+        every job. Invalidates lazily-created clients and state, which
+        were derived from the previous config.
+        """
+        self._config = config
+        self._source_client = None
+        self._target_client = None
+        self._migration_state = None
+
+    def close_clients(self) -> None:
+        """Best-effort close of created HTTP clients (never raises; P2 #10).
+
+        Closes the source/target clients whether their close method is
+        sync or async. Async closes run to completion on the owning loop
+        when possible, otherwise on a helper thread with a 10s bound --
+        never fire-and-forget leaked.
+        """
+        import asyncio
+        import threading
+
+        for attr in ("_source_client", "_target_client"):
+            client = getattr(self, attr, None)
+            if client is None:
+                continue
+            close = getattr(client, "aclose", None) or getattr(client, "close", None)
+            if close is None:
+                continue
+            try:
+                result = close()
+                if asyncio.iscoroutine(result):
+                    try:
+                        asyncio.get_running_loop()
+                    except RuntimeError:
+                        asyncio.run(result)
+                    else:
+                        done = threading.Event()
+                        errors: list[BaseException] = []
+
+                        def _runner(
+                            _result: Any = result,
+                            _done: threading.Event = done,
+                            _errors: list[BaseException] = errors,
+                        ) -> None:
+                            try:
+                                asyncio.run(_result)
+                            except BaseException as exc:  # noqa: BLE001 - teardown
+                                _errors.append(exc)
+                            finally:
+                                _done.set()
+
+                        thread = threading.Thread(target=_runner, daemon=True)
+                        thread.start()
+                        closed = done.wait(timeout=10)
+                        if not closed:
+                            logger.debug("async client close timed out for %s", attr)
+                        thread.join(timeout=5)
+                setattr(self, attr, None)
+            except Exception:
+                pass
+
     def cleanup(self) -> None:
         """Clean up resources."""
         logger.debug("Cleaning up context resources")

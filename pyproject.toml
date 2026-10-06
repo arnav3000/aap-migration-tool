@@ -32,7 +32,7 @@ dependencies = [
     "rich>=13.0.0",
     "structlog==24.1.0",
     "tenacity==8.2.3",
-    "pydantic==2.5.0",
+    "pydantic==2.9.0",
     "pydantic-settings==2.1.0",
     "PyYAML==6.0.1",
     "tqdm==4.66.3",
@@ -45,6 +45,8 @@ dependencies = [
     "psutil==6.1.1",
     "psycopg2-binary>=2.9.11",
     "cryptography>=46.0.3",
+    "fastapi>=0.135",
+    "uvicorn[standard]>=0.30",
     "mkdocs-material-extensions>=1.3.1",
     "mkdocs-material>=9.7.0",
     "msgpack>=1.2.1",
@@ -70,6 +72,7 @@ docs = [
 [project.scripts]
 aap-migrate = "aap_migration.cli.main:main"
 aap-bridge = "aap_migration.cli.main:main"
+aap-bridge-api = "aap_migration.api.app:main"
 
 [project.urls]
 Homepage = "https://github.com/arnav3000/aap-migration-tool"
