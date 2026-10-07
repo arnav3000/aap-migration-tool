@@ -15,7 +15,7 @@ import queue
 import uuid
 from collections.abc import Callable
 from io import StringIO
-from typing import TYPE_CHECKING, Any, TypeVar, Unpack, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import click
 
@@ -27,9 +27,9 @@ from aap_migration.api.jobs._console import (
     _stdout_proxy,
 )
 from aap_migration.api.jobs._fences import daemon_thread_pool
-from aap_migration.api.jobs._records import JobRecord, JobUpdate, _normalize_result, _utcnow
+from aap_migration.api.jobs._records import JobRecord, _normalize_result, _utcnow
 from aap_migration.api.jobs._scrub import _scrub_output
-from aap_migration.api.store import SNAPSHOT_FP, SNAPSHOT_STABLE, SNAPSHOT_TARGET_STABLE
+from aap_migration.api.store import SNAPSHOT_FP, SNAPSHOT_STABLE
 
 if TYPE_CHECKING:
     import queue as _queue_mod
@@ -57,7 +57,7 @@ class JobWorkerMixin:
     job_timeout: float
     base_dir: str
 
-    def _set(self, job_id: str, **fields: Unpack[JobUpdate]) -> None:  # pragma: no cover
+    def _set(self, job_id: str, **fields: Any) -> None:  # pragma: no cover
         raise NotImplementedError
 
     def _fail(  # pragma: no cover
@@ -178,7 +178,6 @@ class JobWorkerMixin:
         self._reap_orphans()
         try:
             fenced_dirs, fenced_pairs = self._fences.fenced_snapshot()
-            fenced_targets = self._fences.fenced_targets_snapshot()
         except Exception:
             return
         now = _time.monotonic()
@@ -192,15 +191,13 @@ class JobWorkerMixin:
                     work_dir = str(info.get("work_dir") or job.get("job_dir") or "")
                     pair_fp = str(info.get("pair_fp") or "")
                     stable_fp = str(info.get("stable_fp") or "")
-                    target_stable = str(info.get("target_stable") or "")
                     fence = str(info.get("fence") or "workdir")
                     until = float(info.get("until") or 0.0)
                 dir_fenced = bool(work_dir) and work_dir in fenced_dirs
                 pair_fenced = (bool(pair_fp) and pair_fp in fenced_pairs) or (
                     bool(stable_fp) and stable_fp in fenced_pairs
                 )
-                target_fenced = bool(target_stable) and target_stable in fenced_targets
-                still_fenced = dir_fenced or pair_fenced or target_fenced
+                still_fenced = dir_fenced or pair_fenced
                 if not still_fenced:
                     with self._lock:
                         self._parked.pop(job_id, None)
@@ -245,16 +242,13 @@ class JobWorkerMixin:
                 try:
                     pair_fp = str((job.get("params") or {}).get(SNAPSHOT_FP) or "")
                     stable_fp = str((job.get("params") or {}).get(SNAPSHOT_STABLE) or "")
-                    target_stable = str((job.get("params") or {}).get(SNAPSHOT_TARGET_STABLE) or "")
                 except Exception:
                     pair_fp = ""
                     stable_fp = ""
-                    target_stable = ""
                 self._parked[job_id] = {
                     "work_dir": work_dir,
                     "pair_fp": pair_fp,
                     "stable_fp": stable_fp,
-                    "target_stable": target_stable,
                     "fence": fence,
                     "until": _time.monotonic() + self._fence_grace_secs(),
                 }
@@ -321,19 +315,16 @@ class JobWorkerMixin:
                     work_dir = str(job.get("job_dir", ""))
                     pair_fp = str((job.get("params") or {}).get(SNAPSHOT_FP) or "")
                     stable_fp = str((job.get("params") or {}).get(SNAPSHOT_STABLE) or "")
-                    target_stable = str((job.get("params") or {}).get(SNAPSHOT_TARGET_STABLE) or "")
                     # Fence membership is read outside the manager lock
                     # (tracker-owned, one snapshot); parking below is the
                     # real guard, so a fence landing here only delays the
                     # job off-lane instead of running it concurrently.
                     fenced_dirs, fenced_pairs = self._fences.fenced_snapshot()
-                    fenced_targets = self._fences.fenced_targets_snapshot()
                     dir_fenced = work_dir in fenced_dirs
                     pair_fenced = (bool(pair_fp) and pair_fp in fenced_pairs) or (
                         bool(stable_fp) and stable_fp in fenced_pairs
                     )
-                    target_fenced = bool(target_stable) and target_stable in fenced_targets
-                    fenced = dir_fenced or pair_fenced or target_fenced
+                    fenced = dir_fenced or pair_fenced
                     if not fenced:
                         # Queued -> running transitions under the same lock
                         # as the cancel check, so a cancel landing here
@@ -437,14 +428,12 @@ class JobWorkerMixin:
                             timed_out_params = (self._jobs.get(job_id) or {}).get("params") or {}
                             timed_out_fp = timed_out_params.get(SNAPSHOT_FP)
                             timed_out_stable = timed_out_params.get(SNAPSHOT_STABLE)
-                            timed_out_target = timed_out_params.get(SNAPSHOT_TARGET_STABLE)
                         self._fences.note_timeout(
                             future=future,
                             pool=pool,
                             job_dir=live_dir,
                             pair_fp=str(timed_out_fp) if timed_out_fp else None,
                             stable_fp=str(timed_out_stable) if timed_out_stable else None,
-                            target_stable=str(timed_out_target) if timed_out_target else None,
                         )
                         pool = None
                         continue
@@ -529,74 +518,52 @@ class JobWorkerMixin:
                             detail = exc.format_message()
                         except Exception:
                             detail = str(exc)
-                        # P0 #1: verbatim worker text must not reach pollers
-                        # scrubbed (console persist path already scrubs via
-                        # _persist_console; the pollable error field bypassed
-                        # it). Truncate: polled payloads carry the actionable
-                        # line; full tracebacks stay server-side.
+                        # Scrub before persist/serve: ClickException wraps
+                        # backend errors via str(e) at CLI call sites, so
+                        # token/credential bytes must not reach pollers.
+                        # Console output for the same run is scrubbed.
                         message = _scrub_output(detail.strip() or "Job failed")
+                        # Truncate: polled payloads carry the actionable line;
+                        # full tracebacks stay server-side.
                         live_dir = self._live_job_dir(job_id, job_dir)
                         self._fail(
                             job_id, live_dir, _bounded_output(buffer.getvalue()), message[:500]
                         )
-                except (ValueError, KeyError, TypeError) as exc:
+                except (ValueError, KeyError) as exc:
                     # Fail-fast domain (unknown job, pair drift, deleted
-                    # connection, corrupt snapshot, missing pin keys, and
-                    # service/CLI wiring drift): raised by our own guards
-                    # with operator-actionable, secret-free text. Preserve
-                    # it so queued jobs fail with guidance instead of a
-                    # bare class name. TypeError belongs here ONLY for the
-                    # service-to-CLI layer (call_command allowlist
-                    # "Unknown parameter(s) ..." drift, which is what the
-                    # operator needs to fix). Every other TypeError -- bad
-                    # values, library bugs, path/SQL reprs that may format
-                    # secrets -- routes to the error_id redaction below
-                    # (P0 #1: verbatim worker text must not reach pollers).
-                    # UnknownJobError is a KeyError subclass, so
-                    # chained-reference misses keep their
-                    # "Unknown job_id ..." detail here.
-                    if isinstance(exc, TypeError) and "Unknown parameter(s)" not in str(exc):
-                        error_id = uuid.uuid4().hex[:12]
-                        log.error("job %s failed (error_id=%s)", job_id, error_id, exc_info=exc)
-                        live_dir = self._live_job_dir(job_id, job_dir)
-                        self._fail(
-                            job_id,
-                            live_dir,
-                            _bounded_output(buffer.getvalue()),
-                            f"{type(exc).__name__} (error_id={error_id}); see server logs.",
-                        )
-                    else:
-                        log.error("job %s failed: %s", job_id, exc)
-                        try:
-                            detail = str(exc).strip()
-                        except Exception:
-                            detail = ""
-                        # Scrub the preserved guidance text the same way as
-                        # ClickException detail (P0 #1): fail-fast messages
-                        # are secret-free by construction, but a future
-                        # backend-format change must not cross the poll
-                        # boundary unscrubbed.
-                        message = _scrub_output(
-                            f"{type(exc).__name__}: {detail}"[:500]
-                            if detail
-                            else f"{type(exc).__name__}"
-                        )
-                        live_dir = self._live_job_dir(job_id, job_dir)
-                        self._fail(
-                            job_id,
-                            live_dir,
-                            _bounded_output(buffer.getvalue()),
-                            message,
-                        )
-                except Exception as exc:  # noqa: BLE001 - surfaced via polling
-                    error_id = uuid.uuid4().hex[:12]
-                    log.error("job %s failed (error_id=%s)", job_id, error_id, exc_info=exc)
+                    # connection, corrupt snapshot, missing pin keys):
+                    # raised by our own guards with operator-actionable,
+                    # secret-free text. Preserve it so queued jobs fail
+                    # with guidance instead of a bare class name. Every
+                    # other exception kind stays limited to its bare name
+                    # below (backend detail must not leak). UnknownJobError
+                    # is a KeyError subclass, so chained-reference misses
+                    # keep their "Unknown job_id ..." detail here.
+                    log.error("job %s failed: %s", job_id, exc)
+                    try:
+                        detail = str(exc).strip()
+                    except Exception:
+                        detail = ""
+                    message = (
+                        f"{type(exc).__name__}: {detail}"[:500]
+                        if detail
+                        else f"{type(exc).__name__}"
+                    )
                     live_dir = self._live_job_dir(job_id, job_dir)
                     self._fail(
                         job_id,
                         live_dir,
                         _bounded_output(buffer.getvalue()),
-                        f"{type(exc).__name__} (error_id={error_id}); see server logs.",
+                        message,
+                    )
+                except Exception as exc:  # noqa: BLE001 - surfaced via polling
+                    log.exception("job %s failed", job_id)
+                    live_dir = self._live_job_dir(job_id, job_dir)
+                    self._fail(
+                        job_id,
+                        live_dir,
+                        _bounded_output(buffer.getvalue()),
+                        f"{type(exc).__name__}",
                     )
                 except BaseException as exc:  # keep the single worker alive
                     try:

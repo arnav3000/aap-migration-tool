@@ -25,7 +25,6 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyHeader
 
-from aap_migration.api._errors import InternalStatusError
 from aap_migration.api.models import api_db_path
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -72,6 +71,8 @@ def get_fernet() -> Fernet:
         try:
             return Fernet(env_key.encode() if isinstance(env_key, str) else env_key)
         except ValueError as exc:
+            from aap_migration.api.jobs._records import InternalStatusError
+
             raise InternalStatusError(
                 "Server misconfigured: AAP_BRIDGE_API_KEY is not a valid Fernet key "
                 "(expected 32 url-safe base64 bytes); set a valid key."
@@ -83,6 +84,8 @@ def get_fernet() -> Fernet:
             with open(key_path, "rb") as fh:
                 return Fernet(fh.read().strip())
         except ValueError as exc:
+            from aap_migration.api.jobs._records import InternalStatusError
+
             raise InternalStatusError(
                 f"Server misconfigured: Fernet key file '{key_path}' is invalid; "
                 "replace it with a valid key (or delete it to regenerate)."
@@ -97,6 +100,8 @@ def get_fernet() -> Fernet:
             with open(key_path, "rb") as fh:
                 return Fernet(fh.read().strip())
         except ValueError as exc:
+            from aap_migration.api.jobs._records import InternalStatusError
+
             raise InternalStatusError(
                 f"Server misconfigured: Fernet key file '{key_path}' is invalid."
             ) from exc
@@ -195,6 +200,12 @@ def _sweep_store(store: dict[str, list[float]], now: float) -> None:
     expired = [b for b, entry in store.items() if (now - entry[1]) > _AUTH_WINDOW_S]
     for b in expired:
         store.pop(b, None)
+
+
+def _sweep_auth_failures(now: float) -> None:
+    """Drop expired windows. Callers hold ``_auth_lock``."""
+    _sweep_store(_auth_failures, now)
+    _sweep_store(_auth_key_failures, now)
 
 
 def _record_store(store: dict[str, list[float]], bucket: str) -> None:
@@ -372,13 +383,18 @@ def require_api_key(
     raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
+# -- SSRF / URL validators (leaf home: utils.ssrf) ---------------------------
+# Transport (base_client) and API layers share these via the leaf module so
+# the dependency points the right way. Re-exported here for backward
+# compatibility of ``from aap_migration.api.security import ...``.
+
+
 def confine_path(path: str | Path, base: str | Path, *, label: str = "path") -> Path:
     """Resolve *path* and require it to stay under *base*.
 
     Raises ValueError when the resolved path escapes (``..`` traversal,
     symlink escape, or absolute path outside the base). Returns the resolved
-    absolute Path otherwise. Used by routers/services to confine
-    caller-supplied artifact paths to their job directory.
+    absolute Path otherwise.
     """
     base_resolved = Path(base).resolve()
     candidate = Path(path)

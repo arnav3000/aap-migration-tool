@@ -70,11 +70,6 @@ class FenceTracker:
     stored in the union ``_fenced_pairs`` so a token rotation or TLS edit
     to the same physical controllers stays fenced until orphans drain,
     while a URL retarget to different controllers correctly unfences.
-    A third set, ``_fenced_targets``, holds the target-side-only stable
-    key (P1 #4): the full-pair keys mix both endpoints, so a resubmission
-    from a different source to the same target would otherwise slip both
-    gates while a timed-out orphan is still writing to that target.
-    Source-only jobs carry no target key and never block on it.
     """
 
     def __init__(
@@ -89,7 +84,6 @@ class FenceTracker:
         self._orphans: list[dict[str, Any]] = []
         self._fenced_dirs: set[str] = set()
         self._fenced_pairs: set[str] = set()
-        self._fenced_targets: set[str] = set()
 
     # -- introspection (snapshots, never raise) -------------------------
     def snapshot(self) -> dict[str, int]:
@@ -99,7 +93,6 @@ class FenceTracker:
                 "orphans": len(self._orphans),
                 "fenced_dirs": len(self._fenced_dirs),
                 "fenced_pairs": len(self._fenced_pairs),
-                "fenced_targets": len(self._fenced_targets),
             }
 
     def fenced_dirs_snapshot(self) -> set[str]:
@@ -111,11 +104,6 @@ class FenceTracker:
         """Copy of (fenced dirs, fenced pairs) for dequeue gating."""
         with self._lock:
             return set(self._fenced_dirs), set(self._fenced_pairs)
-
-    def fenced_targets_snapshot(self) -> set[str]:
-        """Copy of fenced target-side keys for dequeue gating (P1 #4)."""
-        with self._lock:
-            return set(self._fenced_targets)
 
     def is_fenced_dir(self, job_dir: str) -> bool:
         """True when *job_dir* currently has a live orphan (reaps first)."""
@@ -134,14 +122,6 @@ class FenceTracker:
             if pair_fp and pair_fp in self._fenced_pairs:
                 return True
             return bool(stable_fp and stable_fp in self._fenced_pairs)
-
-    def is_fenced_target(self, target_stable: str | None) -> bool:
-        """True when the target side has a live orphan (reaps first, P1 #4)."""
-        if not target_stable:
-            return False
-        self.reap()
-        with self._lock:
-            return target_stable in self._fenced_targets
 
     # -- lifecycle -------------------------------------------------------
     def reap(self) -> None:
@@ -188,23 +168,14 @@ class FenceTracker:
                 if o.get("stable_fp"):
                     pairs.add(str(o["stable_fp"]))
             self._fenced_pairs = pairs
-            self._fenced_targets = {str(o["target_stable"]) for o in live if o.get("target_stable")}
 
-    def check_submit(
-        self,
-        work_dir: str,
-        pair_fp: str,
-        stable_fp: str | None = None,
-        target_stable: str | None = None,
-    ) -> str | None:
+    def check_submit(self, work_dir: str, pair_fp: str, stable_fp: str | None = None) -> str | None:
         """Load-shedding gate for new submissions (reaps first).
 
         Returns an error message when the submission must shed load
         (orphan cap reached or target fenced), else None. Checks both the
         credential-mixing fingerprint and the stable URL-only key so a
-        token rotation to the same controllers stays fenced, plus the
-        target-side key so a different-source resubmission to a fenced
-        target sheds too (P1 #4).
+        token rotation to the same controllers stays fenced.
         """
         self.reap()
         with self._lock:
@@ -222,8 +193,6 @@ class FenceTracker:
                 return (
                     "AAP pair fenced by a timed-out attempt still running; resubmit after it drains"
                 )
-            if target_stable and target_stable in self._fenced_targets:
-                return "AAP target fenced by a timed-out attempt still running; resubmit after it drains"
         return None
 
     def grace_secs(self) -> float:
@@ -282,7 +251,6 @@ class FenceTracker:
         job_dir: str,
         pair_fp: str | None,
         stable_fp: str | None = None,
-        target_stable: str | None = None,
     ) -> None:
         """Fence a timed-out attempt's directory and pair (never raises)."""
         try:
@@ -295,7 +263,6 @@ class FenceTracker:
                         "job_dir": job_dir,
                         "pair_fp": pair_fp,
                         "stable_fp": stable_fp,
-                        "target_stable": target_stable,
                         "fence_expires_at": time.monotonic() + max(fence_ttl, 1.0),
                         "fence_expired": False,
                     }
@@ -306,8 +273,6 @@ class FenceTracker:
                     self._fenced_pairs.add(str(pair_fp))
                 if stable_fp:
                     self._fenced_pairs.add(str(stable_fp))
-                if target_stable:
-                    self._fenced_targets.add(str(target_stable))
                 # Defensive bound: drop done futures only so the list cannot
                 # grow past 2x cap on timeout bursts. A hung (not-done)
                 # orphan's fence is never released on overflow: its daemon
@@ -348,8 +313,5 @@ class FenceTracker:
                         if o.get("stable_fp"):
                             pairs.add(str(o["stable_fp"]))
                     self._fenced_pairs = pairs
-                    self._fenced_targets = {
-                        str(o["target_stable"]) for o in self._orphans if o.get("target_stable")
-                    }
         except Exception:
             log.exception("orphan fence bookkeeping failed")

@@ -40,7 +40,7 @@ def _config_summary(config: MigrationConfig) -> dict:
 
 
 @router.post("/config/validate", response_model=ConfigValidateOut)
-async def validate_config(body: ConfigValidateRequest) -> dict:
+def validate_config(body: ConfigValidateRequest) -> dict:
     """Validate active connection config, optionally testing connectivity.
 
     ``valid`` is a constant-True success marker on 200 (pinned as
@@ -48,10 +48,6 @@ async def validate_config(body: ConfigValidateRequest) -> dict:
     ``valid: false``): use the status code, not the boolean, for failure
     detection. ``connectivity`` is always present (empty ``{}`` unless
     ``check_connectivity`` was requested).
-
-    Async with bounded off-loop SSRF re-verification (mirrors
-    ``connections.test_connection``): a burst of parallel validations must
-    not pin request threads for up to 30s each and stall submits/polls.
     """
     try:
         ctx = build_ephemeral_context(body.source_id, body.target_id)
@@ -77,8 +73,8 @@ async def validate_config(body: ConfigValidateRequest) -> dict:
             from aap_migration.utils.ssrf import reverify_execution_url_bounded
 
             try:
-                await asyncio.to_thread(reverify_execution_url_bounded, str(config.source.url))
-                await asyncio.to_thread(reverify_execution_url_bounded, str(config.target.url))
+                reverify_execution_url_bounded(str(config.source.url))
+                reverify_execution_url_bounded(str(config.target.url))
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -86,12 +82,15 @@ async def validate_config(body: ConfigValidateRequest) -> dict:
                 await ctx.source_client.get("ping/")
                 await ctx.target_client.get("ping/")
 
-            try:
+            async def _probe() -> None:
                 await asyncio.wait_for(_main(), timeout=30)
+
+            try:
+                asyncio.run(_probe())
                 connectivity = {"source": "reachable", "target": "reachable"}
             except TimeoutError as exc:
                 log.exception("config connectivity check timed out")
-                raise HTTPException(status_code=502, detail="Connection probe timed out") from exc
+                raise HTTPException(status_code=502, detail=redact_backend_error(exc)) from exc
             except Exception as exc:
                 log.exception("config connectivity check failed")
                 raise HTTPException(status_code=502, detail=redact_backend_error(exc)) from exc

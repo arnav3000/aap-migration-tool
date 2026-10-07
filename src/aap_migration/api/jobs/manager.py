@@ -16,15 +16,8 @@ import queue
 import threading
 import uuid
 from collections.abc import Callable
-from typing import Any, Unpack
+from typing import Any
 
-from aap_migration.api._errors import (
-    ConflictError,
-    QueueFullError,
-    ServerShuttingDownError,
-    StorageUnhealthyError,
-    UnknownJobError,
-)
 from aap_migration.api.jobs import _config as _job_config
 from aap_migration.api.jobs._config import _env_float, startup_degraded_reason
 from aap_migration.api.jobs._console import (
@@ -38,18 +31,16 @@ from aap_migration.api.jobs._reads import JobReadMixin
 from aap_migration.api.jobs._records import (
     ACTIVE_STATUSES,
     TERMINAL_STATUSES,
+    ConflictError,
     JobRecord,
-    JobUpdate,
+    QueueFullError,
+    ServerShuttingDownError,
+    StorageUnhealthyError,
+    UnknownJobError,
     _utcnow,
 )
 from aap_migration.api.jobs._worker import JobWorkerMixin
-from aap_migration.api.store import (
-    PARAM_FORCE,
-    PARAM_JOB_ID,
-    SNAPSHOT_FP,
-    SNAPSHOT_STABLE,
-    SNAPSHOT_TARGET_STABLE,
-)
+from aap_migration.api.store import SNAPSHOT_FP, SNAPSHOT_STABLE
 
 log = logging.getLogger("aap_migration.api.jobs")
 
@@ -122,12 +113,6 @@ class JobManager(JobReadMixin, JobWorkerMixin):
         self._probe_guard = threading.Lock()
         self._probe_event: threading.Event | None = None
         self._probe_box: dict[str, Any] = {}
-        # Cooldown after a probe timeout (P2 #13): a hung probe thread
-        # stays blocked in storage I/O forever, so without a cooldown
-        # every timeout window strands another daemon thread and a
-        # sustained outage piles them until the process wedges. While
-        # cooling, submits keep the degraded 503 without spawning.
-        self._probe_cooldown_until: float = 0.0
         self._worker = threading.Thread(target=self._run, name="api-job-worker", daemon=True)
         self._worker.start()
 
@@ -180,13 +165,13 @@ class JobManager(JobReadMixin, JobWorkerMixin):
         # endpoint supports it); otherwise refuse with a 409 naming the
         # stop-point. Unchained submits and chains onto succeeded/failed or
         # queued-cancelled jobs are unaffected.
-        self.assert_no_cancel_fence(params.get(PARAM_JOB_ID), bool(params.get(PARAM_FORCE, False)))
+        self.assert_no_cancel_fence(params.get("job_id"), bool(params.get("force", False)))
         job_id = str(uuid.uuid4())
         if job_dir:
             work_dir = os.path.abspath(job_dir)
             base = os.path.abspath(self.base_dir)
-            if work_dir == base or os.path.commonpath([work_dir, base]) != base:
-                raise ValueError("job_dir must stay strictly under the job base directory")
+            if os.path.commonpath([work_dir, base]) != base:
+                raise ValueError("job_dir must stay under the job base directory")
         else:
             work_dir = os.path.join(self.base_dir, job_id)
         now = _utcnow()
@@ -224,34 +209,13 @@ class JobManager(JobReadMixin, JobWorkerMixin):
                 raise QueueFullError(f"Job queue at total capacity ({total_cap}); retry later")
             pair_fp = params.get(SNAPSHOT_FP)
             stable_fp = params.get(SNAPSHOT_STABLE)
-            target_stable = params.get(SNAPSHOT_TARGET_STABLE)
             fence_error = self._fences.check_submit(
                 work_dir,
                 str(pair_fp) if pair_fp else "",
                 str(stable_fp) if stable_fp else None,
-                str(target_stable) if target_stable else None,
             )
             if fence_error is not None:
                 raise QueueFullError(fence_error)
-            # Per-pair parked bound (P1 #7): one wedged pair must not
-            # convert a same-pair retry burst into a process-wide admission
-            # freeze. Parked waiters count toward the total cap, so ~100
-            # same-pair parks plus ~50 further admits 429 unrelated pairs
-            # while the lane idles. Shed same-pair submits past the bound
-            # here instead of parking unboundedly toward the total cap.
-            if pair_fp or stable_fp or target_stable:
-                same_pair_parked = sum(
-                    1
-                    for info in self._parked.values()
-                    if (pair_fp and info.get("pair_fp") == pair_fp)
-                    or (stable_fp and info.get("stable_fp") == stable_fp)
-                    or (target_stable and info.get("target_stable") == target_stable)
-                )
-                if same_pair_parked >= _job_config.MAX_PARKED_PER_PAIR:
-                    raise QueueFullError(
-                        f"Too many jobs waiting on the same fenced pair "
-                        f"({same_pair_parked}); resubmit after it drains"
-                    )
             self._jobs[job_id] = job
             self._funcs[job_id] = func
             evict_dirs = self._evict_locked()
@@ -403,7 +367,7 @@ class JobManager(JobReadMixin, JobWorkerMixin):
                     continue
                 if other.get("status") not in ACTIVE_STATUSES:
                     continue
-                if (other.get("params") or {}).get(PARAM_JOB_ID) == job_id:
+                if (other.get("params") or {}).get("job_id") == job_id:
                     raise ConflictError(
                         f"Job '{job_id}' is referenced by queued job '{other_id}'; "
                         "delete or wait for the chained job first"
@@ -470,7 +434,7 @@ class JobManager(JobReadMixin, JobWorkerMixin):
                 indexed = (job["job_id"], job["job_type"], "cancelled")
             else:
                 job["cancel_requested"] = True
-                job["cancel_requested_at"] = _utcnow()
+                job["cancel_requested_at"] = _utcnow()  # type: ignore[typeddict-unknown-key]
                 job["updated_at"] = _utcnow()
                 # Best-effort pollable signal so future resume/retry phases
                 # can detect a pending cancel without invasive phase polling.
@@ -545,11 +509,6 @@ class JobManager(JobReadMixin, JobWorkerMixin):
         timeout_secs = max(float(timeout_secs), 0.1)
         import time as _time
 
-        if _time.monotonic() < self._probe_cooldown_until:
-            # Still cooling after a hung probe: serve the cached degraded
-            # state (a seconds-stale 503) instead of stranding another
-            # thread in the same hung storage call.
-            return False
         deadline = _time.monotonic() + timeout_secs
         with self._probe_guard:
             event = self._probe_event
@@ -579,13 +538,11 @@ class JobManager(JobReadMixin, JobWorkerMixin):
             # probe thread clears _probe_event only when it still owns it
             # (see _run_degraded_probe), so detaching here lets the next
             # submit start a fresh probe after recovery instead of joining
-            # the dead one and 503ing until restart. Start a cooldown so
-            # a sustained hang stops stranding a thread per window (P2 #13).
+            # the dead one and 503ing until restart.
             with self._probe_guard:
                 if self._probe_event is event:
                     self._probe_event = None
                     self._probe_box = {}
-                    self._probe_cooldown_until = _time.monotonic() + timeout_secs
             return False
         if "error" in box:
             raise box["error"]
@@ -751,7 +708,7 @@ class JobManager(JobReadMixin, JobWorkerMixin):
             TERMINAL_STATUSES,
         )
 
-    def _set(self, job_id: str, **fields: Unpack[JobUpdate]) -> None:
+    def _set(self, job_id: str, **fields: Any) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:  # deleted while running; nothing to update
@@ -762,7 +719,8 @@ class JobManager(JobReadMixin, JobWorkerMixin):
                 # overwrite the interrupted message with a normal
                 # succeeded/failed transition.
                 return
-            job.update(fields)
+            for key, value in fields.items():
+                job[key] = value  # type: ignore[literal-required]
             job["updated_at"] = _utcnow()
             if job["status"] in TERMINAL_STATUSES:
                 self._requeues.pop(job_id, None)

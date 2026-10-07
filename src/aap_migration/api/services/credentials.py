@@ -6,12 +6,7 @@ import asyncio
 from typing import Any, cast
 
 from aap_migration.api.jobs import JobRecord
-from aap_migration.api.services._core import (
-    _artifact_result,
-    _cancel_requested,
-    _relativize,
-    chained_ctx,
-)
+from aap_migration.api.services._core import _artifact_result, _relativize, chained_ctx
 
 
 # -- credentials ----------------------------------------------------------
@@ -46,16 +41,7 @@ def run_credential_compare(job: JobRecord) -> dict[str, Any]:
 
 
 def run_credential_migrate(job: JobRecord) -> dict[str, Any]:
-    """Migrate credentials (+ org/c Volumes as deps, mirrors ``credentials migrate``).
-
-    Cancel is cooperative: the flag is polled before start and between the
-    compare and migrate phases (the CLI calls below cannot be preempted
-    mid-call). A cancel landing mid-migrate still runs to completion
-    because the subprocess cannot be preempted; the FIFO worker then
-    reports cancelled with fence markers (see jobs._worker).
-    """
-    if _cancel_requested(job):
-        return {"message": "Credential migration cancelled before start", "cancelled": True}
+    """Migrate credentials (+ org/c Volumes as deps, mirrors ``credentials migrate``)."""
     with chained_ctx(job) as (ctx, _, workdir, params):
 
         async def _main() -> Any:
@@ -65,8 +51,6 @@ def run_credential_migrate(job: JobRecord) -> dict[str, Any]:
             comparison = await coordinator.compare_and_verify_credentials(
                 report_path=str(workdir / "reports" / "credential-comparison.md")
             )
-            if _cancel_requested(job):
-                return {"cancelled": True}
             if comparison.get("missing_count", 0) == 0:
                 return {
                     "status": "no_action_needed",
@@ -81,8 +65,6 @@ def run_credential_migrate(job: JobRecord) -> dict[str, Any]:
             return result
 
         result: dict[str, Any] = asyncio.run(_main())
-        if result.get("cancelled") is True:
-            return {"message": "Credential migration cancelled", "cancelled": True}
         result = cast(dict[str, Any], _relativize(result, workdir))
         # No-action branch wins over the generic default (setdefault never
         # overwrites): check the specific status first so a no-op run

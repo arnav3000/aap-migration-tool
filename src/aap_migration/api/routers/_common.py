@@ -8,11 +8,6 @@ from typing import Any, Literal, TypeVar, cast
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 
-# Single home lives in api._errors (neutral, depends on nothing internal):
-# routers import the helpers here, never through underscore-private
-# jobs._records (which only re-exports them for backward compatibility).
-from aap_migration.api._errors import _key_detail as _key_detail
-from aap_migration.api._errors import _store_http_error as _store_http_error
 from aap_migration.api._paths import API_V1_PREFIX
 from aap_migration.api.jobs import (
     InternalStatusError,
@@ -20,6 +15,11 @@ from aap_migration.api.jobs import (
     QueueFullError,
     get_job_manager,
 )
+
+# Re-exported (single home lives in foundation jobs._records): routers
+# depend on foundation, never the reverse (stack 3 review #1).
+from aap_migration.api.jobs._records import _key_detail as _key_detail
+from aap_migration.api.jobs._records import _store_http_error as _store_http_error
 from aap_migration.api.schemas import (
     ChainedRequest,
     ConnectionSelector,
@@ -30,10 +30,8 @@ from aap_migration.api.schemas import (
 )
 from aap_migration.api.store import (
     SNAPSHOT_FP,
-    SNAPSHOT_NEED,
     SNAPSHOT_SOURCE_ID,
     SNAPSHOT_TARGET_ID,
-    ConnectionScope,
     NeedScope,
     needs_connections,
 )
@@ -61,39 +59,86 @@ def _poll_url(job_id: str, root_path: str = "") -> str:
     return f"{prefix}{API_V1_PREFIX}/jobs/{job_id}"
 
 
-def _require_submit_pins(params: dict[str, Any]) -> None:
-    """Fail fast when connection-bearing params carry no snapshot pins.
+def _get_state(
+    job_id: str | None, strict: bool, empty: dict[str, Any]
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Shared missing-DB branch for state readers (single home).
 
-    Mirrors the execution-side pin assert in
-    ``services._core.chained_ctx`` (which raises KeyError) at submit time
-    with a 400: connection selectors without ``_snapshot_*`` pins mean the
-    caller bypassed :func:`submit_chained`, so no drift guard exists for
-    the run. Connectionless params (no selectors, ``need="none"`` pins, or
-    complete pins) pass through.
+    Returns ``(state, None)`` when a state DB resolves, otherwise
+    ``(None, empty)`` for the lenient CLI-parity shape, raising 404 when
+    ``strict`` opts into the missing-DB-as-error contract.
     """
-    need = params.get(SNAPSHOT_NEED)
-    if need is not None and need != "none":
-        for _key in (
-            SNAPSHOT_SOURCE_ID,
-            SNAPSHOT_TARGET_ID,
-            SNAPSHOT_FP,
-            SNAPSHOT_NEED,
-        ):
-            if _key not in params:
-                raise ValueError(
-                    f"job params declare {SNAPSHOT_NEED}={need!r} but miss "
-                    f"required pin key {_key!r}; submit connection-bearing "
-                    "jobs via submit_chained"
-                )
-        return
-    if need is None and ("source_id" in params or "target_id" in params):
-        # Note: "job_id" alone is not a trigger -- connectionless chained
-        # submits (need="none", e.g. iam-report re-rendering onto a
-        # referenced workdir) legitimately carry job_id without pins.
-        raise ValueError(
-            "connection-bearing params without snapshot pins; submit via "
-            "submit_chained so the effective pair is fingerprinted"
+    from aap_migration.api.context import open_default_state
+
+    if not job_id:
+        state = open_default_state()
+    else:
+        from aap_migration.api.context import resolve_job_state
+
+        _, state = resolve_job_state(job_id, strict=strict)
+    if state is None:
+        if strict:
+            raise HTTPException(status_code=404, detail="No migration state DB found")
+        return None, empty
+    return state, None
+
+
+def resolve_chained_scope(
+    job_id: str,
+    source_id: str | None,
+    target_id: str | None,
+    *,
+    require_xformed: bool,
+) -> tuple[Any, Any, str]:
+    """Resolve a job-scoped dependency-read preamble (single home).
+
+    Shared by ``POST /imports/check-dependencies`` and
+    ``POST /validations/dependencies`` so the two readers cannot drift:
+    resolve_job_state with the same 404/409 semantics, validate
+    explicitly-passed connection ids only (targetless reads discard the
+    built context, so source-only deployments without explicit ids get
+    200/404 from chained state, not 400), then gate on the chained tree.
+
+    With ``require_xformed=True`` (validation route) both the xformed
+    directory and the chained DB must exist (404 otherwise); with False
+    (migrations route) only the chained DB is required. Returns
+    ``(workdir, chained_state, input_dir)`` where ``input_dir`` is the
+    chained ``xformed`` dir as a string.
+    """
+    from pathlib import Path  # noqa: F401 -- re-exported for callers
+
+    from aap_migration.api.context import build_ephemeral_context, resolve_job_state
+
+    workdir, chained_state = resolve_job_state(job_id, strict=False, allow_statuses=("succeeded",))
+    assert workdir is not None  # job_id is truthy, so a dir is returned
+    if source_id or target_id:
+        try:
+            ctx = build_ephemeral_context(source_id, target_id)
+            # Point at the chained tree so we never judge the ephemeral
+            # server-default transform_dir (validation discards ctx;
+            # migrations keeps this assignment for parity).
+            ctx.config.paths.transform_dir = str(workdir / "xformed")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if require_xformed:
+        chained = workdir / "xformed"
+        if not chained.is_dir():
+            raise HTTPException(
+                status_code=404,
+                detail=f"No transformed data yet for job '{job_id}'",
+            )
+        if chained_state is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No transformed data yet for job '{job_id}'",
+            )
+        return workdir, chained_state, str(chained)
+    if chained_state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No transformed data yet for job '{job_id}'",
         )
+    return workdir, chained_state, str(workdir / "xformed")
 
 
 def submit_job(
@@ -103,16 +148,7 @@ def submit_job(
     job_dir: str | None = None,
     root_path: str = "",
 ) -> JobCreated:
-    """Enqueue a background job and build the response model.
-
-    Low-level enqueue: connection-bearing callers must use
-    :func:`submit_chained` instead so the effective pair is fingerprinted
-    into stored params and re-verified at execution. Direct callers pass
-    connectionless params (or complete ``_snapshot_*`` pins); anything
-    else fails fast here with 400 instead of waiting out the FIFO queue
-    and failing at execution.
-    """
-    _require_submit_pins(params)
+    """Enqueue a background job and build the response model."""
     try:
         job = get_job_manager().submit(job_type, params, func, job_dir=job_dir)
     except QueueFullError as exc:
@@ -213,13 +249,7 @@ def submit_chained(
         try:
             from aap_migration.api.context import submit_pair_snapshot
 
-            dumped.update(
-                submit_pair_snapshot(
-                    ConnectionScope(
-                        source_id=source_id, target_id=target_id, need=cast(NeedScope, need)
-                    )
-                )
-            )
+            dumped.update(submit_pair_snapshot(source_id, target_id, need))
         except (KeyError, ValueError, QueueFullError, InternalStatusError) as exc:
             raise _store_http_error(exc) from exc
         # TLS posture veto (P1 #3): a per-job verify_ssl=false against a
@@ -284,22 +314,14 @@ def _reverify_post_submit(
     from aap_migration.api.store import pair_fingerprint
 
     try:
-        current = pair_fingerprint(
-            ConnectionScope(source_id=source_id, target_id=target_id, need=cast(NeedScope, need))
-        )
+        current = pair_fingerprint(source_id, target_id, need=cast(NeedScope, need))
     except (KeyError, ValueError) as exc:
-        # fail_fast returns False when the job already left queued (worker
-        # dequeued between enqueue and this recheck): the job is running
-        # and doomed to fail at execution. Return with the job_id intact
-        # so the client can poll it; execution-time verify fails it there.
-        # Only raise when fail_fast actually failed the queued job.
-        if get_job_manager().fail_fast(
+        get_job_manager().fail_fast(
             job_id,
             f"Connections changed while this job was submitted ({exc}); "
             "resubmit to run under the current pair.",
-        ):
-            raise _store_http_error(exc) from exc
-        return
+        )
+        raise _store_http_error(exc) from exc
     snap_src = dumped.get(SNAPSHOT_SOURCE_ID)
     snap_tgt = dumped.get(SNAPSHOT_TARGET_ID)
     snap_fp = dumped.get(SNAPSHOT_FP)

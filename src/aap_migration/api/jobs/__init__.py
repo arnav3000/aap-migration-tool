@@ -1,8 +1,8 @@
 """Background job manager for long-running API operations (package).
 
 Split from the former single ``jobs.py`` module along section seams; this
-package re-exports the public surface so ``from aap_migration.api.jobs
-import ...`` keeps working for supported names:
+package re-exports every public name so ``from aap_migration.api.jobs
+import ...`` keeps working unchanged:
 
 - :mod:`aap_migration.api.jobs._config` -- env bounds + startup health
 - :mod:`aap_migration.api.jobs._records` -- record shapes + result envelope
@@ -14,10 +14,6 @@ import ...`` keeps working for supported names:
 - :mod:`aap_migration.api.jobs.manager` -- FIFO :class:`JobManager` (queue/transition facade)
 - :mod:`aap_migration.api.jobs._worker` -- worker loop + fence/park orchestration mixin
 
-Underscore helpers live in their leaf modules and are intentionally NOT
-re-exported here (P2 #11): internal callers import them from the leaf
-module directly, so leaf renames stay non-breaking.
-
 Public records never expose server-local filesystem paths; the internal
 record keeps ``job_dir`` for workers only. Error strings returned to callers
 are generic ids plus a short console tail -- tracebacks are logged
@@ -28,22 +24,12 @@ from __future__ import annotations
 
 import threading
 
-from aap_migration.api._errors import (
-    ConflictError,
-    InternalStatusError,
-    QueueFullError,
-    ServerShuttingDownError,
-    StorageUnhealthyError,
-    UnknownJobError,
-    WorkdirGoneError,
-)
 from aap_migration.api.jobs._config import (
     CONSOLE_MAX_BYTES,
     CONSOLE_TAIL_BYTES,
     JOB_TIMEOUT_SECS,
     MAX_JOBS,
     MAX_ORPHANS,
-    MAX_PARKED_PER_PAIR,
     MAX_QUEUE_DEPTH,
     ORPHAN_QUARANTINE_MAX,
     ORPHAN_SWEEP_AGE_SECS,
@@ -51,14 +37,30 @@ from aap_migration.api.jobs._config import (
     set_startup_degraded,
     startup_degraded_reason,
 )
-from aap_migration.api.jobs._console import read_console_tail
+from aap_migration.api.jobs._console import (
+    _bounded_output,
+    _console_tail,
+    _persist_console,
+    _ThreadLocalProxy,
+    read_console_tail,
+)
 from aap_migration.api.jobs._records import (
     ACTIVE_STATUSES,
     TERMINAL_STATUSES,
+    ConflictError,
+    InternalStatusError,
     JobRecord,
-    JobUpdate,
+    QueueFullError,
+    ServerShuttingDownError,
+    StorageUnhealthyError,
+    UnknownJobError,
+    WorkdirGoneError,
+    _normalize_result,
+    _store_http_error,
+    _utcnow,
     public_job_params,
 )
+from aap_migration.api.jobs._scrub import _scrub_output as _scrub_output  # noqa: F401
 from aap_migration.api.jobs.manager import JobManager
 
 __all__ = [
@@ -67,7 +69,6 @@ __all__ = [
     "JOB_TIMEOUT_SECS",
     "MAX_JOBS",
     "MAX_ORPHANS",
-    "MAX_PARKED_PER_PAIR",
     "MAX_QUEUE_DEPTH",
     "ORPHAN_QUARANTINE_MAX",
     "ORPHAN_SWEEP_AGE_SECS",
@@ -79,11 +80,18 @@ __all__ = [
     "WorkdirGoneError",
     "JobManager",
     "JobRecord",
-    "JobUpdate",
     "QueueFullError",
     "ServerShuttingDownError",
     "StorageUnhealthyError",
     "public_job_params",
+    "_ThreadLocalProxy",
+    "_bounded_output",
+    "_console_tail",
+    "_normalize_result",
+    "_persist_console",
+    "_scrub_output",
+    "_store_http_error",
+    "_utcnow",
     "clear_startup_degraded_if_recovered",
     "get_job_manager",
     "manager_or_none",

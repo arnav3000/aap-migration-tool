@@ -213,25 +213,25 @@ class PayloadCheckOut(BaseModel):
 class ConfigValidateOut(BaseModel):
     """POST /config/validate success shape.
 
-    ``valid`` is a constant-True success marker (pinned as Literal[True];
-    real failures use HTTP 400/502, never ``valid: false``): branch on
-    the status code, not the boolean, for failure detection.
+    ``valid`` is a boolean success marker (``True`` on 200; real failures
+    use HTTP 400/502, never ``valid: false``): branch on the status code,
+    not the boolean, for failure detection.
     """
 
     model_config = {"extra": "forbid"}
 
-    valid: Literal[True]
+    valid: bool
     summary: dict[str, Any] = Field(default_factory=dict)
     connectivity: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConnectionTestOut(BaseModel):
-    """POST /connections/{id}/test success shape (same constant-True rule)."""
+    """POST /connections/{id}/test success shape (same boolean rule)."""
 
     model_config = {"extra": "forbid"}
 
     connection_id: str
-    reachable: Literal[True]
+    reachable: bool
     version: str | None = None
     url: str
 

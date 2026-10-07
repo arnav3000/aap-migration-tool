@@ -21,29 +21,14 @@ import yaml
 if TYPE_CHECKING:  # pragma: no cover
     from aap_migration.migration.state import MigrationState
 
-from aap_migration.api._errors import (
-    ConflictError,
-    UnknownJobError,
-    WorkdirGoneError,
-    _store_http_error,
-)
 from aap_migration.api.store import (
-    PARAM_ALLOW_PAIR_SWITCH,
-    PARAM_FORCE,
-    PARAM_JOB_ID,
-    PARAM_SOURCE_ID,
-    PARAM_TARGET_ID,
-    PARAM_VERIFY_SSL,
     SNAPSHOT_FERNET_FP,
     SNAPSHOT_FP,
     SNAPSHOT_NEED,
     SNAPSHOT_SOURCE_ID,
     SNAPSHOT_STABLE,
     SNAPSHOT_TARGET_ID,
-    SNAPSHOT_TARGET_STABLE,
-    ConnectionScope,
     NeedScope,
-    fingerprint_of_records,
     resolve_active_pair,
 )
 from aap_migration.cli.context import MigrationContext
@@ -53,11 +38,6 @@ from aap_migration.config import (
     PathConfig,
     StateConfig,
 )
-
-# Per-job log-handler registry (P2 #10): log-file path -> FileHandler.
-# Replaces the monkey-patched ``handler._api_job_file`` attribute so
-# setup/teardown identity stays visible to type-checking.
-_job_log_handlers: dict[str, Any] = {}
 
 
 def _instance_config(record: dict[str, Any]) -> AAPInstanceConfig:
@@ -111,33 +91,15 @@ def write_job_config(config: MigrationConfig, job_dir: str | Path) -> Path:
 
 def build_job_context(
     job_dir: str | Path,
-    scope: ConnectionScope | None = None,
+    source_id: str | None = None,
+    target_id: str | None = None,
+    db_path: str | None = None,
+    need: NeedScope = "both",
 ) -> tuple[MigrationContext, MigrationConfig]:
     """Resolve connections and create an isolated job context + config file."""
-    scope = scope or ConnectionScope()
-    source, target = resolve_active_pair(scope)
-    return _build_job_context_from_records(job_dir, source, target, scope.need)
-
-
-def _build_job_context_from_records(
-    job_dir: str | Path,
-    source: dict[str, Any] | None,
-    target: dict[str, Any] | None,
-    need: NeedScope,
-) -> tuple[MigrationContext, MigrationConfig]:
-    """Build the isolated context from already-resolved records (no re-resolve).
-
-    Single home for context construction shared by :func:`build_job_context`
-    (resolves, then builds) and :func:`setup_chained` (reuses the pair it
-    already verified, so a rotation landing between verify and build cannot
-    slip in through a second resolution -- P1 #2).
-    """
-    if source is None or (need != "source" and target is None):
-        raise ValueError(
-            "Connectionless jobs (need='none') carry no connections to build "
-            "a MigrationContext from; connection-bearing callers must resolve "
-            "a pair first."
-        )
+    source, target = resolve_active_pair(source_id, target_id, db_path, need=need)
+    if need != "source":
+        assert target is not None  # need="both" (default) guarantees a target
     # Execution-time SSRF re-check (#20): the stored URL may have been
     # rebound (or edited) to a metadata endpoint since create/update
     # validation; the worker's fetches would deliver the bearer token there.
@@ -169,7 +131,7 @@ def _build_job_context_from_records(
     except Exception:
         pass
     ctx = MigrationContext(config_path=config_path, log_level="ERROR")
-    ctx.replace_config(config)
+    ctx._config = config
     return ctx, config
 
 
@@ -179,17 +141,14 @@ def build_ephemeral_context(
     db_path: str | None = None,
 ) -> MigrationContext:
     """Build an in-memory context for quick sync endpoints (no job dir)."""
-    source, target = resolve_active_pair(
-        ConnectionScope(source_id=source_id, target_id=target_id, db_path=db_path)
-    )
-    assert source is not None  # need="both" (default) always resolves a source
+    source, target = resolve_active_pair(source_id, target_id, db_path)
     assert target is not None  # need="both" (default) guarantees a target
     config = MigrationConfig(
         source=_instance_config(source),
         target=_instance_config(target),
     )
     ctx = MigrationContext(config_path=Path(".").resolve(), log_level="ERROR")
-    ctx.replace_config(config)
+    ctx._config = config
     return ctx
 
 
@@ -197,21 +156,11 @@ def close_job_context(ctx: Any) -> None:
     """Best-effort close of per-job HTTP clients (never raises).
 
     Shared lifecycle home for worker teardown (services) and sync routers
-    (config/connections): closes the context's clients whether the close
-    method is sync or async. Async closes are awaited on the owning loop
-    when possible, run to completion on a helper thread when already
-    inside a loop, and never fire-and-forget leaked. Prefers the
-    :meth:`MigrationContext.close_clients` seam (P2 #10); foreign
-    context-likes without that seam fall back to the legacy private
-    attribute walk.
+    (config/connections): closes ``_source_client`` / ``_target_client``
+    whether the close method is sync or async. Async closes are awaited on
+    the owning loop when possible, run to completion on a helper thread when
+    already inside a loop, and never fire-and-forget leaked.
     """
-    close_clients = getattr(ctx, "close_clients", None)
-    if callable(close_clients):
-        try:
-            close_clients()
-        except Exception:
-            pass
-        return
     import asyncio
     import threading
 
@@ -278,20 +227,22 @@ def setup_job_logging(job_dir: str | Path) -> None:
     job, which cleared all root handlers and misrouted concurrent sync-endpoint
     logs while leaking file descriptors. Now each job gets its own
     ``FileHandler`` on a job-scoped logger; global handlers are never removed.
-    Handler identity lives in the module-level ``_job_log_handlers``
-    registry keyed by log-file path (no monkey-patched attributes).
     """
     import logging
 
     try:
-        log_file = str(Path(job_dir).resolve() / "logs" / "api.log")
-        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        log_file = Path(job_dir).resolve() / "logs" / "api.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
         logger = logging.getLogger("aap_migration.api.job")
-        if log_file in _job_log_handlers:
-            return
-        handler = logging.FileHandler(log_file)
+        for handler in logger.handlers:
+            try:
+                if getattr(handler, "_api_job_file", None) == str(log_file):
+                    return
+            except Exception:
+                continue
+        handler = logging.FileHandler(str(log_file))
+        handler._api_job_file = str(log_file)  # type: ignore[attr-defined]
         logger.addHandler(handler)
-        _job_log_handlers[log_file] = handler
     except Exception:
         pass
 
@@ -308,16 +259,16 @@ def teardown_job_logging(job_dir: str | Path) -> None:
     try:
         log_file = str(Path(job_dir).resolve() / "logs" / "api.log")
         logger = logging.getLogger("aap_migration.api.job")
-        handler = _job_log_handlers.pop(log_file, None)
-        if handler is not None:
+        for handler in list(logger.handlers):
             try:
-                logger.removeHandler(handler)
+                if getattr(handler, "_api_job_file", None) == log_file:
+                    logger.removeHandler(handler)
+                    try:
+                        handler.close()
+                    except Exception:
+                        pass
             except Exception:
-                pass
-            try:
-                handler.close()
-            except Exception:
-                pass
+                continue
     except Exception:
         pass
 
@@ -422,6 +373,7 @@ def resolve_job_state(
         # (incl. WorkdirGoneError) -> 404, ConflictError -> 409, any other
         # ValueError -> 400. Codes come from exception types only, never
         # message text.
+        from aap_migration.api.jobs._records import _store_http_error
 
         raise _store_http_error(exc) from exc
     candidate = workdir / "migration_state.db"
@@ -440,7 +392,11 @@ def open_default_state() -> MigrationState | None:
     return open_state(db_path)
 
 
-def submit_pair_snapshot(scope: ConnectionScope) -> dict[str, Any]:
+def submit_pair_snapshot(
+    source_id: str | None,
+    target_id: str | None,
+    need: NeedScope,
+) -> dict[str, Any]:
     """Pin the effective pair for a connection-bearing job at submit time.
 
     Single home (next to :func:`check_pair_switch` /
@@ -454,7 +410,7 @@ def submit_pair_snapshot(scope: ConnectionScope) -> dict[str, Any]:
     """
     from aap_migration.api.store import pair_fingerprint
 
-    snap = pair_fingerprint(scope)
+    snap = pair_fingerprint(source_id, target_id, need=need)
     try:
         from aap_migration.api.security import fernet_key_fingerprint
 
@@ -466,8 +422,7 @@ def submit_pair_snapshot(scope: ConnectionScope) -> dict[str, Any]:
         SNAPSHOT_TARGET_ID: snap["target_id"],
         SNAPSHOT_FP: snap["fp"],
         SNAPSHOT_STABLE: snap.get("stable"),
-        SNAPSHOT_TARGET_STABLE: snap.get("target_stable"),
-        SNAPSHOT_NEED: scope.need,
+        SNAPSHOT_NEED: need,
         SNAPSHOT_FERNET_FP: fernet_fp,
     }
 
@@ -486,7 +441,7 @@ def check_pair_switch(
     between the snapshot and the referenced job's resolved pair also requires
     opt-in, so implicit active-pair changes cannot silently switch pipelines.
     """
-    allow = bool(params.get(PARAM_ALLOW_PAIR_SWITCH, False))
+    allow = bool(params.get("allow_pair_switch", False))
     _snap_key = {"source_id": SNAPSHOT_SOURCE_ID, "target_id": SNAPSHOT_TARGET_ID}
     for key in ("source_id", "target_id"):
         new = params.get(key)
@@ -518,25 +473,6 @@ def check_pair_switch(
                     )
 
 
-def _infer_need(params: dict[str, Any], snap_tgt: Any) -> NeedScope:
-    """Infer the connection scope for snapshot-era params (single home).
-
-    Applies the ``"both" if snap_tgt else "source"`` default once for
-    records predating ``_snapshot_need`` and validates the result. Any
-    other value is corrupt params and fails closed with ValueError
-    instead of silently skipping the TLS veto on one path while the
-    other fails closed.
-    """
-    need = params.get(SNAPSHOT_NEED)
-    if need is None:
-        need = "both" if snap_tgt is not None else "source"
-    if need not in ("both", "source", "none"):
-        raise ValueError(
-            f"Job connection scope is corrupt (snapshot need={need!r}); resubmit the job."
-        )
-    return cast(NeedScope, need)
-
-
 def check_tls_posture(params: dict[str, Any], need: NeedScope = "both") -> None:
     """Reject per-job verify_ssl=false that weakens stored posture (P1 #3).
 
@@ -552,22 +488,16 @@ def check_tls_posture(params: dict[str, Any], need: NeedScope = "both") -> None:
     and are left for the normal resolution path -- callers that already
     resolved (submit snapshot) see this only for genuine weakening.
     """
-    override = params.get(PARAM_VERIFY_SSL)
+    override = params.get("verify_ssl")
     if override is not False or not need or need == "none":
         return
     from aap_migration.api.store import stored_posture
 
     try:
-        posture = stored_posture(
-            ConnectionScope(
-                source_id=params.get(PARAM_SOURCE_ID),
-                target_id=params.get(PARAM_TARGET_ID),
-                need=need,
-            )
-        )
+        posture = stored_posture(params.get("source_id"), params.get("target_id"), need=need)
     except (KeyError, ValueError):
         return
-    weakened = [side for side, post in posture.items() if post.get(PARAM_VERIFY_SSL)]
+    weakened = [side for side, post in posture.items() if post.get("verify_ssl")]
     if weakened:
         raise ValueError(
             "Per-job verify_ssl=false would weaken the stored connection "
@@ -610,9 +540,12 @@ def verify_execution_pair(params: dict[str, Any]) -> None:
         return
     # TLS posture veto (P1 #3, defense in depth behind the submit-time
     # check): params that bypassed submit (direct manager use, crafted
-    # records) must not run weakened TLS either. Corrupt need values
-    # fail closed via _infer_need instead of skipping the veto.
-    check_tls_posture(params, _infer_need(params, snap_tgt))
+    # records) must not run weakened TLS either.
+    need_pre = params.get(SNAPSHOT_NEED)
+    if need_pre is None:
+        need_pre = "both" if snap_tgt is not None else "source"
+    if need_pre in ("both", "source", "none"):
+        check_tls_posture(params, cast(NeedScope, need_pre))
     # Fernet key rotation guard (drain-before-rotate, enforced): the
     # encryption key is pinned at submit; a rotation while queued fails
     # fast here with one actionable error instead of N per-row decrypt
@@ -638,19 +571,16 @@ def verify_execution_pair(params: dict[str, Any]) -> None:
     # use the submit-time need so an active target configured while queued
     # does not fail them. Records predating _snapshot_need infer it from the
     # snapshot itself; any other value is corrupt params and fails closed.
-    need = _infer_need(params, snap_tgt)
-    try:
-        current = pair_fingerprint(
-            ConnectionScope(
-                # Resolve the pinned snapshot ids (explicit overrides win):
-                # without them a deleted connection surfaces as "No target
-                # configured" instead of the actionable deleted-after-submit
-                # resubmit error below.
-                source_id=params.get(PARAM_SOURCE_ID) or snap_src,
-                target_id=params.get(PARAM_TARGET_ID) or snap_tgt,
-                need=need,
-            )
+    need = params.get(SNAPSHOT_NEED)
+    if need is None:
+        need = "both" if snap_tgt is not None else "source"
+    if need not in ("both", "source", "none"):
+        raise ValueError(
+            f"Job connection scope is corrupt (snapshot need={need!r}); resubmit the job."
         )
+    need = cast(NeedScope, need)
+    try:
+        current = pair_fingerprint(params.get("source_id"), params.get("target_id"), need=need)
     except KeyError as exc:
         raise ValueError(
             "A connection used by this job was deleted after submit; "
@@ -661,23 +591,7 @@ def verify_execution_pair(params: dict[str, Any]) -> None:
         # guidance (e.g. decrypt_token key-change message); preserve it so
         # queued jobs fail with the actionable text instead of a bare type.
         raise ValueError(str(exc)) from exc
-    _check_snapshot_against(params, current)
-
-
-def _check_snapshot_against(params: dict[str, Any], current: dict[str, Any]) -> None:
-    """Compare submit-time snapshot pins against a resolved fingerprint.
-
-    Single home for the ids/fingerprint comparison shared by
-    :func:`verify_execution_pair` (resolves, then checks) and
-    :func:`setup_chained` (checks the exact records it will run with, so
-    no second resolution can slip a rotation between verify and build --
-    P1 #2). Explicit ``allow_pair_switch=true`` opts into intentional
-    *id* switches with an UNCHANGED fingerprint only.
-    """
-    snap_src = params.get(SNAPSHOT_SOURCE_ID)
-    snap_tgt = params.get(SNAPSHOT_TARGET_ID)
-    snap_fp = params.get(SNAPSHOT_FP)
-    allow_switch = bool(params.get(PARAM_ALLOW_PAIR_SWITCH, False))
+    allow_switch = bool(params.get("allow_pair_switch", False))
     ids_changed = (snap_src is not None and current["source_id"] != snap_src) or (
         snap_tgt is not None and current["target_id"] != snap_tgt
     )
@@ -724,16 +638,19 @@ def resolve_workdir(
     """
     from aap_migration.api.jobs import get_job_manager
 
-    ref = params.get(PARAM_JOB_ID)
+    ref = params.get("job_id")
     if ref:
         try:
             existing = get_job_manager().get_internal(ref)
         except KeyError as exc:
+            from aap_migration.api.jobs._records import UnknownJobError
+
             raise UnknownJobError(f"Unknown job_id '{ref}'") from exc
         status = existing.get("status")
         if status not in allow_statuses:
             # Lifecycle conflict (P2 #20: typed as ConflictError so the
             # shared type-based mapper yields 409, never a sniffed 400).
+            from aap_migration.api.jobs._records import ConflictError
 
             raise ConflictError(
                 f"Job '{ref}' is {status}; only {', '.join(allow_statuses)} jobs "
@@ -742,6 +659,8 @@ def resolve_workdir(
             )
         workdir = Path(existing["job_dir"]).resolve()
         if not workdir.is_dir():
+            from aap_migration.api.jobs._records import WorkdirGoneError
+
             raise WorkdirGoneError(f"Job '{ref}' working directory no longer exists")
         return workdir
     return Path(job_dir).resolve()
@@ -773,7 +692,7 @@ def _record_pair_lineage(params: dict[str, Any], workdir: Path, referenced: Any)
             snap_fp is not None
             and old_fp is not None
             and snap_fp != old_fp
-            and bool(params.get(PARAM_ALLOW_PAIR_SWITCH, False))
+            and bool(params.get("allow_pair_switch", False))
         )
         if switched:
             logging.getLogger("aap_migration.api.context").warning(
@@ -790,7 +709,7 @@ def _record_pair_lineage(params: dict[str, Any], workdir: Path, referenced: Any)
             "source_id": snap_src,
             "target_id": snap_tgt,
             "fp": snap_fp,
-            PARAM_ALLOW_PAIR_SWITCH: bool(params.get(PARAM_ALLOW_PAIR_SWITCH, False)),
+            "allow_pair_switch": bool(params.get("allow_pair_switch", False)),
             "switched": switched,
         }
         with open(workdir / ".pair_lineage.jsonl", "a") as fh:
@@ -817,19 +736,11 @@ def setup_chained(
     read-only) instead of rewriting config.yaml in place, so pair-A exports
     can never mix with pair-B writes. Resume callers pass
     ``allow_statuses`` including failed/cancelled.
-
-    Execution-time guards (fail the job instead of running it): the
-    submit-time fingerprint must still match the stored pair, and a
-    cancel fence is re-checked here -- a cancel landing in the FIFO
-    queue window slips past the submit-time check, so resume-style
-    chains onto a mid-phase-cancelled parent require ``force=true``
-    (ConflictError surfaces as a 409-text job failure via the worker's
-    ValueError branch).
     """
     from aap_migration.api.jobs import get_job_manager
 
     workdir = resolve_workdir(params, job_dir, allow_statuses=allow_statuses)
-    ref = params.get(PARAM_JOB_ID)
+    ref = params.get("job_id")
     referenced: Any = None
     switched = False
     if ref:
@@ -857,7 +768,7 @@ def setup_chained(
                     snap_fp is not None
                     and old_fp is not None
                     and snap_fp != old_fp
-                    and bool(params.get(PARAM_ALLOW_PAIR_SWITCH, False))
+                    and bool(params.get("allow_pair_switch", False))
                 )
             except Exception:
                 switched = False
@@ -866,23 +777,6 @@ def setup_chained(
     # here instead of running under un-presented credentials. IAM workers
     # call verify_execution_pair directly (they resolve without setup_chained).
     verify_execution_pair(params)
-    # Execution-time cancel fence (P1 #3): re-check the fence the submit
-    # path enforces, since a cancel can land after submit while queued.
-    get_job_manager().assert_no_cancel_fence(
-        params.get(PARAM_JOB_ID), bool(params.get(PARAM_FORCE, False))
-    )
-    # Resolve once and re-verify against THESE records (P1 #2): the pair is
-    # resolved a single time here, the snapshot is compared against exactly
-    # these records, and the context is built from them with no second
-    # resolution -- so a rotation landing between verify and build cannot
-    # slip in through a re-resolve.
-    scope = ConnectionScope(
-        source_id=params.get(PARAM_SOURCE_ID),
-        target_id=params.get(PARAM_TARGET_ID),
-        need=need,
-    )
-    source, target = resolve_active_pair(scope)
-    _check_snapshot_against(params, fingerprint_of_records(source, target, need))
     if switched:
         import shutil
         import uuid
@@ -912,10 +806,14 @@ def setup_chained(
                 "created; retry after checking job storage writability."
             ) from exc
         _record_pair_lineage(params, fresh, referenced if ref else None)
-        ctx, config = _build_job_context_from_records(fresh, source, target, need)
+        ctx, config = build_job_context(
+            fresh, params.get("source_id"), params.get("target_id"), need=need
+        )
         setup_job_logging(fresh)
         return ctx, config, fresh
     _record_pair_lineage(params, workdir, referenced if ref else None)
-    ctx, config = _build_job_context_from_records(workdir, source, target, need)
+    ctx, config = build_job_context(
+        workdir, params.get("source_id"), params.get("target_id"), need=need
+    )
     setup_job_logging(workdir)
     return ctx, config, workdir

@@ -297,7 +297,8 @@ class PayloadCheckRequest(BaseModel):
 class AnalyzeDependenciesRequest(ChainedRequest):
     organizations: list[str] | None = Field(
         default=None,
-        description="None (omitted) means all via analyze_all; explicit [] is a no-op selecting none.",
+        description="None (omitted) means all via analyze_all=true; "
+        "explicit [] without analyze_all=true is 422 (not a no-op).",
     )
     analyze_all: bool = False
     verbose: bool = False
@@ -309,14 +310,17 @@ class AnalyzeDependenciesRequest(ChainedRequest):
     @model_validator(mode="after")
     def _check_scope(self) -> AnalyzeDependenciesRequest:
         # Single home for spelling normalization + ambiguity/typo guards.
-        # parse_organizations is canonical: None = omitted (all via
-        # analyze_all), [] = explicit no-op selecting none, non-empty =
-        # explicit scope. Test for None, never truthiness.
         scoped = parse_organizations(self.model_dump())
-        if scoped is None:
-            if not self.analyze_all:
-                raise ValueError("Must specify analyze_all=true or organizations=[...]")
-        elif self.analyze_all:
+        # Explicit [] keeps its distinct meaning instead of collapsing to
+        # the falsy fallback: only omission (None) falls back to the raw
+        # field. Both are invalid without analyze_all (422 below), but the
+        # shapes stay distinguishable for error reporting and callers.
+        effective = scoped if scoped is not None else list(self.organizations or [])
+        # Preserve original contract messages (omitted/None means all via
+        # analyze_all; explicit [] is not a valid scope without analyze_all).
+        if not self.analyze_all and not effective:
+            raise ValueError("Must specify analyze_all=true or organizations=[...]")
+        if self.analyze_all and effective:
             raise ValueError("Cannot use analyze_all with organizations")
         return self
 
@@ -356,6 +360,16 @@ class StateResetRequest(ConnectionSelector):
         description="When set, reset the chained job's state DB instead of "
         "the server-default state",
     )
+
+    @model_validator(mode="after")
+    def _reject_blank_resource_type(self) -> StateResetRequest:
+        # Fail closed: blank (""/whitespace) is never a legitimate scope.
+        # None/omitted already means "all", so a blank string that passes
+        # the `not body.resource_type` truthiness test must 422 here
+        # instead of taking the full-reset drop+reinit path.
+        if self.resource_type is not None and not self.resource_type.strip():
+            raise ValueError("resource_type must be a non-empty type or omitted for a full reset")
+        return self
 
 
 class StateExportRequest(ConnectionSelector):
