@@ -552,9 +552,9 @@ def test_dependency_content_snapshot_independent_of_registry() -> None:
 
     assert set(EXPECTED_DEPS.keys()) == set(EXPECTED_TYPES.keys())
     for resource_type in sorted(EXPECTED_DEPS.keys()):
-        assert get_importer_dependencies(resource_type) == EXPECTED_DEPS[resource_type], (
-            resource_type
-        )
+        assert (
+            get_importer_dependencies(resource_type) == EXPECTED_DEPS[resource_type]
+        ), resource_type
 
 
 def test_dependency_closure_pulls_schedule_ujt_parents() -> None:
