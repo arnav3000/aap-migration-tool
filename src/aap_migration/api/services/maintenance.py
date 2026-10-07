@@ -82,20 +82,10 @@ def run_prep(job: JobRecord) -> dict[str, Any]:
 
 
 def run_cleanup(job: JobRecord) -> dict[str, Any]:
-    """Delete migrated resources + reset DB (mirrors ``cleanup``).
-
-    Cancel is cooperative (best-effort): the flag is checked before the
-    single cleanup call, which cannot be preempted mid-call. A cancel
-    landing mid-cleanup runs to completion; the FIFO worker then reports
-    cancelled with fence markers so resubmissions verify first.
-    """
+    """Delete migrated resources + reset DB (mirrors ``cleanup``)."""
     if is_noop_scope(job["params"]):
         return noop_result()
-    if _cancel_requested(job):
-        return {"message": "Cleanup cancelled before start", "cancelled": True}
     with chained_ctx(job) as (ctx, config, workdir, params):
-        if _cancel_requested(job):
-            return {"message": "Cleanup cancelled", "cancelled": True}
         call_command(
             "cleanup",
             ctx,
@@ -175,19 +165,12 @@ def run_retry_failed(job: JobRecord) -> dict[str, Any]:
             get_failed_types = getattr(target_state, "get_failed_resource_types", None)
             try:
                 rtypes = list(get_failed_types()) if callable(get_failed_types) else []
-            except Exception as exc:
-                # Fail closed: a state-DB error during discovery must fail
-                # the job with the cause, never report success with an
-                # empty retried list (the operator would conclude there
-                # was nothing to retry while failures stand).
-                raise ValueError(
-                    f"Could not list failed resource types: {exc}; fix state "
-                    "DB access and retry again"
-                ) from exc
+            except Exception:
+                rtypes = []
         dry_run = bool(params.get("dry_run", False))
         if not rtypes:
-            # Genuinely nothing discovered: single call preserves CLI
-            # behavior ("No failed resources to retry!").
+            # Nothing discovered (or DB unreadable): single call preserves
+            # CLI behavior ("No failed resources to retry!").
             call_command(
                 "retry-failed",
                 ctx,

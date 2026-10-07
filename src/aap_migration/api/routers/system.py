@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from aap_migration import __version__
@@ -15,10 +15,10 @@ from aap_migration.api.schemas import (
     ResourcesOut,
     VersionOut,
 )
-from aap_migration.api.security import require_api_key
+
+log = logging.getLogger("aap_migration.api.system")
 
 router = APIRouter(tags=["system"])
-log = logging.getLogger("aap_migration.api.routers.system")
 
 
 def _worker_state() -> tuple[str, int | None]:
@@ -59,43 +59,15 @@ def _orphan_state() -> dict[str, int | None]:
         return {"orphans": None, "fenced_dirs": None}
 
 
-def _sanitize_degraded(degraded: str | None) -> str | None:
-    """Return a path-free degraded marker for serving (CWE-209).
-
-    The latch writers store generic markers, but a path-bearing value set
-    by an older process (or a future writer regression) must never reach
-    pollers verbatim: preserve only the component prefix.
-    """
-    if not degraded:
-        return None
-    parts: list[str] = []
-    for chunk in str(degraded).split(";"):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        if "job-dir" in chunk:
-            parts.append("job-dir: storage-unhealthy")
-        elif "api-db" in chunk:
-            parts.append("api-db: storage-unhealthy")
-        else:
-            parts.append("storage-unhealthy")
-    return "; ".join(parts) if parts else "storage-unhealthy"
-
-
 @router.get("/health", response_model=HealthOut)
 def health() -> JSONResponse:
-    """Liveness probe (includes FIFO worker state for orchestration).
-
-    Keyless by design (see app.create_app): orchestrator liveness probes
-    rarely carry API keys, so gating health behind auth turns every probe
-    into a 401 and restarts a healthy server.
-    """
+    """Liveness probe (includes FIFO worker state for orchestration)."""
     worker, depth = _worker_state()
     degraded = None
     try:
         from aap_migration.api.jobs import startup_degraded_reason
 
-        degraded = _sanitize_degraded(startup_degraded_reason())
+        degraded = startup_degraded_reason()
     except Exception:
         degraded = None
     status = "ok" if worker == "alive" and not degraded else "degraded"
@@ -113,12 +85,8 @@ def health() -> JSONResponse:
     return JSONResponse(status_code=code, content=content)
 
 
-def probe_dir_writable(directory: str) -> None:
-    """Real write probe: mkdir + create + fsync + unlink (raises on failure).
-
-    Shared home for the lifespan startup check (app) and the readiness
-    probe (here) so the two definitions of writable cannot drift.
-    """
+def _probe_dir_writable(directory: str) -> None:
+    """Real write probe: mkdir + create + fsync + unlink (raises on failure)."""
     import os
     from pathlib import Path
 
@@ -141,11 +109,7 @@ def probe_dir_writable(directory: str) -> None:
 
 @router.get("/ready", response_model=ReadyOut)
 def ready() -> JSONResponse:
-    """Readiness probe: worker alive plus DB and job-dir writability.
-
-    Keyless by design (see app.create_app): orchestrator readiness probes
-    rarely carry API keys.
-    """
+    """Readiness probe: worker alive plus DB and job-dir writability."""
     import os
     import sqlite3
     from pathlib import Path
@@ -169,12 +133,15 @@ def ready() -> JSONResponse:
                     fs_path = fs_path[len(scheme) :]
                     break
             if not fs_path or not os.path.exists(fs_path):
-                log.warning("readiness database probe failed: missing file")
+                # Generic marker: absolute DB paths must not leak to callers
+                # (basename-only hygiene in config summary). Path goes to
+                # server logs only.
+                log.warning("readiness database missing: %s", fs_path or db_path)
                 checks["database"] = "unwritable: database"
                 ok = False
             else:
                 parent = str(Path(os.path.abspath(fs_path)).parent)
-                probe_dir_writable(parent)
+                _probe_dir_writable(parent)
                 conn = sqlite3.connect(f"file:{fs_path}?mode=ro", uri=True, timeout=5)
                 try:
                     conn.execute("SELECT 1")
@@ -187,10 +154,10 @@ def ready() -> JSONResponse:
         ok = False
     try:
         job_dir = os.environ.get("AAP_BRIDGE_JOB_DIR") or "./api_jobs"
-        probe_dir_writable(job_dir)
+        _probe_dir_writable(job_dir)
         checks["job_dir"] = "writable"
     except Exception as exc:
-        log.warning("readiness job-dir probe failed: %s", exc)
+        log.warning("readiness job-dir probe failed for %s: %s", job_dir, exc)
         checks["job_dir"] = "unwritable: job_dir"
         ok = False
     return JSONResponse(
@@ -204,17 +171,13 @@ def ready() -> JSONResponse:
     )
 
 
-@router.get("/version", response_model=VersionOut, dependencies=[Depends(require_api_key)])
+@router.get("/version", response_model=VersionOut)
 def version() -> dict:
     """API + CLI version info (mirrors ``--version``)."""
     return {"api": __version__, "prog_name": "aap-bridge"}
 
 
-@router.get(
-    "/resources",
-    response_model=ResourcesOut,
-    dependencies=[Depends(require_api_key)],
-)
+@router.get("/resources", response_model=ResourcesOut)
 def list_resources() -> dict:
     """Full resource catalog (mirrors ``resources.py`` registry)."""
     from aap_migration.resources import (
@@ -246,11 +209,7 @@ def list_resources() -> dict:
     }
 
 
-@router.get(
-    "/resources/{resource_type}",
-    response_model=ResourceDetailOut,
-    dependencies=[Depends(require_api_key)],
-)
+@router.get("/resources/{resource_type}", response_model=ResourceDetailOut)
 def get_resource(resource_type: str) -> dict:
     """Details for a single resource type."""
     from aap_migration.resources import get_info, normalize_resource_type

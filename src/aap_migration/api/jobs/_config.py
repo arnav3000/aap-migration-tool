@@ -87,18 +87,6 @@ CONSOLE_TAIL_BYTES = 256 << 10  # 256 KiB served to console polling
 MAX_ORPHANS = _clamp_int(
     "AAP_BRIDGE_MAX_ORPHANS", _env_int("AAP_BRIDGE_MAX_ORPHANS", 50), 1, 1000, 50
 )
-# Per-pair parked-waiter bound (P1 #7): one wedged pair must not park an
-# unbounded burst of same-pair waiters that fills the total cap
-# (MAX_QUEUE_DEPTH + MAX_ORPHANS) and 429s unrelated pairs while the
-# lane idles. Past this many parked waiters on the same pair, new
-# same-pair submits shed fast instead of parking.
-MAX_PARKED_PER_PAIR = _clamp_int(
-    "AAP_BRIDGE_MAX_PARKED_PER_PAIR",
-    _env_int("AAP_BRIDGE_MAX_PARKED_PER_PAIR", 10),
-    1,
-    1000,
-    10,
-)
 # Orphan-dir reclamation (P3 #27): record-less, drained (unfenced) job dirs
 # move to a bounded quarantine instead of growing the job base dir forever.
 # Only dirs older than the sweep age are moved, so a directory a concurrent
@@ -170,10 +158,7 @@ def clear_startup_degraded_if_recovered() -> bool:
         db_path = init_api_db()
         pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
-        # Generic marker (CWE-209): the raw exception may embed absolute
-        # server paths; detail stays server-side in logs only.
-        log.warning("startup storage re-probe api-db failed: %s", exc)
-        degraded.append("api-db: storage-unhealthy")
+        degraded.append(f"api-db: {exc}")
     job_dir = os.environ.get("AAP_BRIDGE_JOB_DIR") or "./api_jobs"
     try:
         pathlib.Path(job_dir).mkdir(parents=True, exist_ok=True)
@@ -181,8 +166,7 @@ def clear_startup_degraded_if_recovered() -> bool:
         probe.write_text("ok")
         probe.unlink(missing_ok=True)
     except Exception as exc:
-        log.warning("startup storage re-probe job-dir failed: %s", exc)
-        degraded.append("job-dir: storage-unhealthy")
+        degraded.append(f"job-dir: {exc}")
     if degraded:
         set_startup_degraded("; ".join(degraded))
         return False

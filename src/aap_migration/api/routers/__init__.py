@@ -1,14 +1,31 @@
-"""FastAPI routers for the AAP Bridge REST API (stack 4 subset).
+"""FastAPI routers for the AAP Bridge REST API."""
 
-Full router set lands with stack 5; this subset exposes system, jobs,
-connections, and config only.
-"""
-
-from aap_migration.api.routers import config, connections, jobs, system
+from aap_migration.api.routers import (
+    analysis,
+    config,
+    connections,
+    credentials,
+    iam,
+    jobs,
+    maintenance,
+    migrations,
+    reporting,
+    state,
+    system,
+    validation,
+)
 
 __all__ = [
+    "analysis",
     "config",
     "connections",
+    "credentials",
+    "iam",
     "jobs",
+    "maintenance",
+    "migrations",
+    "reporting",
+    "state",
     "system",
+    "validation",
 ]

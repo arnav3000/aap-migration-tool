@@ -56,13 +56,11 @@ def list_connections(
 ) -> dict:
     """List stored connections (tokens never serialized).
 
-    Envelope ``{"items": [...], "total": N, "limit": L, "offset": O}``
-    sharing the ``limit``/``offset``/``total`` scalar keys with ``GET
-    /jobs`` and the other list endpoints. Only the scalars are shared:
-    state/checkpoint routes use resource-named collection keys
-    (``mappings``, ``checkpoints``), so a pager keyed on ``items`` fits
-    this route and ``GET /jobs`` only. Pinned via ``ConnectionListOut``
-    so the envelope is part of the OpenAPI schema for typed clients.
+    One envelope always: ``{"items": [...], "total": N, "limit": L,
+    "offset": O}`` matching ``GET /jobs`` and the state/checkpoint list
+    endpoints, so shared pagination helpers work on day one of v1.
+    Pinned via ``ConnectionListOut`` so the items envelope is part of
+    the OpenAPI schema for typed clients.
     """
     try:
         connections = store.list_connections(kind)
@@ -236,16 +234,13 @@ async def test_connection(conn_id: str) -> dict:
     except (TypeError, ValueError):
         probe_timeout = 30.0
     probe_timeout = max(1.0, min(probe_timeout, 30.0))
-    # Branch construction (not a cls alias): mypy keeps the union, so a
-    # get_version rename fails at type-check instead of at probe time.
-    if conn["kind"] == "source":
-        client: AAPSourceClient | AAPTargetClient = AAPSourceClient(config=instance, rate_limit=10)
-    else:
-        client = AAPTargetClient(config=instance, rate_limit=10)
+    client_cls = AAPSourceClient if conn["kind"] == "source" else AAPTargetClient
+    client = client_cls(config=instance, rate_limit=10)
     try:
         try:
             await asyncio.wait_for(client.get("ping/"), timeout=probe_timeout)
-            version = await asyncio.wait_for(client.get_version(), timeout=probe_timeout)
+            get_version = client.get_version  # type: ignore[attr-defined]
+            version = await asyncio.wait_for(get_version(), timeout=probe_timeout)
         except TimeoutError as exc:
             log.exception("connectivity test timed out for %s", conn_id)
             raise HTTPException(status_code=502, detail="Connection probe timed out") from exc

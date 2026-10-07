@@ -7,7 +7,6 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, cast
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -16,7 +15,20 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from aap_migration import __version__
 from aap_migration.api._paths import API_V1_PREFIX
 from aap_migration.api.models import init_api_db
-from aap_migration.api.routers import config, connections, jobs, system
+from aap_migration.api.routers import (
+    analysis,
+    config,
+    connections,
+    credentials,
+    iam,
+    jobs,
+    maintenance,
+    migrations,
+    reporting,
+    state,
+    system,
+    validation,
+)
 from aap_migration.api.security import require_api_key
 
 log = logging.getLogger("aap_migration.api.app")
@@ -43,14 +55,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
         log.warning("API DB startup check failed: %s", exc)
+        # Generic flag: absolute paths/exceptions stay server-side;
+        # /health surfaces this string to API callers.
         degraded.append("api-db: storage-unhealthy")
     job_dir = os.environ.get("AAP_BRIDGE_JOB_DIR") or "./api_jobs"
     try:
-        # Same probe the readiness endpoint uses (routers.system): one
-        # definition of writable for startup and readiness.
-        from aap_migration.api.routers.system import probe_dir_writable
-
-        probe_dir_writable(job_dir)
+        Path(job_dir).mkdir(parents=True, exist_ok=True)
+        probe = Path(job_dir) / ".writability_probe"
+        probe.write_text("ok")
+        probe.unlink(missing_ok=True)
     except Exception as exc:
         log.warning("job dir startup check failed for %s: %s", job_dir, exc)
         degraded.append("job-dir: storage-unhealthy")
@@ -146,17 +159,18 @@ def create_app() -> FastAPI:
 
     prefix = API_V1_PREFIX
     auth = [Depends(require_api_key)]
-    # Health/readiness are keyless (orchestrator liveness probes rarely
-    # carry API keys; gating them turns every probe into a 401 and restarts
-    # a healthy server, churning jobs). version/resources stay authed via
-    # per-route dependencies in routers.system; jobs/connections/config
-    # stay fully authed here.
-    app.include_router(system.router, prefix=prefix)
+    app.include_router(system.router, prefix=prefix, dependencies=auth)
     app.include_router(jobs.router, prefix=prefix, dependencies=auth)
     app.include_router(connections.router, prefix=prefix, dependencies=auth)
     app.include_router(config.router, prefix=prefix, dependencies=auth)
-    # Stack 4 subset: remaining 8 routers (migrations, credentials, iam,
-    # validation, analysis, reporting, state, maintenance) land with stack 5.
+    app.include_router(migrations.router, prefix=prefix, dependencies=auth)
+    app.include_router(credentials.router, prefix=prefix, dependencies=auth)
+    app.include_router(iam.router, prefix=prefix, dependencies=auth)
+    app.include_router(validation.router, prefix=prefix, dependencies=auth)
+    app.include_router(analysis.router, prefix=prefix, dependencies=auth)
+    app.include_router(reporting.router, prefix=prefix, dependencies=auth)
+    app.include_router(state.router, prefix=prefix, dependencies=auth)
+    app.include_router(maintenance.router, prefix=prefix, dependencies=auth)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error_handler(
@@ -166,53 +180,12 @@ def create_app() -> FastAPI:
         # so clients parse one 422 shape for manual and automatic failures.
         return JSONResponse(status_code=422, content={"detail": _validation_error_detail(exc)})
 
-    def _document_string_422_envelope() -> None:
-        """Patch OpenAPI so 422 docs match the string-detail wire shape.
-
-        The validation handler above sends {"detail": str}, but FastAPI's
-        default OpenAPI still emits the list-shaped HTTPValidationError.
-        Rewrite every 422 response to reference a StringDetailError
-        component so codegen clients deserialize what the wire sends.
-        """
-        original_openapi = app.openapi
-
-        def custom_openapi() -> dict[str, Any]:
-            if app.openapi_schema:
-                return cast(dict[str, Any], app.openapi_schema)
-            schema = cast(dict[str, Any], original_openapi())
-            components = schema.setdefault("components", {}).setdefault("schemas", {})
-            components["StringDetailError"] = {
-                "title": "StringDetailError",
-                "type": "object",
-                "properties": {"detail": {"title": "Detail", "type": "string"}},
-                "required": ["detail"],
-            }
-            for path_item in schema.get("paths", {}).values():
-                if not isinstance(path_item, dict):
-                    continue
-                for operation in path_item.values():
-                    if not isinstance(operation, dict):
-                        continue
-                    responses = operation.get("responses", {})
-                    validation = responses.get("422")
-                    if not isinstance(validation, dict):
-                        continue
-                    content = validation.get("content", {})
-                    json_content = content.get("application/json", {})
-                    json_content["schema"] = {"$ref": "#/components/schemas/StringDetailError"}
-            app.openapi_schema = schema
-            return schema
-
-        app.openapi = custom_openapi
-
-    _document_string_422_envelope()
-
     @app.exception_handler(ValueError)
     async def _value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
         # Single error envelope: {"detail": "<message>"} (string detail).
         # ConflictError subclasses ValueError but is handled by routers
         # before reaching here; any stray ConflictError is still a 409.
-        from aap_migration.api._errors import ConflictError
+        from aap_migration.api.jobs._records import ConflictError
 
         if isinstance(exc, ConflictError):
             return JSONResponse(status_code=409, content={"detail": str(exc)})
@@ -228,7 +201,7 @@ def create_app() -> FastAPI:
     async def _runtime_error_handler(request: Request, exc: RuntimeError) -> JSONResponse:
         # Internal invariant violations (unknown job status, queue/storage
         # state) are server faults, never client 400s.
-        from aap_migration.api._errors import (
+        from aap_migration.api.jobs._records import (
             InternalStatusError,
             ServerShuttingDownError,
             StorageUnhealthyError,

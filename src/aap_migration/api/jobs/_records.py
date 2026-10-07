@@ -5,29 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
-from aap_migration.api._errors import (
-    ConflictError,
-    InternalStatusError,
-    QueueFullError,
-    ServerShuttingDownError,
-    StorageUnhealthyError,
-    UnknownJobError,
-    WorkdirGoneError,
-    _key_detail,
-    _store_http_error,
-)
-
-__all__ = [
-    "ConflictError",
-    "InternalStatusError",
-    "QueueFullError",
-    "ServerShuttingDownError",
-    "StorageUnhealthyError",
-    "UnknownJobError",
-    "WorkdirGoneError",
-    "_key_detail",
-    "_store_http_error",
-]
+from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled")
 
@@ -56,43 +35,40 @@ class JobRecord(TypedDict, total=False):
     # the worker must not overwrite the interrupted verdict if the pool
     # thread finishes afterwards. Optional (older records lack it).
     shutdown_interrupted: bool
-    # Set when cancel arrives for a queued job (pollable pending-cancel
-    # signal for future resume/retry phases). Optional.
-    cancel_requested_at: str
-    # Set when a running job finishes an attempt after cancel_requested:
-    # the phase where it stopped plus phases already applied, so the
-    # cancel fence can refuse non-force chained resubmissions that would
-    # replay those writes. Optional.
-    cancelled_at_phase: str
-    completed_phases: list[str]
 
 
-class JobUpdate(TypedDict, total=False):
-    """Constrained write shape for ``JobManager._set`` (P2 #9).
+class QueueFullError(RuntimeError):
+    """Raised when the FIFO queue is at capacity (mapped to HTTP 429)."""
 
-    Mirrors every key the manager/worker writes so a misspelled or
-    undeclared key is a type error instead of silent missing poll data.
-    ``_set`` takes ``**fields: Unpack[JobUpdate]`` and needs no
-    ``type: ignore``. ``job_id`` is the positional target, never an
-    update field, so it is deliberately absent here (mypy rejects the
-    overlap).
+
+class StorageUnhealthyError(QueueFullError):
+    """Storage probes failed at startup (mapped to HTTP 503)."""
+
+
+class ServerShuttingDownError(QueueFullError):
+    """Submissions closed during drain (mapped to HTTP 503)."""
+
+
+class InternalStatusError(RuntimeError):
+    """Unknown internal job status (mapped to HTTP 500, never 400)."""
+
+
+class ConflictError(ValueError):
+    """Lifecycle conflict: queued/running work blocks the mutation (HTTP 409)."""
+
+
+class UnknownJobError(KeyError):
+    """Unknown job id (HTTP 404). Carries the job id for message stability."""
+
+
+class WorkdirGoneError(KeyError):
+    """Referenced job's working directory no longer exists (HTTP 404).
+
+    Raised by ``context.resolve_workdir`` instead of a message-sniffed
+    ValueError so every router maps it through the shared type-based
+    mapper: rewording the message can never flip the wire contract
+    (see P2 #20).
     """
-
-    job_type: str
-    status: str
-    params: dict[str, Any]
-    job_dir: str
-    result: dict[str, Any] | None
-    error: str | None
-    error_id: str | None
-    exit_code: int | None
-    created_at: str
-    updated_at: str
-    cancel_requested: bool
-    shutdown_interrupted: bool
-    cancel_requested_at: str
-    cancelled_at_phase: str
-    completed_phases: list[str]
 
 
 def public_job_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -125,3 +101,49 @@ def _normalize_result(result: Any) -> Any:
         if "artifacts" not in result:
             return {**result, "artifacts": []}
     return result
+
+
+def _key_detail(exc: BaseException) -> str:
+    """Unwrap KeyError to a bare string (no repr quotes) for 404 details."""
+    args = getattr(exc, "args", ())
+    if args:
+        first = args[0]
+        if isinstance(first, str):
+            return first
+        return str(first)
+    text = str(exc).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1]
+    return text
+
+
+def _store_http_error(exc: Exception) -> HTTPException:
+    """Single home for store/manager error -> HTTP mapping (type-based).
+
+    Lives here (next to the exception types) so foundation modules
+    (context, jobs) map errors without importing the future routers
+    layer. Codes come from exception types only, never message text:
+    rewording a message cannot flip the wire contract.
+    """
+    if isinstance(exc, UnknownJobError) or isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail=_key_detail(exc))
+    if isinstance(exc, ConflictError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, IntegrityError):
+        # Concurrent unique races (two creates slipping past the SELECT
+        # pre-check) surface here, not as unhandled 500s. Never leak SQL
+        # text: the detail names the likely cause only.
+        return HTTPException(
+            status_code=409,
+            detail="Resource conflict: a record with the same unique value "
+            "already exists; retry with a unique value",
+        )
+    if isinstance(exc, StorageUnhealthyError | ServerShuttingDownError):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, QueueFullError):
+        return HTTPException(status_code=429, detail=str(exc))
+    if isinstance(exc, InternalStatusError):
+        return HTTPException(status_code=500, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    raise exc  # pragma: no cover

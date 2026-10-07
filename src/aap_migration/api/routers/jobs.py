@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import os
-from bisect import bisect_right
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
-from aap_migration.api._errors import _key_detail
 from aap_migration.api.jobs import JobRecord, get_job_manager, read_console_tail
 from aap_migration.api.jobs._records import public_job_params
-from aap_migration.api.routers._common import _narrow_status
+from aap_migration.api.routers._common import _key_detail, _narrow_status
 from aap_migration.api.schemas import (
     DeleteJobOut,
     JobArtifactsOut,
@@ -48,28 +46,21 @@ def _to_status(payload: JobRecord) -> JobStatus:
 
 
 def _list_artifacts_page(
-    job_dir: str, limit: int = 500, offset: int = 0, after: str | None = None
+    job_dir: str, limit: int = 500, offset: int = 0
 ) -> tuple[list[str], int, int, bool]:
     """Single-pass paginated artifact listing with true total.
 
-    One os.walk collects matching paths once (same exclusions as the
-    listing), sorts them, then slices the requested page and counts the
+    One os.walk collects matching paths once (same exclusions and sorted
+    order as the listing), then slices the requested page and counts the
     true pre-page total. Returns (page, true_total, walked, truncated)
-    where walked is the bounded-walk count (limit+offset+1 cap, plus any
-    cursor skip) and truncated signals incompleteness. Single traversal
-    halves directory I/O per request versus separate filtered + count
-    walks on repeatedly polled endpoints.
-
-    ``after`` is an exclusive cursor (a relative path from a previous
-    page, usually its last item): paging resumes after it instead of at
-    an absolute offset, so files created while the job writes cannot
-    shift offsets and silently skip entries. Prefer it over ``offset``
-    when polling a running job; ``offset`` then applies post-cursor.
-    ``total`` is always the point-in-time snapshot count, so a growing
-    job directory legitimately reports a larger total on the next page.
+    where walked is the bounded-walk count (limit+offset+1 cap) and
+    truncated signals incompleteness. Single traversal halves directory
+    I/O per request versus separate filtered + count walks on repeatedly
+    polled endpoints.
     """
     limit = max(1, limit)
     offset = max(0, offset)
+    cap = limit + offset + 1
     all_paths: list[str] = []
     for root, dirnames, files in os.walk(job_dir):
         dirnames.sort()
@@ -78,25 +69,18 @@ def _list_artifacts_page(
                 continue
             full = os.path.join(root, name)
             all_paths.append(os.path.relpath(full, job_dir))
-    # Explicit global sort: walk order (root files before subdirs) is not
-    # lexicographic, and the cursor relies on sorted order.
-    all_paths.sort()
-    # Pure string comparison (never a filesystem lookup), so a missing or
-    # adversarial anchor resolves to its insertion point, never an error.
-    start = bisect_right(all_paths, after) if after else 0
-    window = all_paths[start:]
     true_total = len(all_paths)
-    # A page holds window[offset:offset+limit]; it is incomplete exactly
-    # when the window exceeds offset+limit. The +1 probe only bounds the
+    # A page holds [offset:offset+limit]; it is incomplete exactly when
+    # true_total exceeds offset+limit. The +1 probe (cap) only bounds the
     # walked count, never the incompleteness decision: at the exact
-    # boundary the page hides one item.
-    if len(window) > offset + limit:
-        walked = start + offset + limit + 1
+    # boundary (total == offset+limit+1) the page hides one item.
+    if true_total > offset + limit:
+        walked = cap
         truncated = True
     else:
         walked = true_total
         truncated = False
-    page = window[offset : offset + limit]
+    page = all_paths[offset : offset + limit]
     return page, true_total, walked, truncated
 
 
@@ -164,26 +148,19 @@ def get_job_artifacts(
     job_id: str,
     limit: int = Query(default=500, ge=1, le=5000),
     offset: int = Query(default=0, ge=0, le=100000),
-    after: str | None = Query(
-        default=None,
-        description="Exclusive cursor: resume after this relative path "
-        "(usually the previous page's last item). Prefer over offset when "
-        "polling a running job; offset then applies post-cursor.",
-    ),
 ) -> dict:
     """List artifact files produced in a job directory (paginated).
 
     Pair with ``GET /jobs/{job_id}/artifacts/{path}`` to download a
     listed file.
 
-    ``total`` is the true pre-page count of this snapshot (a growing job
-    directory legitimately reports a larger total on the next request);
-    ``walked`` is the bounded-walk count so far and ``truncated`` alone
-    signals incompleteness (the window beyond the cursor exceeds
-    offset+limit). v1 freezes one meaning per field (see
-    ``JobArtifactsOut``). List endpoints (jobs, connections, mappings,
-    checkpoints) cap ``limit`` at 1000; artifact/console tails allow up
-    to 5000.
+    ``total`` is the true pre-page count (full filtered walk, matching
+    ``GET /jobs`` and list endpoints); ``walked`` is the bounded-walk
+    count so far (``limit+offset+1`` cap) and ``truncated`` alone signals
+    incompleteness (true total exceeds walked). v1 freezes one meaning
+    per field (see ``JobArtifactsOut``). List endpoints (jobs,
+    connections, mappings, checkpoints) cap ``limit`` at 1000;
+    artifact/console tails allow up to 5000.
     """
     try:
         job = get_job_manager().get_internal(job_id)
@@ -191,7 +168,7 @@ def get_job_artifacts(
         raise HTTPException(status_code=404, detail=_key_detail(exc)) from exc
     # Single-pass paginated listing with true total (no double walk).
     page, true_total, walked, truncated = _list_artifacts_page(
-        job["job_dir"], limit=limit, offset=offset, after=after
+        job["job_dir"], limit=limit, offset=offset
     )
     payload: dict = {
         "job_id": job_id,
@@ -228,9 +205,8 @@ def download_job_artifact(job_id: str, artifact_path: str) -> Response:
     try:
         confined = confine_path(artifact_path, job["job_dir"], label="artifact_path")
     except ValueError as exc:
-        # Generic detail (CWE-209): confine_path's message embeds the
-        # resolved absolute base dir; echoing it would disclose server
-        # filesystem layout to any token holder (matches iam-report).
+        # Generic detail: confine_path embeds the absolute base dir,
+        # which must not leak to API callers (basename hygiene).
         raise HTTPException(
             status_code=400, detail="artifact_path must stay under the job directory"
         ) from exc
@@ -239,26 +215,13 @@ def download_job_artifact(job_id: str, artifact_path: str) -> Response:
         raise HTTPException(status_code=404, detail="Artifact not found")
     if not confined.is_file():
         raise HTTPException(status_code=404, detail="Artifact not found")
-    # Single-open capped read: the size gate and the bytes come from one
-    # file object, so appends landing between a stat() and a read_bytes()
-    # cannot defeat the 32 MiB cap (TOCTOU). Reads cap+1 bytes in chunks
-    # and 413s as soon as the cap is exceeded.
     try:
-        chunks: list[bytes] = []
-        seen = 0
-        with open(confined, "rb") as fh:
-            while True:
-                chunk = fh.read(65536)
-                if not chunk:
-                    break
-                seen += len(chunk)
-                if seen > _MAX_ARTIFACT_DOWNLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"Artifact exceeds {_MAX_ARTIFACT_DOWNLOAD_BYTES} bytes; fetch it from the job directory",
-                    )
-                chunks.append(chunk)
-        content = b"".join(chunks)
+        if confined.stat().st_size > _MAX_ARTIFACT_DOWNLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Artifact exceeds {_MAX_ARTIFACT_DOWNLOAD_BYTES} bytes; fetch it from the job directory",
+            )
+        content = confined.read_bytes()
     except OSError as exc:
         raise HTTPException(status_code=404, detail="Artifact not found") from exc
     suffix = confined.suffix.lower()

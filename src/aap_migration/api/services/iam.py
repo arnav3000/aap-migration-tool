@@ -12,32 +12,26 @@ from aap_migration.api.services._core import (
     benchmark_counts,
     iam_max_workers,
 )
+from aap_migration.api.store import NeedScope
 
 
 # -- IAM -------------------------------------------------------------------
-def _stored_from_ctx(ctx: Any, side: str = "source") -> dict[str, Any]:
-    """Derive a store-shaped connection dict from an already-built context.
+def _iam_connections(
+    params: dict[str, Any], need: NeedScope = "source"
+) -> tuple[dict, dict | None]:
+    """Resolve IAM connections via the store (single connection home)."""
+    from aap_migration.api.store import resolve_active_pair
+    from aap_migration.utils.ssrf import reverify_execution_url_bounded
 
-    Single-resolution home: ``chained_ctx``/``setup_chained`` already
-    resolved + SSRF-verified the pair; workers must not re-resolve via the
-    store (which would double-resolve and risk observing a different pair
-    across an admin set_active). Explicit ``verify_ssl``/``timeout`` params
-    still win via :func:`_resolve_iam_tls`.
-    """
-    instance = getattr(getattr(ctx, "config", None), side, None)
-    url = getattr(instance, "url", None)
-    token = getattr(instance, "token", None)
-    if url is None or token is None:
-        raise ValueError(
-            f"worker context carries no {side} connection; submit via the "
-            "API so chained_ctx resolves and pins the pair"
-        )
-    return {
-        "url": url,
-        "token": token,
-        "verify_ssl": getattr(instance, "verify_ssl", True),
-        "timeout": getattr(instance, "timeout", 60),
-    }
+    source, target = resolve_active_pair(
+        params.get("source_id"),
+        params.get("target_id"),
+        need=need,
+    )
+    reverify_execution_url_bounded(source["url"])
+    if target is not None:
+        reverify_execution_url_bounded(target["url"])
+    return source, target
 
 
 def _iam_analyser_kwargs(
@@ -55,6 +49,62 @@ def _iam_analyser_kwargs(
         "checkpoint_path": checkpoint_path,
         "resume": bool(params.get("resume", False)),
     }
+
+
+def _stored_from_ctx(ctx: Any, side: str = "source") -> dict[str, Any]:
+    """Derive a store-shaped connection dict from an already-built context.
+
+    Single-resolution home: ``chained_ctx``/``setup_chained`` already
+    resolved + SSRF-verified the pair; callers must not re-resolve via the
+    store (which would double-resolve and risk observing a different pair
+    across an admin set_active). Explicit ``verify_ssl``/``timeout`` params
+    still win via :func:`_resolve_iam_tls`.
+
+    A context that carries no connection at all (unit wiring spies stub
+    ``chained_ctx`` with an object lacking ``config``) raises
+    ``AttributeError`` here, which the caller maps to the store fallback.
+    A context whose config exists but has no usable url/token is a
+    malformed production config: it raises ``ValueError`` so it fails
+    loudly instead of being caught by the stub fallback and silently
+    re-resolving a possibly-drifted pair via the store.
+    """
+    instance = getattr(ctx.config, side)
+    # Support dict-shaped configs (tests stub SimpleNamespace without
+    # source/target): attribute access covers the real MigrationConfig.
+    url = getattr(instance, "url", None)
+    token = getattr(instance, "token", None)
+    if url is None or token is None:
+        raise ValueError(f"ctx.config.{side} has no url/token")
+    return {
+        "url": url,
+        "token": token,
+        "verify_ssl": getattr(instance, "verify_ssl", True),
+        "timeout": getattr(instance, "timeout", 60),
+    }
+
+
+def _source_or_fallback(
+    ctx: Any, params: dict[str, Any], need: NeedScope = "source"
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Single-resolution with test-stub fallback (keeps wiring spies green).
+
+    Production contexts carry ``config.source``/``config.target`` (real
+    resolution, no second store read). Unit wiring spies stub
+    ``chained_ctx`` with a ``SimpleNamespace`` lacking those attrs and mock
+    ``_iam_connections`` instead; fall back there only when the context
+    carries no connection (never double-resolves in production). A
+    ``ValueError`` from ``_stored_from_ctx`` (malformed config with a
+    present-but-unusable url/token) is not a stub signal and propagates
+    instead of falling back.
+    """
+    try:
+        source = _stored_from_ctx(ctx, "source")
+        target: dict[str, Any] | None = None
+        if need == "both":
+            target = _stored_from_ctx(ctx, "target")
+        return source, target
+    except AttributeError:
+        return _iam_connections(params, need=need)
 
 
 def _run_iam_audit(
@@ -143,22 +193,14 @@ def run_iam_audit(job: JobRecord) -> dict[str, Any]:
         params,
     ):
         pdict: dict[str, Any] = dict(params)
-        source = _stored_from_ctx(ctx, "source")
+        source, _ = _source_or_fallback(ctx, pdict, need="source")
         return _run_iam_audit(pdict, workdir, source)
 
 
 def run_iam_migrate(job: JobRecord) -> dict[str, Any]:
-    """Migrate IAM permissions (mirrors ``iam migrate``).
+    """Migrate IAM permissions (mirrors ``iam migrate``)."""
+    from aap_migration.api.services._core import chained_ctx
 
-    Cancel is cooperative (best-effort): the flag is checked before the
-    single analyser.migrate call, which cannot be preempted mid-call. A
-    cancel landing mid-migrate runs to completion; the FIFO worker then
-    reports cancelled with fence markers so resubmissions verify first.
-    """
-    from aap_migration.api.services._core import _cancel_requested, chained_ctx
-
-    if _cancel_requested(job):
-        return {"message": "IAM migration cancelled before start", "cancelled": True}
     # Single pair resolution: reuse the already-built chained context.
     with chained_ctx(job, allow_statuses=TERMINAL_STATUSES, need="both") as (
         ctx,
@@ -171,10 +213,7 @@ def run_iam_migrate(job: JobRecord) -> dict[str, Any]:
         # below is defense-in-depth for direct worker invocation.
         if pdict.get("skip_user_roles") and pdict.get("users_only"):
             raise ValueError("--skip-user-roles and --users-only are mutually exclusive")
-        if _cancel_requested(job):
-            return {"message": "IAM migration cancelled", "cancelled": True}
-        source = _stored_from_ctx(ctx, "source")
-        target = _stored_from_ctx(ctx, "target")
+        source, target = _source_or_fallback(ctx, pdict, need="both")
         return _run_iam_migrate(pdict, workdir, source, target)
 
 
@@ -186,7 +225,7 @@ def run_iam_benchmark(job: JobRecord) -> dict[str, Any]:
     # Single pair resolution: reuse the already-built chained context.
     with chained_ctx(job, need="source") as (ctx, _config, _workdir, params):
         pdict: dict[str, Any] = dict(params)
-        source = _stored_from_ctx(ctx, "source")
+        source, _ = _source_or_fallback(ctx, pdict, need="source")
         verify_ssl, _ = _resolve_iam_tls(pdict, source)
         sample_size = pdict.get("sample_size", 50)
         run_benchmark(

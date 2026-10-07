@@ -35,15 +35,16 @@ def _fake_success(monkeypatch: Any, name: str, artifact: str = "exports/orgs.jso
     explicit-[] params like the real workers do.
     """
     import aap_migration.api.services as services_mod
-    from aap_migration.api.services._core import is_noop_scope, noop_result
+    from aap_migration.api.services._core import is_noop_scope
 
     def _fake(job: Any) -> Any:
         from pathlib import Path
 
-        # Delegate the [] branch to the real guard AND the canonical
-        # envelope so the fake cannot diverge from the worker on either.
+        # Delegate the [] branch to the real guard so the fake cannot
+        # diverge from the worker: if is_noop_scope is deleted, these
+        # tests fail instead of passing over a full-export regression.
         if is_noop_scope(job.get("params", {})):
-            return noop_result()
+            return {"message": "No resource types selected; nothing to do", "artifacts": []}
         workdir = Path(job["job_dir"]).resolve()
         target = workdir / artifact
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
-import logging
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from aap_migration.api._errors import ConflictError
 from aap_migration.api.models import ApiActiveConfig, ApiConnection, api_session, init_api_db
 from aap_migration.api.security import decrypt_token, encrypt_token
 
@@ -35,23 +31,6 @@ SNAPSHOT_FP = "_snapshot_fp"
 SNAPSHOT_STABLE = "_snapshot_stable"
 SNAPSHOT_NEED = "_snapshot_need"
 SNAPSHOT_FERNET_FP = "_snapshot_fernet_fp"
-SNAPSHOT_TARGET_STABLE = "_snapshot_target_stable"
-
-# Chaining/override param keys (P3 #18): single home beside SNAPSHOT_*
-# so a typo fails at import/attribute time instead of silently
-# disabling pair-switch opt-in, chaining, or force.
-PARAM_JOB_ID = "job_id"
-PARAM_ALLOW_PAIR_SWITCH = "allow_pair_switch"
-PARAM_FORCE = "force"
-PARAM_SOURCE_ID = "source_id"
-PARAM_TARGET_ID = "target_id"
-PARAM_VERIFY_SSL = "verify_ssl"
-# Per-side stable key for the target (write) side only (P1 #4): the
-# full-pair fp/stable mix both endpoints, so a resubmission from a
-# different source to the same target slips the pair fence while a
-# timed-out orphan is still writing to that target. The target-side key
-# lets fences gate on target overlap alone; source-only (read-only)
-# jobs carry no target key and never block on source overlap.
 
 
 def _normalize_url_for_stable(url: str | None) -> str:
@@ -95,25 +74,6 @@ def needs_target(need: NeedScope) -> bool:
 def needs_connections(need: NeedScope) -> bool:
     """True when the scope bears connections at all (anything but ``"none"``)."""
     return need != "none"
-
-
-@dataclass(frozen=True)
-class ConnectionScope:
-    """Single value object for connection-scoped resolution (P2 #16).
-
-    Every connection-scoped entry point takes this instead of threading
-    ``(source_id, target_id, db_path, need)`` through each signature, so a
-    new scope dimension needs one field here, not synchronized edits
-    across store and context signatures.
-    """
-
-    source_id: str | None = None
-    target_id: str | None = None
-    db_path: str | None = None
-    need: NeedScope = "both"
-
-
-log = logging.getLogger("aap_migration.api.store")
 
 
 @contextmanager
@@ -274,23 +234,12 @@ def update_connection(
 
 
 def _pending_refs() -> list[dict[str, Any]]:
-    """Non-terminal ``{"job_type", "params"}`` refs, manager-unavailable safe.
-
-    When the job manager cannot be reached (not yet constructed, torn
-    down, or broken), there is no queue state to veto against: return []
-    and log a warning so the fail-open is visible in server logs instead
-    of a silent pass. Env-key rotations (AAP_BRIDGE_API_KEY) are never
-    covered by these refs -- drain the queue before rotating keys.
-    """
+    """Non-terminal ``{"job_type", "params"}`` refs, manager-unavailable safe."""
     try:
         from aap_migration.api.jobs import get_job_manager
 
         return get_job_manager().non_terminal_refs()
-    except Exception as exc:
-        log.warning(
-            "job-manager refs unavailable; connection vetoes see empty queue: %s",
-            type(exc).__name__,
-        )
+    except Exception:
         return []
 
 
@@ -311,18 +260,11 @@ def _is_connectionless(ref: dict[str, Any]) -> bool:
     return False
 
 
-def _reject_if_connection_referenced(
-    conn_id: str,
-    session: Session,
-    pending_refs: Callable[[], list[dict[str, Any]]] | None = None,
-) -> None:
-    """Raise ConflictError when non-terminal jobs depend on *conn_id*.
+def _reject_if_connection_referenced(conn_id: str, session: Session) -> None:
+    """Raise ConflictError when non-terminal jobs depend on *conn_id*."""
+    from aap_migration.api.jobs._records import ConflictError
 
-    *pending_refs* injects the queue-state provider (default: the
-    process-wide job manager via :func:`_pending_refs`); passing it
-    keeps this guard runnable without constructing the singleton.
-    """
-    refs = pending_refs() if pending_refs is not None else _pending_refs()
+    refs = _pending_refs()
     active = session.get(ApiActiveConfig, 1)
     active_src = active.source_id if active is not None else None
     active_tgt = active.target_id if active is not None else None
@@ -368,11 +310,7 @@ def _reject_if_connection_referenced(
         )
 
 
-def _reject_if_active_referenced(
-    conn_id: str,
-    session: Session,
-    pending_refs: Callable[[], list[dict[str, Any]]] | None = None,
-) -> None:
+def _reject_if_active_referenced(conn_id: str, session: Session) -> None:
     """Veto an active-pair move only for active-following jobs.
 
     Unlike :func:`_reject_if_connection_referenced` (update/delete: any
@@ -382,7 +320,9 @@ def _reject_if_active_referenced(
     connectionless jobs never consult the active pair, so unrelated
     explicit-id work must not veto an active-pair move.
     """
-    refs = pending_refs() if pending_refs is not None else _pending_refs()
+    from aap_migration.api.jobs._records import ConflictError
+
+    refs = _pending_refs()
     active = session.get(ApiActiveConfig, 1)
     active_src = active.source_id if active is not None else None
     active_tgt = active.target_id if active is not None else None
@@ -549,37 +489,32 @@ def _resolve_source_record(
 
 
 def resolve_active_pair(
-    scope: ConnectionScope,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    source_id: str | None = None,
+    target_id: str | None = None,
+    db_path: str | None = None,
+    need: NeedScope = "both",
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Resolve (source, target) connections with tokens.
 
     Explicit ids win; otherwise the active config is used. With
     ``need="source"`` only the source side is required (target may be
     None); otherwise both sides are required. Raises ValueError if a
     required side is unconfigured.
-
-    With ``need="none"`` (connectionless jobs) no side is consumed and
-    ``(None, None)`` is returned without touching the store, so a
-    connectionless submit never fails for want of a source and later
-    source admin never vetoes it (P2 #17). Connectionless callers must
-    not dereference the pair.
     """
-    if not needs_connections(scope.need):
-        return (None, None)
-    sid, source = _resolve_source_record(scope.source_id, scope.db_path)
-    if not needs_target(scope.need):
+    sid, source = _resolve_source_record(source_id, db_path)
+    if not needs_target(need):
         # Source-only callers (IAM audit/benchmark) never consume the
         # target side: return before touching it so a wrong-kind or
         # deleted active target cannot fail an unrelated read-only scan.
         return (source, None)
-    active = get_active(scope.db_path)
-    tid = scope.target_id or active["target_id"]
-    if scope.need != "source" and not tid:
+    active = get_active(db_path)
+    tid = target_id or active["target_id"]
+    if need != "source" and not tid:
         raise ValueError(
             "No target AAP configured. Create one via POST /api/v1/connections "
             "and select it via POST /api/v1/connections/active (or pass target_id)."
         )
-    target = get_connection(tid, include_token=True, db_path=scope.db_path) if tid else None
+    target = get_connection(tid, include_token=True, db_path=db_path) if tid else None
     if target is not None and target.get("kind") != "target":
         raise ValueError(
             f"Connection '{tid}' is a '{target.get('kind')}' connection, not a target "
@@ -588,7 +523,12 @@ def resolve_active_pair(
     return (source, target)
 
 
-def stored_posture(scope: ConnectionScope) -> dict[str, dict[str, Any]]:
+def stored_posture(
+    source_id: str | None = None,
+    target_id: str | None = None,
+    db_path: str | None = None,
+    need: NeedScope = "both",
+) -> dict[str, dict[str, Any]]:
     """Stored verify_ssl/timeout per consumed side (P1 #3, no tokens).
 
     Returns ``{"source": {...}, "target": {...}}`` with only the posture
@@ -596,128 +536,36 @@ def stored_posture(scope: ConnectionScope) -> dict[str, dict[str, Any]]:
     posture veto compares per-job overrides against these without a full
     pair resolution. Raises KeyError/ValueError like the resolvers above.
     """
-    if not needs_connections(scope.need):
+    if not needs_connections(need):
         return {}
-    active = get_active(scope.db_path)
+    active = get_active(db_path)
     out: dict[str, dict[str, Any]] = {}
-    sid = scope.source_id or active["source_id"]
+    sid = source_id or active["source_id"]
     if not sid:
         raise ValueError(
             "No source AAP configured. Create one via POST /api/v1/connections "
             "and select it via POST /api/v1/connections/active (or pass source_id)."
         )
-    record = get_connection(sid, db_path=scope.db_path)
+    record = get_connection(sid, db_path=db_path)
     out["source"] = {"verify_ssl": bool(record.get("verify_ssl", True))}
-    if needs_target(scope.need):
-        tid = scope.target_id or active["target_id"]
+    if needs_target(need):
+        tid = target_id or active["target_id"]
         if not tid:
             raise ValueError(
                 "No target AAP configured. Create one via POST /api/v1/connections "
                 "and select it via POST /api/v1/connections/active (or pass target_id)."
             )
-        target = get_connection(tid, db_path=scope.db_path)
+        target = get_connection(tid, db_path=db_path)
         out["target"] = {"verify_ssl": bool(target.get("verify_ssl", True))}
     return out
 
 
-def _mix_record(digest: Any, record: dict[str, Any] | None) -> None:
-    """Mix a resolved connection record into *digest* (no secrets in clear).
-
-    The URL is canonicalized exactly like the stable key (P2 #18), so a
-    case-only URL edit to the same physical controller no longer drifts
-    the credential fingerprint and fails queued jobs as a rotation.
-    """
-    if record is None:
-        digest.update(b"\x00")
-        return
-    digest.update(_normalize_url_for_stable(record.get("url")).encode())
-    digest.update(b"\x00")
-    digest.update(str(record.get("token", "")).encode())
-    digest.update(b"\x00")
-    # Posture fields: a verify_ssl true->false (or timeout) edit in the
-    # queue window must fail the fingerprint like a rotation does,
-    # instead of silently running the approved job with weaker TLS.
-    digest.update(str(record.get("verify_ssl", "")).encode())
-    digest.update(b"\x00")
-    digest.update(str(record.get("timeout", "")).encode())
-    digest.update(b"\x00")
-
-
-def _mix_stable(digest: Any, record: dict[str, Any] | None) -> None:
-    if record is None:
-        digest.update(b"\x00")
-        return
-    digest.update(_normalize_url_for_stable(record.get("url")).encode())
-    digest.update(b"\x00")
-
-
-def _side_stable(record: dict[str, Any] | None) -> str | None:
-    """Stable per-side key for one endpoint's normalized URL (P1 #4).
-
-    Returns None when there is no record, so source-only and
-    connectionless fingerprints carry no target-side key and their
-    jobs never block on target overlap.
-    """
-    if record is None:
-        return None
-    digest = hashlib.sha256()
-    digest.update(_normalize_url_for_stable(record.get("url")).encode())
-    digest.update(b"\x00target")
-    return digest.hexdigest()
-
-
-def fingerprint_of_records(
-    source: dict[str, Any] | None,
-    target: dict[str, Any] | None,
-    need: NeedScope,
+def pair_fingerprint(
+    source_id: str | None = None,
+    target_id: str | None = None,
+    db_path: str | None = None,
+    need: NeedScope = "both",
 ) -> dict[str, Any]:
-    """Fingerprint an already-resolved pair without re-reading the store.
-
-    Single home for digest construction shared by :func:`pair_fingerprint`
-    (resolves, then fingerprints) and execution-time re-verification, so a
-    rotation landing between verify and resolve cannot slip through a
-    second resolution (see context.setup_chained). Connectionless
-    (``need="none"``) fingerprints are source-independent constants.
-    """
-    if not needs_connections(need):
-        digest = hashlib.sha256(b"connectionless\x00")
-        stable = hashlib.sha256(b"connectionless\x00")
-        return {
-            "source_id": None,
-            "target_id": None,
-            "fp": digest.hexdigest(),
-            "stable": stable.hexdigest(),
-            "target_stable": None,
-        }
-    if not needs_target(need):
-        digest = hashlib.sha256()
-        _mix_record(digest, source)
-        stable = hashlib.sha256()
-        _mix_stable(stable, source)
-        stable.update(b"\x00source")
-        return {
-            "source_id": source.get("id") if source else None,
-            "target_id": None,
-            "fp": digest.hexdigest(),
-            "stable": stable.hexdigest(),
-            "target_stable": None,
-        }
-    digest = hashlib.sha256()
-    for record in (source, target):
-        _mix_record(digest, record)
-    stable = hashlib.sha256()
-    for record in (source, target):
-        _mix_stable(stable, record)
-    return {
-        "source_id": source.get("id") if source else None,
-        "target_id": target.get("id") if target else None,
-        "fp": digest.hexdigest(),
-        "stable": stable.hexdigest(),
-        "target_stable": _side_stable(target),
-    }
-
-
-def pair_fingerprint(scope: ConnectionScope) -> dict[str, Any]:
     """Snapshot the effective connection pair for submit-time pinning.
 
     Returns resolved ids plus a fingerprint over both endpoints' URLs,
@@ -733,17 +581,62 @@ def pair_fingerprint(scope: ConnectionScope) -> dict[str, Any]:
     ``need="source"`` tolerates an unconfigured target (source-only jobs)
     and hashes only the source side, so configuring an active target while
     a source-only job waits in the FIFO queue does not change its
-    fingerprint. ``need="both"`` hashes both sides. ``need="none"``
-    returns source-independent constant pins (P2 #17).
+    fingerprint. ``need="both"`` hashes both sides.
     """
-    if not needs_connections(scope.need):
-        return fingerprint_of_records(None, None, scope.need)
-    if not needs_target(scope.need):
+    import hashlib
+
+    def _mix(digest: Any, record: dict[str, Any] | None) -> None:
+        if record is None:
+            digest.update(b"\x00")
+            return
+        digest.update(str(record.get("url", "")).encode())
+        digest.update(b"\x00")
+        digest.update(str(record.get("token", "")).encode())
+        digest.update(b"\x00")
+        # Posture fields: a verify_ssl true->false (or timeout) edit in the
+        # queue window must fail the fingerprint like a rotation does,
+        # instead of silently running the approved job with weaker TLS.
+        digest.update(str(record.get("verify_ssl", "")).encode())
+        digest.update(b"\x00")
+        digest.update(str(record.get("timeout", "")).encode())
+        digest.update(b"\x00")
+
+    def _mix_stable(digest: Any, record: dict[str, Any] | None) -> None:
+        if record is None:
+            digest.update(b"\x00")
+            return
+        digest.update(_normalize_url_for_stable(record.get("url")).encode())
+        digest.update(b"\x00")
+
+    if not needs_target(need):
         # Source-only jobs never consume the target side: resolve the source
         # via the active fallback but ignore any active target entirely.
         # This keeps their fingerprint stable across unrelated target admin.
-        _, src_record = _resolve_source_record(scope.source_id, scope.db_path)
-        return fingerprint_of_records(src_record, None, scope.need)
+        sid, source = _resolve_source_record(source_id, db_path)
+        digest = hashlib.sha256()
+        _mix(digest, source)
+        stable = hashlib.sha256()
+        _mix_stable(stable, source)
+        stable.update(b"\x00source")
+        return {
+            "source_id": sid,
+            "target_id": None,
+            "fp": digest.hexdigest(),
+            "stable": stable.hexdigest(),
+        }
 
-    source, target = resolve_active_pair(scope)
-    return fingerprint_of_records(source, target, scope.need)
+    source, target = resolve_active_pair(source_id, target_id, db_path, need=need)
+    sid = source["id"]
+    tid = target["id"] if target is not None else None
+    digest = hashlib.sha256()
+    for record in (source, target):
+        _mix(digest, record)
+    stable = hashlib.sha256()
+    for record in (source, target):
+        _mix_stable(stable, record)
+    return {
+        "source_id": sid,
+        "target_id": tid,
+        "fp": digest.hexdigest(),
+        "stable": stable.hexdigest(),
+    }
