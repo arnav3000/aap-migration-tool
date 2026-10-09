@@ -16,7 +16,8 @@ MAINTAINER Magnus Glantz <sudo@redhat.com>
 RUN dnf update -y && \
     dnf install python3 python3-pip wget unzip openssh-clients ncurses -y && \
     dnf remove vim-minimal -y && \
-    pip3 install --upgrade "setuptools>=78.1.1" && \
+    pip3 install --no-cache-dir --upgrade "setuptools>=78.1.1" "uv>=0.7.0" && \
+    dnf remove -y python3-pip && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
@@ -35,6 +36,13 @@ ENV AAP_BRIDGE_ZIP="${AAP_BRIDGE_ZIP:-https://github.com/arnav3000/aap-bridge-fo
 RUN wget -q "$AAP_BRIDGE_ZIP" -O /tmp/aap-bridge.zip && \
     unzip -q /tmp/aap-bridge.zip -d /app/ && \
     mv /app/$(ls /app | head -1) /app/aap-bridge && \
+    sed -i \
+        -e 's/httpx==0\.25\.0/httpx>=0.28.1/g' \
+        -e 's/requests==2\.31\.0/requests>=2.33.0/g' \
+        -e 's/python-dotenv==1\.0\.0/python-dotenv>=1.2.2/g' \
+        -e 's/tqdm==4\.66\.1/tqdm>=4.66.3/g' \
+        /app/aap-bridge/pyproject.toml /app/aap-bridge/requirements.txt && \
+    rm -f /app/aap-bridge/uv.lock && \
     rm -f /tmp/aap-bridge.zip
 
 WORKDIR /app/aap-bridge
@@ -47,15 +55,27 @@ RUN useradd appuser && \
 
 USER appuser
 
-RUN pip3 install --no-cache-dir "uv>=0.7.0"
-
+# The managed interpreter only backs .venv; uv handles package installs. Remove
+# its unused pip and vendored dependencies from the shipped image.
+# Apply the security floors after sync so the downloaded project's lockfile
+# cannot roll these patched packages back to vulnerable versions.
 # Single RUN — old seeded versions never persist as a separate layer
-RUN ~/.local/bin/uv venv --seed --python 3.12 && \
-    ~/.local/bin/uv pip install \
+RUN /usr/local/bin/uv venv --python 3.12 && \
+    /usr/local/bin/uv sync --upgrade && \
+    /usr/local/bin/uv pip install --python .venv/bin/python \
         "h11>=0.16.0" \
+        "msgpack>=1.2.1" \
+        "python-dotenv>=1.2.2" \
+        "requests>=2.33.0" \
         "setuptools>=78.1.1" \
-        "msgpack>=1.2.1" && \
-    ~/.local/bin/uv sync --upgrade
+        "tqdm>=4.66.3" \
+        "urllib3>=2.8.0" && \
+    /usr/local/bin/uv pip check --python .venv/bin/python && \
+    /usr/local/bin/uv cache clean && \
+    BASE_PYTHON="$(.venv/bin/python -c 'import sys; print(sys._base_executable)')" && \
+    PIP_DIR="$("$BASE_PYTHON" -c 'import pathlib, pip; print(pathlib.Path(pip.__file__).parent)')" && \
+    SITE_PACKAGES="$(dirname "$PIP_DIR")" && \
+    rm -rf "$PIP_DIR" "$SITE_PACKAGES"/pip-*.dist-info
 
 # Create an alias for aap-bridge when someone enters a shell
 RUN echo "alias aap-bridge=/app/aap-bridge/.venv/bin/aap-bridge" >> ~/.bashrc
