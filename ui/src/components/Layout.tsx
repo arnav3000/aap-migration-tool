@@ -22,11 +22,10 @@ import { getApiKey, setApiKey } from '../api/client';
 
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard' },
-  { to: '/setup', label: 'Setup' },
-  { to: '/connections', label: 'Connections' },
   { to: '/migrate', label: 'Migrate' },
   { to: '/jobs', label: 'Jobs' },
   { to: '/validate', label: 'Validate' },
+  { to: '/settings', label: 'Settings' },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {

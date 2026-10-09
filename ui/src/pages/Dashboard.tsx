@@ -62,7 +62,7 @@ export function Dashboard() {
           title="No migration pair configured yet."
           style={{ marginTop: 16 }}
         >
-          Enter your source and target AAP endpoints on the <Link to="/setup">Setup</Link> page
+          Enter your source and target AAP endpoints on the <Link to="/settings">Settings</Link> page
           — no AAP tokens in .env needed.
         </Alert>
       )}

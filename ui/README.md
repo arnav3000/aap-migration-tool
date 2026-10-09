@@ -17,9 +17,8 @@ search, autoscroll, live polling, download — against the migration-job API
 ## Screens (full migration workflow)
 
 - **Dashboard** — API health, migration state summary, recent jobs (warns when no pair is configured).
-- **Setup** — first-run wizard: enter source + target AAP endpoints in the browser (saved encrypted, tested live, activated as the pair), so `.env` only holds `AAP_BRIDGE_API_TOKEN`.
-- **Connections** — CRUD stored AAP endpoints, activate source/target, test.
-- **Migrate** — full migration, export-only, granular import (chained `job_id`).
+- **Settings** — store any number of source/target endpoints (encrypted, tested live), pick the active migration pair. First load auto-routes here until a pair is configured.
+- **Migrate** — full migration, export-only, granular import (chained `job_id`), with per-submit source/target pickers.
 - **Jobs** — live list with status filter (AWX-style status dots).
 - **Job detail** — status/result, AWX-style output viewer, chain next phase
   (transform/import/validate/report), artifact downloads.
