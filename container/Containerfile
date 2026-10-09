@@ -55,6 +55,8 @@ RUN useradd appuser && \
 
 USER appuser
 
+# The managed interpreter only backs .venv; uv handles package installs. Remove
+# its unused pip and vendored dependencies from the shipped image.
 # Apply the security floors after sync so the downloaded project's lockfile
 # cannot roll these patched packages back to vulnerable versions.
 # Single RUN — old seeded versions never persist as a separate layer
@@ -69,7 +71,11 @@ RUN /usr/local/bin/uv venv --python 3.12 && \
         "tqdm>=4.66.3" \
         "urllib3>=2.8.0" && \
     /usr/local/bin/uv pip check --python .venv/bin/python && \
-    /usr/local/bin/uv cache clean
+    /usr/local/bin/uv cache clean && \
+    BASE_PYTHON="$(.venv/bin/python -c 'import sys; print(sys._base_executable)')" && \
+    PIP_DIR="$("$BASE_PYTHON" -c 'import pathlib, pip; print(pathlib.Path(pip.__file__).parent)')" && \
+    SITE_PACKAGES="$(dirname "$PIP_DIR")" && \
+    rm -rf "$PIP_DIR" "$SITE_PACKAGES"/pip-*.dist-info
 
 # Create an alias for aap-bridge when someone enters a shell
 RUN echo "alias aap-bridge=/app/aap-bridge/.venv/bin/aap-bridge" >> ~/.bashrc
