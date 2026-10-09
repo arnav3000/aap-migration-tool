@@ -36,6 +36,13 @@ ENV AAP_BRIDGE_ZIP="${AAP_BRIDGE_ZIP:-https://github.com/arnav3000/aap-bridge-fo
 RUN wget -q "$AAP_BRIDGE_ZIP" -O /tmp/aap-bridge.zip && \
     unzip -q /tmp/aap-bridge.zip -d /app/ && \
     mv /app/$(ls /app | head -1) /app/aap-bridge && \
+    sed -i \
+        -e 's/httpx==0\.25\.0/httpx>=0.28.1/g' \
+        -e 's/requests==2\.31\.0/requests>=2.33.0/g' \
+        -e 's/python-dotenv==1\.0\.0/python-dotenv>=1.2.2/g' \
+        -e 's/tqdm==4\.66\.1/tqdm>=4.66.3/g' \
+        /app/aap-bridge/pyproject.toml /app/aap-bridge/requirements.txt && \
+    rm -f /app/aap-bridge/uv.lock && \
     rm -f /tmp/aap-bridge.zip
 
 WORKDIR /app/aap-bridge
