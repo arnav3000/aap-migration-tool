@@ -68,7 +68,8 @@ unchanged; the `ui` profile adds:
 ## Build the UI image alone
 
 ```bash
-podman build -f ui/Containerfile -t aap-bridge-ui:latest .
+# Build context is ui/ itself (matches container/docker-compose.yml)
+podman build -f ui/Containerfile -t aap-bridge-ui:latest ui/
 ```
 
 ## Notes

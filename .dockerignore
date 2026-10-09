@@ -1,0 +1,10 @@
+# Keep image build contexts lean. Neither the CLI/API Containerfile nor
+# the UI Containerfile COPY from the build context (code is downloaded or
+# built from ui/), so excluding heavy trees only speeds up uploads.
+.git/
+ui/node_modules/
+ui/dist/
+**/__pycache__/
+**/*.pyc
+htmlcov/
+site/
