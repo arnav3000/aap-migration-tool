@@ -16,7 +16,7 @@ MAINTAINER Magnus Glantz <sudo@redhat.com>
 RUN dnf update -y && \
     dnf install python3 python3-pip wget unzip openssh-clients ncurses -y && \
     dnf remove vim-minimal -y && \
-    pip3 install --upgrade "setuptools>=83.0.0" && \
+    pip3 install --upgrade "setuptools>=78.1.1" && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
@@ -59,7 +59,7 @@ RUN ~/.local/bin/uv venv --seed --python 3.12 && \
         "msgpack>=1.2.1" \
         "python-dotenv>=1.2.2" \
         "requests>=2.33.0" \
-        "setuptools>=83.0.0" \
+        "setuptools>=78.1.1" \
         "tqdm>=4.66.3" \
         "urllib3>=2.8.0"
 
