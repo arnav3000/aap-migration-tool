@@ -17,7 +17,7 @@ RUN dnf update -y && \
     dnf install python3 python3-pip wget unzip openssh-clients ncurses -y && \
     dnf remove vim-minimal -y && \
     pip3 install --no-cache-dir --upgrade "setuptools>=78.1.1" "uv>=0.7.0" && \
-    dnf remove -y python3-pip python3-pip-wheel && \
+    dnf remove -y python3-pip && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
