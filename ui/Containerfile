@@ -2,7 +2,8 @@
 # Stage 1 builds the static Vite app; stage 2 serves it via nginx and
 # reverse-proxies /api/v1 to the API container (no CORS changes needed).
 # Red Hat UBI Node.js builder (override with --build-arg NODE_BASE=...).
-ARG NODE_BASE=registry.access.redhat.com/ubi9/nodejs-20:latest
+# Note: ubi9/nodejs-24 has no `latest` tag; `1` is the floating tag.
+ARG NODE_BASE=registry.access.redhat.com/ubi9/nodejs-24:1
 FROM ${NODE_BASE} AS build
 
 # UBI Node.js images default to UID 1001; build as root in this throwaway
