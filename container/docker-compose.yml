@@ -56,7 +56,9 @@ services:
       - ./volumes/config:/app/aap-bridge/config:Z
       - ./volumes/api_jobs:/app/aap-bridge/api_jobs:Z
     ports:
-      - "8000:8000"
+      # Host side configurable via AAP_BRIDGE_API_PORT (default 8000);
+      # container side stays 8000 (nginx upstream + healthcheck rely on it).
+      - "${AAP_BRIDGE_API_PORT:-8000}:8000"
     restart: unless-stopped
     command: /app/aap-bridge/.venv/bin/aap-bridge-api
     healthcheck:
@@ -78,7 +80,9 @@ services:
     depends_on:
       - aap-bridge-api
     ports:
-      - "8080:8080"
+      # Host side configurable via AAP_BRIDGE_UI_PORT (default 8080);
+      # container side stays 8080 (nginx listens there).
+      - "${AAP_BRIDGE_UI_PORT:-8080}:8080"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/"]
@@ -134,3 +138,6 @@ volumes:
 #   podman-compose --profile ui up -d --build
 #   # UI:  http://localhost:8080 (enter the API token when prompted)
 #   # API: http://localhost:8000/api/v1/docs
+#   # Port conflicts? Set host-side ports in .env (container sides fixed):
+#   #   AAP_BRIDGE_API_PORT=8001
+#   #   AAP_BRIDGE_UI_PORT=8081
