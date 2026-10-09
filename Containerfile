@@ -26,10 +26,10 @@ RUN mkdir /app
 WORKDIR /app
 
 # Download variable, if you are building your own image, simply pass your own repository like such:
-# podman build --build-arg AAP_BRIDGE_ZIP=https://github.com/myuser/aap-bridge-fork/archive/refs/heads/main.zip -t stuff .
+# podman build --build-arg AAP_BRIDGE_ZIP=https://github.com/myuser/aap-migration-tool/archive/refs/heads/main.zip -t stuff .
 ARG AAP_BRIDGE_ZIP
 RUN echo "Downloading from: $AAP_BRIDGE_ZIP"
-ENV AAP_BRIDGE_ZIP="${AAP_BRIDGE_ZIP:-https://github.com/arnav3000/aap-bridge-fork/archive/refs/heads/main.zip}" 
+ENV AAP_BRIDGE_ZIP="${AAP_BRIDGE_ZIP:-https://github.com/arnav3000/aap-migration-tool/archive/refs/heads/main.zip}" 
 
 # Download and unzip of aap-bridge code
 RUN wget -q "$AAP_BRIDGE_ZIP" -O /tmp/aap-bridge.zip && \
