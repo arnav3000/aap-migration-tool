@@ -16,7 +16,7 @@ tenacity==8.2.3
 
 # Configuration Management
 pydantic==2.9.0
-pydantic-settings==2.1.0
+pydantic-settings==2.15.0
 PyYAML==6.0.1
 python-dotenv==1.2.4
 
