@@ -14,6 +14,15 @@ mimics the AWX Job Output UX — dark log surface, line numbers, event filter,
 search, autoscroll, live polling, download — against the migration-job API
 (`GET /jobs/{id}/console`, `GET /jobs/{id}/artifacts`).
 
+## Look & feel (ansible-ui)
+
+The UI deliberately mirrors AWX Job Output and AAP console chrome:
+`src/components/awx/` vendors the presentational patterns (output grid,
+toolbar, status header) from [ansible/ansible-ui](https://github.com/ansible/ansible-ui)
+(Apache-2.0), rewired to the migration console API. See `ui/NOTICE` for
+attribution. No ansible-ui code is executed beyond presentation — no
+framework packages, routing, or AWX data layer.
+
 ## Screens (full migration workflow)
 
 - **Dashboard** — API health, migration state summary, recent jobs (warns when no pair is configured).

@@ -8,11 +8,11 @@ import {
   Gallery,
   PageSection,
   Spinner,
-  Title,
 } from '@patternfly/react-core';
 import { api } from '../api/client';
 import type { ActiveConfigOut, HealthOut, JobListOut, MigrationStatusOut } from '../api/types';
 import { StatusDot } from '../components/StatusBadge';
+import { PageHeader } from '../components/Layout';
 
 export function Dashboard() {
   const [health, setHealth] = useState<HealthOut | null>(null);
@@ -49,7 +49,7 @@ export function Dashboard() {
 
   return (
     <PageSection>
-      <Title headingLevel="h1">Dashboard</Title>
+      <PageHeader title="Dashboard" description="Migration overview and recent activity." />
       {loading && <Spinner aria-label="Loading dashboard" />}
       {error && (
         <Alert variant="danger" title="Could not reach the API" style={{ marginTop: 16 }}>

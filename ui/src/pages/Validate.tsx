@@ -11,10 +11,10 @@ import {
   PageSection,
   Switch,
   TextInput,
-  Title,
 } from '@patternfly/react-core';
 import { api } from '../api/client';
 import type { JobCreated } from '../api/types';
+import { PageHeader } from '../components/Layout';
 
 // Validate + reports: submits background jobs and navigates to the job
 // detail page where stdout and report artifacts are shown AWX-style.
@@ -44,7 +44,7 @@ export function Validate() {
 
   return (
     <PageSection>
-      <Title headingLevel="h1">Validate & reports</Title>
+      <PageHeader title="Validate & reports" />
       {error && <Alert variant="danger" title={error} style={{ marginTop: 16 }} />}
       <Card style={{ marginTop: 16 }}>
         <CardTitle>Validation</CardTitle>

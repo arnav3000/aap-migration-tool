@@ -17,10 +17,10 @@ import {
   SelectOption,
   Switch,
   TextInput,
-  Title,
 } from '@patternfly/react-core';
 import { api } from '../api/client';
 import type { ActiveConfigOut, ApiConnection, ConnectionListOut, JobCreated } from '../api/types';
+import { PageHeader } from '../components/Layout';
 
 // Full migration workflow: export -> transform -> import with job chaining.
 // Each phase submits against the previous job_id so all phases share one
@@ -130,11 +130,15 @@ export function Migrate() {
 
   return (
     <PageSection>
-      <Title headingLevel="h1">Migrate</Title>
-      <p>
-        Submit ETL phases as background jobs. Phases chain via <code>job_id</code> so
-        export → transform → import share one working directory.
-      </p>
+      <PageHeader
+        title="Migrate"
+        description={
+          <>
+            Submit ETL phases as background jobs. Phases chain via <code>job_id</code> so
+            export → transform → import share one working directory.
+          </>
+        }
+      />
       {error && <Alert variant="danger" title={error} style={{ marginTop: 16 }} />}
       {chain.length > 0 && (
         <Alert variant="info" title="Submitted" style={{ marginTop: 16 }}>

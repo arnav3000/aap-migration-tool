@@ -14,13 +14,13 @@ import {
   GridItem,
   PageSection,
   Spinner,
-  Title,
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { api, downloadArtifact } from '../api/client';
 import type { JobArtifactsOut, JobCreated, JobStatus } from '../api/types';
-import { StatusBadge } from '../components/StatusBadge';
+import { JobStatusHeader } from '../components/awx/JobStatusHeader';
 import { JobOutput } from '../components/JobOutput';
+import { PageHeader } from '../components/Layout';
 
 const CHAIN_ACTIONS: { label: string; path: string; buildBody: (jobId: string) => object }[] = [
   { label: 'Transform (chained)', path: '/transforms', buildBody: (jobId) => ({ job_id: jobId }) },
@@ -117,31 +117,61 @@ export function JobDetail() {
 
   return (
     <PageSection>
-      <Title headingLevel="h1">Job {jobId.slice(0, 8)}…</Title>
+      <PageHeader backTo="/jobs" backLabel="Back to Jobs" title="Job" />
       {error && <Alert variant="danger" title={error} style={{ marginTop: 16 }} />}
       {notice && <Alert variant="success" title={notice} style={{ marginTop: 16 }} />}
       {!job && !error && <Spinner aria-label="Loading job" />}
       {job && (
         <>
+          <div style={{ margin: '16px 0' }}>
+            <JobStatusHeader job={job} />
+          </div>
+          {job.error && (
+            <Alert variant="danger" title="Error" style={{ marginBottom: 16 }} isInline>
+              {job.error}
+            </Alert>
+          )}
+          {typeof job.result?.message === 'string' && job.result.message && (
+            <Alert variant="success" title="Result" style={{ marginBottom: 16 }} isInline>
+              {job.result.message}
+            </Alert>
+          )}
+          <JobOutput jobId={jobId} jobStatus={job.status} />
+
           <Grid hasGutter style={{ marginTop: 16 }}>
-            <GridItem span={12} xl={4}>
+            <GridItem span={12} xl={6}>
               <Card isFullHeight>
-                <CardTitle>Details</CardTitle>
+                <CardTitle>Next phase (chain onto this job&apos;s directory)</CardTitle>
                 <CardBody>
-                  <DescriptionList>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {(job.status === 'queued' || job.status === 'running') && (
+                      <Button
+                        variant="danger"
+                        onClick={cancel}
+                        isDisabled={actionBusy !== null}
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                    {CHAIN_ACTIONS.map((action) => (
+                      <Button
+                        key={action.label}
+                        variant="secondary"
+                        isLoading={actionBusy === action.label}
+                        isDisabled={actionBusy !== null}
+                        onClick={() => runChainAction(action.label, action.path, action.buildBody(jobId))}
+                      >
+                        {action.label}
+                      </Button>
+                    ))}
+                    <Button variant="link" onClick={() => load()}>
+                      Refresh
+                    </Button>
+                  </div>
+                  <DescriptionList style={{ marginTop: 12 }}>
                     <DescriptionListGroup>
-                      <DescriptionListTerm>Status</DescriptionListTerm>
-                      <DescriptionListDescription>
-                        <StatusBadge status={job.status} />
-                      </DescriptionListDescription>
-                    </DescriptionListGroup>
-                    <DescriptionListGroup>
-                      <DescriptionListTerm>Type</DescriptionListTerm>
-                      <DescriptionListDescription>{job.job_type}</DescriptionListDescription>
-                    </DescriptionListGroup>
-                    <DescriptionListGroup>
-                      <DescriptionListTerm>Exit code</DescriptionListTerm>
-                      <DescriptionListDescription>{job.exit_code ?? '—'}</DescriptionListDescription>
+                      <DescriptionListTerm>Job ID</DescriptionListTerm>
+                      <DescriptionListDescription>{job.job_id}</DescriptionListDescription>
                     </DescriptionListGroup>
                     <DescriptionListGroup>
                       <DescriptionListTerm>Created</DescriptionListTerm>
@@ -152,84 +182,43 @@ export function JobDetail() {
                       <DescriptionListDescription>{job.updated_at ?? '—'}</DescriptionListDescription>
                     </DescriptionListGroup>
                   </DescriptionList>
-                  {job.error && (
-                    <Alert variant="danger" title="Error" style={{ marginTop: 12 }} isInline>
-                      {job.error}
-                    </Alert>
-                  )}
-                  {typeof job.result?.message === 'string' && job.result.message && (
-                    <Alert variant="success" title="Result" style={{ marginTop: 12 }} isInline>
-                      {String(job.result.message)}
-                    </Alert>
-                  )}
-                  <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                    {(job.status === 'queued' || job.status === 'running') && (
-                      <Button variant="danger" onClick={cancel} isDisabled={actionBusy !== null}>
-                        Cancel
-                      </Button>
-                    )}
-                    <Button variant="link" onClick={() => load()}>
-                      Refresh
-                    </Button>
-                  </div>
                 </CardBody>
               </Card>
             </GridItem>
-            <GridItem span={12} xl={8}>
-              <JobOutput jobId={jobId} jobStatus={job.status} />
+            <GridItem span={12} xl={6}>
+              <Card isFullHeight>
+                <CardTitle>
+                  Artifacts ({artifacts?.total ?? 0}
+                  {artifacts?.truncated ? '+' : ''})
+                </CardTitle>
+                <CardBody>
+                  {(artifacts?.artifacts?.length ?? 0) === 0 && <p>No artifacts yet.</p>}
+                  {(artifacts?.artifacts?.length ?? 0) > 0 && (
+                    <Table aria-label="Artifacts">
+                      <Thead>
+                        <Tr>
+                          <Th>Path</Th>
+                          <Th>Action</Th>
+                        </Tr>
+                      </Thead>
+                      <Tbody>
+                        {(artifacts?.artifacts ?? []).map((path) => (
+                          <Tr key={path}>
+                            <Td>{path}</Td>
+                            <Td>
+                              <Button variant="link" onClick={() => downloadArtifact(jobId, path)}>
+                                Download
+                              </Button>
+                            </Td>
+                          </Tr>
+                        ))}
+                      </Tbody>
+                    </Table>
+                  )}
+                </CardBody>
+              </Card>
             </GridItem>
           </Grid>
-
-          <Card style={{ marginTop: 16 }}>
-            <CardTitle>Next phase (chain onto this job&apos;s directory)</CardTitle>
-            <CardBody>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {CHAIN_ACTIONS.map((action) => (
-                  <Button
-                    key={action.label}
-                    variant="secondary"
-                    isLoading={actionBusy === action.label}
-                    isDisabled={actionBusy !== null}
-                    onClick={() => runChainAction(action.label, action.path, action.buildBody(jobId))}
-                  >
-                    {action.label}
-                  </Button>
-                ))}
-              </div>
-            </CardBody>
-          </Card>
-
-          <Card style={{ marginTop: 16 }}>
-            <CardTitle>
-              Artifacts ({artifacts?.total ?? 0}
-              {artifacts?.truncated ? '+' : ''})
-            </CardTitle>
-            <CardBody>
-              {(artifacts?.artifacts?.length ?? 0) === 0 && <p>No artifacts yet.</p>}
-              {(artifacts?.artifacts?.length ?? 0) > 0 && (
-                <Table aria-label="Artifacts">
-                  <Thead>
-                    <Tr>
-                      <Th>Path</Th>
-                      <Th>Action</Th>
-                    </Tr>
-                  </Thead>
-                  <Tbody>
-                    {(artifacts?.artifacts ?? []).map((path) => (
-                      <Tr key={path}>
-                        <Td>{path}</Td>
-                        <Td>
-                          <Button variant="link" onClick={() => downloadArtifact(jobId, path)}>
-                            Download
-                          </Button>
-                        </Td>
-                      </Tr>
-                    ))}
-                  </Tbody>
-                </Table>
-              )}
-            </CardBody>
-          </Card>
         </>
       )}
     </PageSection>

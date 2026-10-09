@@ -1,0 +1,43 @@
+/**
+ * Vendored from ansible/ansible-ui (Apache-2.0):
+ * frontend/awx/views/jobs/JobOutput/JobOutput.css
+ *
+ * Adapted: class names kept so the output grid matches AWX Job Output
+ * (sticky line-number gutter, wrapped stdout column). No functional changes.
+ * Original: https://github.com/ansible/ansible-ui — see ui/NOTICE for license.
+ */
+.output-grid {
+  --output-line-chars: 3;
+  --output-line-column-width: calc(50px + var(--output-line-chars) * 1ch);
+  display: grid;
+  grid-template-columns: minmax(var(--output-line-column-width), auto) 1fr;
+  overflow-x: auto;
+  background-color: var(--pf-t--global--background--color--secondary--default);
+}
+
+.output-grid-row {
+  grid-column: span 2;
+  display: grid;
+  grid-template-columns: minmax(var(--output-line-column-width), auto) 1fr;
+  grid-template-columns: subgrid;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+/* AAP Bridge additions (not vendored): ANSI colors render through spans
+ * produced by awx/Ansi.tsx; keep them inheriting the row font. */
+.output-grid-row .awx-stdout {
+  font-family: var(--pf-t--global--font--family--mono);
+  font-size: var(--pf-t--global--font--size--sm);
+}
+
+/* Job-output header: h1 + status on one baseline, like AWX JobStatusBar. */
+.awx-header-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.awx-header-title h1 {
+  font-weight: var(--pf-t--global--font--weight--body--bold);
+}

@@ -22,11 +22,11 @@ import {
   Spinner,
   Switch,
   TextInput,
-  Title,
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { api } from '../api/client';
 import type { ActiveConfigOut, ApiConnection, ConnectionListOut } from '../api/types';
+import { PageHeader } from '../components/Layout';
 
 interface EndpointForm {
   name: string;
@@ -293,13 +293,17 @@ export function Settings() {
 
   return (
     <PageSection>
-      <Title headingLevel="h1">Settings</Title>
-      <p>
-        Store any number of source and target AAP endpoints — tokens are encrypted
-        at rest, so the server <code>.env</code> only needs{' '}
-        <code>AAP_BRIDGE_API_TOKEN</code>. Pick the active migration pair below;
-        individual jobs can override it on the <Link to="/migrate">Migrate</Link> page.
-      </p>
+      <PageHeader
+        title="Settings"
+        description={
+          <>
+            Store any number of source and target AAP endpoints — tokens are encrypted
+            at rest, so the server <code>.env</code> only needs{' '}
+            <code>AAP_BRIDGE_API_TOKEN</code>. Pick the active migration pair below;
+            individual jobs can override it on the <Link to="/migrate">Migrate</Link> page.
+          </>
+        }
+      />
       {loading && <Spinner aria-label="Loading settings" />}
       {error && <Alert variant="danger" title={error} style={{ marginTop: 16 }} />}
       {notice && <Alert variant="success" title={notice} style={{ marginTop: 16 }} />}

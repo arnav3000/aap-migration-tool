@@ -1,6 +1,6 @@
-/* AAP Bridge UI: AWX-inspired touches on top of PatternFly.
- * The dark job-output surface mirrors the AWX Job Output view
- * (ansible-ui), while navigation/chrome stays standard PatternFly. */
+/* AWX-inspired touches on top of PatternFly.
+ * The job-output grid comes from vendored ansible-ui CSS
+ * (src/components/awx/JobOutput.css); this file holds app-level tweaks. */
 
 :root {
   --aap-bridge-output-bg: #1b1d21;
@@ -8,9 +8,4 @@
 
 .pf-v6-c-page__main-section {
   max-width: 1400px;
-}
-
-/* Keep the LogViewer toolbar aligned with the AWX output header. */
-.pf-v6-c-log-viewer {
-  border-radius: 6px;
 }

@@ -8,8 +8,9 @@ import {
 } from '@patternfly/react-icons';
 import type { JobStatusValue } from '../api/types';
 
+// AWX StatusCell wording: Pending / Running / Successful / Failed / Canceled.
 const STATUS_META: Record<JobStatusValue, { color: string; icon: () => JSX.Element; label: string }> = {
-  queued: { color: '#63993d', icon: () => <ClockIcon />, label: 'Queued' },
+  queued: { color: '#6a6e73', icon: () => <ClockIcon />, label: 'Pending' },
   running: { color: '#0088ce', icon: () => <InProgressIcon />, label: 'Running' },
   succeeded: { color: '#3f9c35', icon: () => <CheckCircleIcon />, label: 'Successful' },
   failed: { color: '#c9190b', icon: () => <ExclamationCircleIcon />, label: 'Failed' },

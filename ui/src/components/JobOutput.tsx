@@ -10,20 +10,19 @@ import {
   SelectOption,
   SelectList,
   MenuToggle,
-  Switch,
   Toolbar,
   ToolbarContent,
   ToolbarItem,
   Tooltip,
 } from '@patternfly/react-core';
-import { LogViewer, LogViewerSearch } from '@patternfly/react-log-viewer';
 import DownloadIcon from '@patternfly/react-icons/dist/esm/icons/download-icon';
 import ExpandIcon from '@patternfly/react-icons/dist/esm/icons/expand-icon';
 import { api } from '../api/client';
 import type { JobConsoleOut, JobStatusValue } from '../api/types';
+import { JobOutputView } from './awx/JobOutputView';
 
-// Event filter options mirror the AWX Job Output toolbar (Stdout/Event
-// dropdown): they filter the rendered console lines client-side.
+// Event filter mirrors the AWX Job Output toolbar (Stdout/Event dropdown).
+// Migration consoles are plain text, so filtering is client-side matching.
 type EventFilter = 'all' | 'error' | 'failed' | 'unreachable' | 'skipped' | 'ok' | 'changed';
 
 const EVENT_FILTERS: { value: EventFilter; label: string }[] = [
@@ -68,18 +67,15 @@ interface JobOutputProps {
 }
 
 /**
- * AWX-style job output viewer.
- * Polls GET /jobs/{id}/console while the job is queued/running and renders
- * through PatternFly LogViewer (the same component family ansible-ui uses
- * for stdout), with search, event filter, autoscroll and download.
+ * AWX-style job output: status toolbar (search + event filter + Follow),
+ * vendored output-grid rows, live polling while queued/running.
  */
 export function JobOutput({ jobId, jobStatus, pollIntervalMs = 2000 }: JobOutputProps) {
   const [consoleText, setConsoleText] = useState('');
-  const [available, setAvailable] = useState(false);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<EventFilter>('all');
   const [filterOpen, setFilterOpen] = useState(false);
-  const [autoscroll, setAutoscroll] = useState(true);
+  const [follow, setFollow] = useState(jobStatus === 'queued' || jobStatus === 'running');
   const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -94,7 +90,6 @@ export function JobOutput({ jobId, jobStatus, pollIntervalMs = 2000 }: JobOutput
         );
         if (!cancelled) {
           setConsoleText(data.console || '');
-          setAvailable(data.console_available);
           setError(null);
         }
       } catch (err) {
@@ -139,8 +134,6 @@ export function JobOutput({ jobId, jobStatus, pollIntervalMs = 2000 }: JobOutput
   };
 
   const lineCount = consoleText ? consoleText.split('\n').length : 0;
-  // PatternFly LogViewer has no autoscroll prop: pinning scrollToRow to the
-  // last row while autoscroll is on reproduces the AWX follow behavior.
 
   return (
     <Card isFullHeight isExpanded={expanded}>
@@ -187,14 +180,16 @@ export function JobOutput({ jobId, jobStatus, pollIntervalMs = 2000 }: JobOutput
                 aria-label="Search job output"
               />
             </ToolbarItem>
-            <ToolbarItem>
-              <Switch
-                id={`autoscroll-${jobId}`}
-                label="Autoscroll"
-                isChecked={autoscroll}
-                onChange={(_e, checked) => setAutoscroll(checked)}
-              />
-            </ToolbarItem>
+            {active && (
+              <ToolbarItem>
+                <Button
+                  variant={follow ? 'secondary' : 'primary'}
+                  onClick={() => setFollow(!follow)}
+                >
+                  {follow ? 'Unfollow' : 'Follow'}
+                </Button>
+              </ToolbarItem>
+            )}
             <ToolbarItem align={{ default: 'alignEnd' }}>
               <Tooltip content="Download stdout (.txt)">
                 <Button variant="plain" onClick={download} aria-label="Download output">
@@ -215,28 +210,13 @@ export function JobOutput({ jobId, jobStatus, pollIntervalMs = 2000 }: JobOutput
         </Toolbar>
 
         {error && <p style={{ color: '#c9190b' }}>{error}</p>}
-        {!available && !consoleText && !error && (
-          <p style={{ color: '#6a6e73' }}>
-            No console output yet. Output appears here once the job starts producing logs.
-          </p>
-        )}
-        {(available || consoleText) && (
-          <div style={{ height: expanded ? 700 : 500 }}>
-            <LogViewer
-              data={filteredText}
-              hasLineNumbers
-              isTextWrapped={false}
-              scrollToRow={autoscroll ? lineCount : undefined}
-              theme="dark"
-              toolbar={
-                <LogViewerSearch
-                  placeholder="Find in output"
-                  minSearchChars={3}
-                />
-              }
-            />
-          </div>
-        )}
+        <JobOutputView
+          text={filteredText}
+          follow={follow}
+          onFollowChange={setFollow}
+          height={expanded ? 700 : 500}
+          waiting={active}
+        />
         <p style={{ color: '#6a6e73', marginTop: 8 }}>
           {lineCount} lines{active ? ' · live — polling every 2s' : ''}
         </p>

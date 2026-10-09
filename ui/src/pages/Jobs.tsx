@@ -10,7 +10,6 @@ import {
   SelectOption,
   MenuToggle,
   Spinner,
-  Title,
   Toolbar,
   ToolbarContent,
   ToolbarItem,
@@ -19,6 +18,7 @@ import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { api } from '../api/client';
 import type { JobListOut, JobStatusValue } from '../api/types';
 import { StatusDot } from '../components/StatusBadge';
+import { PageHeader } from '../components/Layout';
 
 const PAGE_SIZE = 20;
 
@@ -68,7 +68,7 @@ export function Jobs() {
 
   return (
     <PageSection>
-      <Title headingLevel="h1">Jobs</Title>
+      <PageHeader title="Jobs" description="Migration jobs and their statuses." />
       <Toolbar>
         <ToolbarContent>
           <ToolbarItem>
