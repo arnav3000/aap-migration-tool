@@ -30,6 +30,64 @@ services:
       timeout: 10s
       retries: 3
 
+  # AAP Bridge REST API (optional - only with --profile ui)
+  # Same image as the CLI container, running the FastAPI server instead.
+  aap-bridge-api:
+    build:
+      context: ..
+      dockerfile: container/Containerfile
+      args:
+        BRANCH: main
+        APP_VERSION: "0.2.0"
+    image: aap-bridge:latest
+    container_name: aap-bridge-api
+    profiles:
+      - ui
+    env_file:
+      - .env  # must include AAP_BRIDGE_API_TOKEN (X-API-Key for the UI)
+    environment:
+      AAP_BRIDGE_API_HOST: "0.0.0.0"
+      AAP_BRIDGE_API_PORT: "8000"
+      AAP_BRIDGE_JOB_DIR: "./api_jobs"
+      AAP_BRIDGE_API_DB: "./database/api_state.db"
+    volumes:
+      - ./volumes/database:/app/aap-bridge/database:Z
+      - ./volumes/logs:/app/aap-bridge/logs:Z
+      - ./volumes/exports:/app/aap-bridge/exports:Z
+      - ./volumes/xformed:/app/aap-bridge/xformed:Z
+      - ./volumes/config:/app/aap-bridge/config:Z
+      - ./volumes/api_jobs:/app/aap-bridge/api_jobs:Z
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    command: /app/aap-bridge/.venv/bin/aap-bridge-api
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # AAP Bridge UI (optional - only with --profile ui)
+  # PatternFly console with AWX-style job output; proxies /api/ to aap-bridge-api.
+  aap-bridge-ui:
+    build:
+      context: ..
+      dockerfile: ui/Containerfile
+    image: aap-bridge-ui:latest
+    container_name: aap-bridge-ui
+    profiles:
+      - ui
+    depends_on:
+      - aap-bridge-api
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # PostgreSQL (Optional - only if using PostgreSQL instead of SQLite)
   postgres:
     image: postgres:15-alpine
@@ -72,3 +130,9 @@ volumes:
 #
 # Run migration:
 #   aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y
+#
+# Optional UI (API + web console with AWX-style job output):
+#   # Add AAP_BRIDGE_API_TOKEN=<long-random-token> to .env, then:
+#   podman-compose --profile ui up -d --build
+#   # UI:  http://localhost:8080 (enter the API token when prompted)
+#   # API: http://localhost:8000/api/v1/docs
