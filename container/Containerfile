@@ -61,7 +61,8 @@ RUN ~/.local/bin/uv venv --seed --python 3.12 && \
         "requests>=2.33.0" \
         "setuptools>=78.1.1" \
         "tqdm>=4.66.3" \
-        "urllib3>=2.8.0"
+        "urllib3>=2.8.0" && \
+    ~/.local/bin/uv cache clean
 
 # Create an alias for aap-bridge when someone enters a shell
 RUN echo "alias aap-bridge=/app/aap-bridge/.venv/bin/aap-bridge" >> ~/.bashrc
