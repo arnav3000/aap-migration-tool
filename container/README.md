@@ -18,7 +18,7 @@ mkdir -p ~/aap-migration/{database,logs,exports,xformed,config}
 cd ~/aap-migration
 
 # 2. Download container configuration
-wget https://raw.githubusercontent.com/arnav3000/aap-bridge-fork/main/container/.env.container -O .env
+wget https://raw.githubusercontent.com/arnav3000/aap-migration-tool/main/container/.env.container -O .env
 
 # 3. Edit configuration with your credentials
 vi .env
@@ -29,7 +29,7 @@ vi .env
 #   TARGET__TOKEN="your-token"
 
 # 4. Build container
-cd /path/to/aap-bridge-fork
+cd /path/to/aap-migration-tool
 podman build -f container/Containerfile -t aap-bridge:latest .
 
 # 5. Run container
@@ -54,8 +54,8 @@ aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/arnav3000/aap-bridge-fork.git
-cd aap-bridge-fork/container
+git clone https://github.com/arnav3000/aap-migration-tool.git
+cd aap-migration-tool/container
 
 # 2. Create volumes directory
 mkdir -p volumes/{database,logs,exports,xformed,config}
@@ -314,5 +314,5 @@ podman run ...
 
 ## Support
 
-- Issues: https://github.com/arnav3000/aap-bridge-fork/issues
-- Documentation: https://github.com/arnav3000/aap-bridge-fork/blob/main/README.md
+- Issues: https://github.com/arnav3000/aap-migration-tool/issues
+- Documentation: https://github.com/arnav3000/aap-migration-tool/blob/main/README.md

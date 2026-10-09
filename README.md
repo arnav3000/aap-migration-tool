@@ -82,6 +82,7 @@ curl -k https://your-target-aap/api/controller/v2/ping/
 - **Split-File Export/Import**: Automatic file splitting for large datasets with
   metadata tracking
 - **Dual Interface**: Interactive TUI for guided experience, or powerful CLI for automation and scripting
+- **🖥️ Optional Web UI**: PatternFly console (second container, `--profile ui`) with AWX-style job output, connection management, and the full export → transform → import workflow in the browser
 - **RBAC Migration**: Separate script for migrating role-based access control assignments
 
 ## Architecture
@@ -175,6 +176,50 @@ aap-bridge
 ```
 
 💡 **Quick Tip:** First time using AAP Bridge? Launch the TUI with `aap-bridge` for a guided, interactive experience!
+
+#### Option 3: Web UI (Optional) 🖥️
+
+A PatternFly web console with an AWX-style job output view, served by an
+optional second container. It talks only to the REST API — the CLI/TUI above
+keep working exactly as before if you skip this.
+
+**Option 3a: UI via containers (recommended)**
+
+```bash
+# 1. Configure environment (ONLY the API token — source/target AAP
+#    endpoints are entered in the UI Setup page, never in this file)
+cd container
+cp .env.container .env
+vi .env
+# Set: AAP_BRIDGE_API_TOKEN=<a-long-random-token>
+
+# 2. Start the API + UI (default CLI-only service is unchanged;
+#    these two only start with the 'ui' profile)
+mkdir -p volumes/{database,logs,exports,xformed,config,api_jobs}
+podman-compose --profile ui up -d --build
+
+# 3. Open the UI, enter your AAP_BRIDGE_API_TOKEN, then add your
+#    source/target endpoints on the Setup page
+# UI:  http://localhost:8080
+# API docs: http://localhost:8000/api/v1/docs
+```
+
+**Option 3b: UI via local dev**
+
+```bash
+# 1. Start the API (from repo root, Python env from Option 2)
+export AAP_BRIDGE_API_TOKEN=dev-token-change-me
+aap-bridge-api
+# Serves http://127.0.0.1:8000, docs at /api/v1/docs
+
+# 2. Start the UI (Node 18+, new terminal)
+cd ui
+npm install
+npm run dev
+# Open http://localhost:3000 (/api is proxied to :8000, no CORS setup needed)
+```
+
+📖 **For UI screens, architecture, and troubleshooting**, see the [UI Guide](ui/README.md)
 
 ### Configuration
 
