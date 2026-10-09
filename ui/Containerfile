@@ -20,7 +20,13 @@ LABEL org.opencontainers.image.title="aap-bridge-ui" \
 
 # nginx-126 image serves from /opt/app-root/src by default.
 COPY --from=build /app/dist/ /opt/app-root/src/
-COPY nginx.conf /opt/app-root/etc/nginx.d/default.conf
+# Full main config (documented ubi nginx-126 Dockerfile pattern: replace
+# /etc/nginx/nginx.conf, which is chowned to UID 1001 in the base image).
+COPY nginx.conf /etc/nginx/nginx.conf
 
 EXPOSE 8080
 USER 1001
+
+# The base image defaults to the S2I usage script (prints help and exits);
+# run nginx in the foreground instead.
+CMD nginx -g "daemon off;"

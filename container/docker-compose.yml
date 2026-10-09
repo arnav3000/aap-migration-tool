@@ -85,7 +85,8 @@ services:
       - "${AAP_BRIDGE_UI_PORT:-8080}:8080"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/"]
+      # curl if present, else a bash /dev/tcp probe (minimal images vary).
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/ || exec 3<>/dev/tcp/127.0.0.1/8080"]
       interval: 30s
       timeout: 10s
       retries: 3
