@@ -16,7 +16,7 @@ MAINTAINER Magnus Glantz <sudo@redhat.com>
 RUN dnf update -y && \
     dnf install python3 python3-pip wget unzip openssh-clients ncurses -y && \
     dnf remove vim-minimal -y && \
-    pip3 install --upgrade "setuptools>=78.1.1" && \
+    pip3 install --upgrade "setuptools>=83.0.0" && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
@@ -49,13 +49,19 @@ USER appuser
 
 RUN pip3 install --no-cache-dir "uv>=0.7.0"
 
+# Apply the security floors after sync so the downloaded project's lockfile
+# cannot roll these patched packages back to vulnerable versions.
 # Single RUN — old seeded versions never persist as a separate layer
 RUN ~/.local/bin/uv venv --seed --python 3.12 && \
-    ~/.local/bin/uv pip install \
+    ~/.local/bin/uv sync --upgrade && \
+    ~/.local/bin/uv pip install --python .venv/bin/python \
         "h11>=0.16.0" \
-        "setuptools>=78.1.1" \
-        "msgpack>=1.2.1" && \
-    ~/.local/bin/uv sync --upgrade
+        "msgpack>=1.2.1" \
+        "python-dotenv>=1.2.2" \
+        "requests>=2.33.0" \
+        "setuptools>=83.0.0" \
+        "tqdm>=4.66.3" \
+        "urllib3>=2.8.0"
 
 # Create an alias for aap-bridge when someone enters a shell
 RUN echo "alias aap-bridge=/app/aap-bridge/.venv/bin/aap-bridge" >> ~/.bashrc

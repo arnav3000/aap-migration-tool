@@ -251,6 +251,7 @@ jobs:
         format: sarif
         output: trivy-results.sarif
         severity: CRITICAL,HIGH,MEDIUM
+        limit-severities-for-sarif: true
 
     - name: Upload Trivy results to GitHub Security
       if: always()
@@ -292,6 +293,7 @@ jobs:
         format: sarif
         output: trivy-image-results.sarif
         severity: CRITICAL,HIGH
+        limit-severities-for-sarif: true
 
     - name: Upload image scan to GitHub Security
       if: always()
