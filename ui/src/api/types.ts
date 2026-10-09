@@ -59,15 +59,15 @@ export interface ApiConnection {
 }
 
 export interface ConnectionListOut {
-  connections: ApiConnection[];
+  items: ApiConnection[];
   total: number;
   limit: number;
   offset: number;
 }
 
 export interface ActiveConfigOut {
-  source?: ApiConnection | null;
-  target?: ApiConnection | null;
+  source_id: string | null;
+  target_id: string | null;
 }
 
 export interface MigrationStatusOut {

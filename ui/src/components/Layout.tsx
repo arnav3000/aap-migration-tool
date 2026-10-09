@@ -22,6 +22,7 @@ import { getApiKey, setApiKey } from '../api/client';
 
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard' },
+  { to: '/setup', label: 'Setup' },
   { to: '/connections', label: 'Connections' },
   { to: '/migrate', label: 'Migrate' },
   { to: '/jobs', label: 'Jobs' },

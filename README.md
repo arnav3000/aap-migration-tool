@@ -186,19 +186,20 @@ keep working exactly as before if you skip this.
 **Option 3a: UI via containers (recommended)**
 
 ```bash
-# 1. Configure environment (same .env as the CLI container, plus an API token)
+# 1. Configure environment (ONLY the API token — source/target AAP
+#    endpoints are entered in the UI Setup page, never in this file)
 cd container
 cp .env.container .env
 vi .env
-# Update SOURCE__/TARGET__ URLs and tokens, and set:
-#   AAP_BRIDGE_API_TOKEN=<a-long-random-token>
+# Set: AAP_BRIDGE_API_TOKEN=<a-long-random-token>
 
 # 2. Start the API + UI (default CLI-only service is unchanged;
 #    these two only start with the 'ui' profile)
 mkdir -p volumes/{database,logs,exports,xformed,config,api_jobs}
 podman-compose --profile ui up -d --build
 
-# 3. Open the UI and enter your AAP_BRIDGE_API_TOKEN when prompted
+# 3. Open the UI, enter your AAP_BRIDGE_API_TOKEN, then add your
+#    source/target endpoints on the Setup page
 # UI:  http://localhost:8080
 # API docs: http://localhost:8000/api/v1/docs
 ```

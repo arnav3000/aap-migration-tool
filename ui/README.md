@@ -16,7 +16,8 @@ search, autoscroll, live polling, download — against the migration-job API
 
 ## Screens (full migration workflow)
 
-- **Dashboard** — API health, migration state summary, recent jobs.
+- **Dashboard** — API health, migration state summary, recent jobs (warns when no pair is configured).
+- **Setup** — first-run wizard: enter source + target AAP endpoints in the browser (saved encrypted, tested live, activated as the pair), so `.env` only holds `AAP_BRIDGE_API_TOKEN`.
 - **Connections** — CRUD stored AAP endpoints, activate source/target, test.
 - **Migrate** — full migration, export-only, granular import (chained `job_id`).
 - **Jobs** — live list with status filter (AWX-style status dots).
@@ -52,9 +53,9 @@ Useful env vars:
 
 ```bash
 cd container
-cp .env.container .env  # add SOURCE__/TARGET__ tokens + AAP_BRIDGE_API_TOKEN
+cp .env.container .env  # set ONLY AAP_BRIDGE_API_TOKEN; source/target go in Setup
 podman-compose --profile ui up -d --build
-# UI:  http://localhost:8080
+# UI:  http://localhost:8080  → Setup page for source/target endpoints
 # API: http://localhost:8000/api/v1/docs
 ```
 

@@ -9,6 +9,7 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { Dashboard } from './pages/Dashboard';
+import { Setup } from './pages/Setup';
 import { Connections } from './pages/Connections';
 import { Migrate } from './pages/Migrate';
 import { Jobs } from './pages/Jobs';
@@ -21,6 +22,7 @@ function App() {
       <Layout>
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/setup" element={<Setup />} />
           <Route path="/connections" element={<Connections />} />
           <Route path="/migrate" element={<Migrate />} />
           <Route path="/jobs" element={<Jobs />} />

@@ -11,13 +11,14 @@ import {
   Title,
 } from '@patternfly/react-core';
 import { api } from '../api/client';
-import type { HealthOut, JobListOut, MigrationStatusOut } from '../api/types';
+import type { ActiveConfigOut, HealthOut, JobListOut, MigrationStatusOut } from '../api/types';
 import { StatusDot } from '../components/StatusBadge';
 
 export function Dashboard() {
   const [health, setHealth] = useState<HealthOut | null>(null);
   const [status, setStatus] = useState<MigrationStatusOut | null>(null);
   const [recent, setRecent] = useState<JobListOut | null>(null);
+  const [pairConfigured, setPairConfigured] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -25,14 +26,16 @@ export function Dashboard() {
     setLoading(true);
     setError(null);
     try {
-      const [h, s, j] = await Promise.all([
+      const [h, s, j, a] = await Promise.all([
         api.get<HealthOut>('/health'),
         api.get<MigrationStatusOut>('/migrations/status'),
         api.get<JobListOut>('/jobs?limit=5&offset=0'),
+        api.get<ActiveConfigOut>('/connections/active'),
       ]);
       setHealth(h);
       setStatus(s);
       setRecent(j);
+      setPairConfigured(a.source_id !== null && a.target_id !== null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load dashboard');
     } finally {
@@ -51,6 +54,16 @@ export function Dashboard() {
       {error && (
         <Alert variant="danger" title="Could not reach the API" style={{ marginTop: 16 }}>
           {error}. Verify the API container is running and the API key is set.
+        </Alert>
+      )}
+      {!loading && !error && pairConfigured === false && (
+        <Alert
+          variant="warning"
+          title="No migration pair configured yet."
+          style={{ marginTop: 16 }}
+        >
+          Enter your source and target AAP endpoints on the <Link to="/setup">Setup</Link> page
+          — no AAP tokens in .env needed.
         </Alert>
       )}
       {!loading && !error && (

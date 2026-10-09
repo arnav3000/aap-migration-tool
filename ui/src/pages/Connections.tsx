@@ -56,7 +56,7 @@ export function Connections() {
         api.get<ConnectionListOut>('/connections?limit=100&offset=0'),
         api.get<ActiveConfigOut>('/connections/active'),
       ]);
-      setConnections(list.connections ?? []);
+      setConnections(list.items ?? []);
       setActive(act);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load connections');
@@ -68,6 +68,11 @@ export function Connections() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const names: Record<string, string> = {};
+  for (const c of connections) {
+    names[c.id] = c.name;
+  }
 
   const save = async () => {
     setSaving(true);
@@ -102,6 +107,20 @@ export function Connections() {
       setNotice(`Active ${kind} connection updated.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to activate connection');
+    }
+  };
+
+  const remove = async (id: string, name: string) => {
+    if (!window.confirm(`Delete connection '${name}'? Queued jobs pinned to it will fail at execution.`)) {
+      return;
+    }
+    setError(null);
+    try {
+      await api.del(`/connections/${id}`);
+      setNotice(`Connection '${name}' deleted.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete connection');
     }
   };
 
@@ -140,8 +159,14 @@ export function Connections() {
           <Card>
             <CardBody>
               <p>
-                Active source: <strong>{active?.source?.name ?? 'none'}</strong> · Active
-                target: <strong>{active?.target?.name ?? 'none'}</strong>
+                Active source:{' '}
+                <strong>
+                  {active?.source_id ? (names[active.source_id] ?? active.source_id) : 'none'}
+                </strong>{' '}
+                · Active target:{' '}
+                <strong>
+                  {active?.target_id ? (names[active.target_id] ?? active.target_id) : 'none'}
+                </strong>
               </p>
             </CardBody>
           </Card>
@@ -164,16 +189,19 @@ export function Connections() {
                   <Td>{c.url}</Td>
                   <Td>{c.verify_ssl ? 'verify' : 'skip'}</Td>
                   <Td>
-                    {(active?.source?.id === c.id || active?.target?.id === c.id)
+                    {(active?.source_id === c.id || active?.target_id === c.id)
                       ? 'yes'
                       : 'no'}
                   </Td>
                   <Td>
-                    <Button variant="link" onClick={() => activate(c.id, c.kind)}>
+                    <Button variant="link" onClick={() => activate(c.id, c.kind as 'source' | 'target')}>
                       Activate
                     </Button>
                     <Button variant="link" onClick={() => testConnection(c.id)}>
                       Test
+                    </Button>
+                    <Button variant="link" isDanger onClick={() => remove(c.id, c.name)}>
+                      Delete
                     </Button>
                   </Td>
                 </Tr>
