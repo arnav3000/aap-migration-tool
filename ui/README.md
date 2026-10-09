@@ -65,6 +65,23 @@ unchanged; the `ui` profile adds:
   on `:8000` with the mounted `.env`.
 - `aap-bridge-ui` — this app on `:8080`, proxying `/api/` to `aap-bridge-api`.
 
+## Resetting API state
+
+Three different secrets live in three different places:
+
+| What | Where | How to reset |
+| --- | --- | --- |
+| API token the UI sends (`X-API-Key`) | Browser `localStorage` (`aap-bridge-api-key`) | Click **API key set** in the UI header and save the new value — or in devtools run `localStorage.removeItem('aap-bridge-api-key')` and reload. It must match `AAP_BRIDGE_API_TOKEN` in `container/.env` (run `down` + `up -d` after changing that). |
+| Stored AAP connections + active pair | `api_state.db` (`container/volumes/database/api_state.db` in compose) | Stop the stack, delete `api_state.db*`, start again (below). Job working dirs under `api_jobs/` are separate — delete those too for a full wipe. |
+| Encryption key for stored tokens | `api_fernet.key` next to the DB (auto-created) | Delete only when rotating encryption — every stored AAP token becomes unreadable and must be re-entered in Settings. Prefer setting `AAP_BRIDGE_API_KEY` explicitly instead. |
+
+```bash
+cd container
+podman compose --profile ui down
+rm -f volumes/database/api_state.db*
+podman compose --profile ui up -d
+```
+
 ## Build the UI image alone
 
 ```bash
