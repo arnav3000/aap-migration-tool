@@ -3,7 +3,7 @@
 # HTTP Clients
 httpx==0.28.1
 requests==2.34.2
-aiofiles==23.2.1
+aiofiles==25.1.0
 
 # CLI Framework
 click==8.3.3
