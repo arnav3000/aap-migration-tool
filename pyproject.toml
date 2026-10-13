@@ -35,7 +35,7 @@ dependencies = [
     "pydantic==2.9.0",
     "pydantic-settings==2.15.0",
     "PyYAML==6.0.3",
-    "tqdm==4.66.3",
+    "tqdm==4.70.1",
     "python-dotenv==1.2.4",
     "hvac==2.4.0",
     "aiofiles==23.2.1",
