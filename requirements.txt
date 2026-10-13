@@ -12,7 +12,7 @@ click==8.3.3
 structlog==24.1.0
 
 # Retry Logic
-tenacity==8.2.3
+tenacity==9.2.1
 
 # Configuration Management
 pydantic==2.9.0
