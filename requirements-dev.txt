@@ -17,7 +17,7 @@ isort==5.13.2
 
 # Linting
 ruff==0.16.10
-pylint==3.0.3
+pylint==4.1.2
 
 # Type Checking
 mypy==2.4.0
