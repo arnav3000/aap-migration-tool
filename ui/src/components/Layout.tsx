@@ -160,7 +160,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
             variant="primary"
             onClick={() => {
               setApiKey(draftKey.trim());
-              setKeyModalOpen(false);
+              // The first API requests may have run before a key was entered
+              // (especially in a private window). Reload so every route
+              // retries with the newly saved X-API-Key.
+              window.location.reload();
             }}
           >
             Save
