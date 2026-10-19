@@ -11,7 +11,7 @@
 repos:
   # Security: Secret detection
 - repo: https://github.com/gitleaks/gitleaks
-  rev: v8.18.2
+  rev: v8.30.0
   hooks:
   - id: gitleaks
     name: Detect secrets with gitleaks
@@ -23,7 +23,7 @@ repos:
 
   # Code formatting and linting
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.6.8
+  rev: v0.17.1
   hooks:
       # Run the linter
   - id: ruff
@@ -32,9 +32,9 @@ repos:
   - id: ruff-format
 
   # Security: Python security linting
-  # 1.8.3: minimum version providing B608 (skipped in pyproject.toml).
+  # B608's reviewed HTML-template false positives are skipped in pyproject.toml.
 - repo: https://github.com/PyCQA/bandit
-  rev: 1.8.3
+  rev: 1.9.4
   hooks:
   - id: bandit
     args: [-c, pyproject.toml]
@@ -43,7 +43,7 @@ repos:
 
   # Type checking
 - repo: https://github.com/pre-commit/mirrors-mypy
-  rev: v1.11.2
+  rev: v2.4.0
   hooks:
   - id: mypy
     additional_dependencies:
@@ -54,7 +54,7 @@ repos:
 
   # General code quality
 - repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v4.6.0
+  rev: v6.0.0
   hooks:
   - id: trailing-whitespace
     exclude: \.md$
@@ -84,21 +84,21 @@ repos:
 
   # Security: dependency vulnerability check
 - repo: https://github.com/Lucas-C/pre-commit-hooks-safety
-  rev: v1.3.3
+  rev: v1.4.2
   hooks:
   - id: python-safety-dependencies-check
     files: requirements.txt
 
   # Markdown linting
 - repo: https://github.com/igorshubovych/markdownlint-cli
-  rev: v0.41.0
+  rev: v0.49.1
   hooks:
   - id: markdownlint
     args: [--fix]
 
   # YAML formatting
 - repo: https://github.com/macisamuele/language-formatters-pre-commit-hooks
-  rev: v2.14.0
+  rev: v2.16.0
   hooks:
   - id: pretty-format-yaml
     args: [--autofix, --indent, '2']

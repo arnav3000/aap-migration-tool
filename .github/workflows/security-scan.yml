@@ -20,10 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.12'
         cache: pip
@@ -38,7 +38,7 @@ jobs:
 
     - name: Upload pip-audit results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: pip-audit-report
         path: pip-audit-report.json
@@ -49,12 +49,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0    # Full history for comprehensive scan
 
     - name: Run Gitleaks
-      uses: gitleaks/gitleaks-action@v2
+      uses: gitleaks/gitleaks-action@v3
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
@@ -64,16 +64,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.12'
 
     - name: Install Bandit
-      # Pinned to the pre-commit rev (1.8.3 = min version with B608).
-      run: python -m pip install "bandit[toml]==1.8.3"
+      # Keep CI aligned with the pre-commit hook revision.
+      run: python -m pip install "bandit[toml]==1.9.4"
 
     - name: Run Bandit security scan
       # Same skips as the pre-commit hook (pyproject.toml) plus `-ll`
@@ -88,7 +88,7 @@ jobs:
 
     - name: Upload Bandit results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: bandit-report
         path: bandit-report.json
@@ -101,14 +101,14 @@ jobs:
       image: semgrep/semgrep
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Run Semgrep
       run: semgrep scan --config auto --json --output semgrep-report.json || true
 
     - name: Upload Semgrep results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: semgrep-report
         path: semgrep-report.json
@@ -119,13 +119,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
           # Full history: the changed-files diff below needs the base ref.
         fetch-depth: 0
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.12'
 
@@ -133,7 +133,7 @@ jobs:
         # Pinned to the pre-commit revision so CI enforces the same rules
         # developers already run locally (unpinned latest flags 140+
         # pre-existing violations in untouched files).
-      run: python -m pip install "ruff==0.6.8"
+      run: python -m pip install "ruff==0.17.1"
 
     - name: Get changed Python files
       id: changed
@@ -163,10 +163,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.12'
         cache: pip
@@ -194,7 +194,7 @@ jobs:
 
     - name: Upload license reports
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: license-reports
         path: |
@@ -208,10 +208,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.12'
         cache: pip
@@ -228,7 +228,7 @@ jobs:
         cyclonedx-py environment -o sbom.xml --of XML
 
     - name: Upload SBOM
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: sbom
         path: |
@@ -241,7 +241,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Run Trivy vulnerability scanner
       uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
@@ -254,7 +254,7 @@ jobs:
 
     - name: Upload Trivy results to GitHub Security
       if: always()
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: trivy-results.sarif
 
@@ -268,7 +268,7 @@ jobs:
 
     - name: Upload Trivy JSON results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: trivy-report
         path: trivy-results.json
@@ -279,7 +279,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Build container image
       run: docker build -t aap-migration-tool:scan -f container/Containerfile .
@@ -295,7 +295,7 @@ jobs:
 
     - name: Upload image scan to GitHub Security
       if: always()
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: trivy-image-results.sarif
         category: container-image
@@ -320,7 +320,7 @@ jobs:
 
     - name: Upload Trivy image results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: trivy-image-report
         path: trivy-image-results.json

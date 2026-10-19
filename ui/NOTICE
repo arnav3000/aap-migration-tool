@@ -1,0 +1,32 @@
+AAP Bridge UI — third-party code attribution
+=============================================
+
+This directory contains presentational code adapted from
+ansible/ansible-ui (https://github.com/ansible/ansible-ui),
+licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0), (c) Ansible contributors.
+It is used here under the Apache-2.0 → GPL-3.0-or-later compatibility
+(the UI as a whole remains GPL-3.0-or-later; see the repo LICENSE).
+
+Adapted files (structure/styling kept, data layer rewired from AWX
+job_events to the AAP Bridge console API):
+
+- src/components/awx/JobOutput.css
+  from frontend/awx/views/jobs/JobOutput/JobOutput.css (verbatim grid,
+  plus AAP Bridge additions clearly marked).
+- src/components/awx/JobOutputView.tsx
+  pattern from JobOutputEvents.tsx + JobOutputRow.tsx (output-grid rows,
+  sticky line-number gutter, follow mode). Play/task collapse semantics
+  removed: migration consoles are plain text, not Ansible events.
+- src/components/awx/JobStatusHeader.tsx
+  pattern from JobStatusBar.tsx (title + status baseline, ticking elapsed
+  clock). Play/task/host counts replaced with exit-code badges.
+- src/components/awx/Ansi.tsx
+  original implementation in the spirit of @ansible/common-ui/Ansi
+  (MIT `anser` package instead of the monorepo dependency).
+- src/components/Layout.tsx (PageHeader helper), JobOutput toolbar and
+  app navigation follow AWX PageHeader / JobOutputToolbar conventions.
+
+Per Apache-2.0 §4, this NOTICE and the header comments in each adapted
+file preserve attribution. No ansible-ui code outside the presentation
+layer is used: no framework packages, routing, i18n, or data fetching.

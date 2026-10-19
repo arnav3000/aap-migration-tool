@@ -310,3 +310,7 @@ investigation/validate-dry-run/
 api_jobs/
 api_fernet.key
 console.log
+
+# AAP Bridge UI (optional container)
+ui/node_modules/
+ui/dist/

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # AAP Bridge Migration Tool
   aap-bridge:
@@ -8,24 +6,87 @@ services:
       dockerfile: container/Containerfile
       args:
         BRANCH: main
-        APP_VERSION: "0.2.0"
+        APP_VERSION: 0.2.0
     image: aap-bridge:latest
     container_name: aap-bridge
     network_mode: host  # Required for host.containers.internal on macOS/Podman
     env_file:
-      - .env  # Copy .env.container to .env and customize
+    - .env    # Copy .env.container to .env and customize
     volumes:
       # Persistent data volumes
-      - ./volumes/database:/app/aap-bridge/database:Z
-      - ./volumes/logs:/app/aap-bridge/logs:Z
-      - ./volumes/exports:/app/aap-bridge/exports:Z
-      - ./volumes/xformed:/app/aap-bridge/xformed:Z
+    - ./volumes/database:/app/aap-bridge/database:Z
+    - ./volumes/logs:/app/aap-bridge/logs:Z
+    - ./volumes/exports:/app/aap-bridge/exports:Z
+    - ./volumes/xformed:/app/aap-bridge/xformed:Z
       # Configuration (override if needed)
-      - ./volumes/config:/app/aap-bridge/config:Z
+    - ./volumes/config:/app/aap-bridge/config:Z
     restart: unless-stopped
     command: tail -f /dev/null
     healthcheck:
-      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
+      test: [CMD, python3, -c, import sys; sys.exit(0)]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # AAP Bridge REST API (optional - only with --profile ui)
+  # Same image as the CLI container, running the FastAPI server instead.
+  aap-bridge-api:
+    build:
+      context: ..
+      dockerfile: container/Containerfile
+      args:
+        BRANCH: main
+        APP_VERSION: 0.2.0
+    image: aap-bridge:latest
+    container_name: aap-bridge-api
+    profiles:
+    - ui
+    env_file:
+    - .env    # must include AAP_BRIDGE_API_TOKEN (X-API-Key for the UI)
+    environment:
+      AAP_BRIDGE_API_HOST: 0.0.0.0
+      AAP_BRIDGE_API_PORT: '8000'
+      AAP_BRIDGE_JOB_DIR: ./api_jobs
+      AAP_BRIDGE_API_DB: ./database/api_state.db
+    volumes:
+    - ./volumes/database:/app/aap-bridge/database:Z
+    - ./volumes/logs:/app/aap-bridge/logs:Z
+    - ./volumes/exports:/app/aap-bridge/exports:Z
+    - ./volumes/xformed:/app/aap-bridge/xformed:Z
+    - ./volumes/config:/app/aap-bridge/config:Z
+    - ./volumes/api_jobs:/app/aap-bridge/api_jobs:Z
+    ports:
+      # Host side configurable via AAP_BRIDGE_API_PORT (default 8000);
+      # container side stays 8000 (nginx upstream + healthcheck rely on it).
+    - ${AAP_BRIDGE_API_PORT:-8000}:8000
+    restart: unless-stopped
+    command: /app/aap-bridge/.venv/bin/aap-bridge-api
+    healthcheck:
+      test: [CMD, python3, -c, "import os, urllib.request; req = urllib.request.Request('http://127.0.0.1:8000/api/v1/health', headers={'X-API-Key': os.environ['AAP_BRIDGE_API_TOKEN']}); urllib.request.urlopen(req, timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # AAP Bridge UI (optional - only with --profile ui)
+  # PatternFly console with AWX-style job output; proxies /api/ to aap-bridge-api.
+  aap-bridge-ui:
+    build:
+      context: ../ui
+      dockerfile: Containerfile
+    image: aap-bridge-ui:latest
+    container_name: aap-bridge-ui
+    profiles:
+    - ui
+    depends_on:
+    - aap-bridge-api
+    ports:
+      # Host side configurable via AAP_BRIDGE_UI_PORT (default 8080);
+      # container side stays 8080 (nginx listens there).
+    - ${AAP_BRIDGE_UI_PORT:-8080}:8080
+    restart: unless-stopped
+    healthcheck:
+      # curl if present, else a bash /dev/tcp probe (minimal images vary).
+      test: [CMD-SHELL, curl -sf http://127.0.0.1:8080/ || exec 3<>/dev/tcp/127.0.0.1/8080]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -35,19 +96,19 @@ services:
     image: postgres:15-alpine
     container_name: aap-postgres
     profiles:
-      - postgres  # Only starts when explicitly enabled
+    - postgres    # Only starts when explicitly enabled
     environment:
       POSTGRES_USER: aap_user
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: aap_migration
-      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=en_US.UTF-8"
+      POSTGRES_INITDB_ARGS: -E UTF8 --locale=en_US.UTF-8
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+    - postgres-data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+    - 5432:5432
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aap_user"]
+      test: [CMD-SHELL, pg_isready -U aap_user]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -72,3 +133,12 @@ volumes:
 #
 # Run migration:
 #   aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y
+#
+# Optional UI (API + web console with AWX-style job output):
+#   # Add AAP_BRIDGE_API_TOKEN=<long-random-token> to .env, then:
+#   podman-compose --profile ui up -d --build
+#   # UI:  http://localhost:8080 (enter the API token when prompted)
+#   # API: http://localhost:8000/api/v1/docs
+#   # Port conflicts? Set host-side ports in .env (container sides fixed):
+#   #   AAP_BRIDGE_API_PORT=8001
+#   #   AAP_BRIDGE_UI_PORT=8081

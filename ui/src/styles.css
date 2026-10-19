@@ -1,0 +1,44 @@
+/* AWX-inspired touches on top of PatternFly.
+ * The job-output grid comes from vendored ansible-ui CSS
+ * (src/components/awx/JobOutput.css); this file holds app-level tweaks. */
+
+:root {
+  --aap-bridge-output-bg: #1b1d21;
+}
+
+.pf-v6-c-page__main-section {
+  max-width: 1400px;
+}
+
+.aap-bridge-shell {
+  min-height: 100vh;
+}
+
+.aap-bridge-masthead {
+  background-color: #151515;
+}
+
+.aap-bridge-masthead__main {
+  flex: 0 0 auto;
+}
+
+.aap-bridge-masthead__content {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 24px;
+  min-width: 0;
+}
+
+.aap-bridge-brand {
+  color: #fff;
+  font-size: 18px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.aap-bridge-masthead .pf-v6-c-switch,
+.aap-bridge-api-key {
+  color: #fff;
+}
