@@ -123,6 +123,6 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 - Environment variable support for all credentials
 - No hardcoded secrets in configuration files
 
-[Unreleased]: https://github.com/arnav3000/aap-bridge-fork/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/arnav3000/aap-bridge-fork/compare/v0.1.0...v0.4.0
-[0.1.0]: https://github.com/arnav3000/aap-bridge-fork/releases/tag/v0.1.0
+[Unreleased]: https://github.com/arnav3000/aap-migration-tool/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/arnav3000/aap-migration-tool/compare/v0.1.0...v0.4.0
+[0.1.0]: https://github.com/arnav3000/aap-migration-tool/releases/tag/v0.1.0

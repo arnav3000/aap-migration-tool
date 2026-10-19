@@ -8,12 +8,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 from aap_migration.validate.common import (
     apply_migration_buckets,
-    build_executive_summary,
     belongs_to_org,
+    build_executive_summary,
     count_explained_from_missing,
     int_dict_key,
 )
@@ -56,14 +55,8 @@ def filter_field_data_for_org(
         cols = td.get("c") or []
         src = td.get("s") or {}
         tgt = td.get("t") or {}
-        new_s = {
-            k: v for k, v in src.items()
-            if int_dict_key(k) in want
-        }
-        new_t = {
-            k: v for k, v in tgt.items()
-            if int_dict_key(k) in want
-        }
+        new_s = {k: v for k, v in src.items() if int_dict_key(k) in want}
+        new_t = {k: v for k, v in tgt.items() if int_dict_key(k) in want}
         if new_s or new_t:
             out[rtype] = {"c": cols, "s": new_s, "t": new_t}
     return out or None
@@ -86,25 +79,16 @@ def filter_validation_result_for_org(
 
     object_inventory: dict[str, list] = {}
     for rtype, entries in result.object_inventory.items():
-        object_inventory[rtype] = [
-            e for e in entries if belongs_to_org(e, org_name)
-        ]
+        object_inventory[rtype] = [e for e in entries if belongs_to_org(e, org_name)]
 
     per_type: list[PerTypeResult] = []
     for pt in result.per_type:
         rtype = pt.resource_type
         missing_details = [
-            md for md in pt.t2_existence.missing_details
-            if belongs_to_org(md, org_name)
+            md for md in pt.t2_existence.missing_details if belongs_to_org(md, org_name)
         ]
-        extra_details = [
-            ed for ed in pt.t2_existence.extra_details
-            if belongs_to_org(ed, org_name)
-        ]
-        findings = [
-            ff for ff in pt.t3_field_parity.findings
-            if belongs_to_org(ff, org_name)
-        ]
+        extra_details = [ed for ed in pt.t2_existence.extra_details if belongs_to_org(ed, org_name)]
+        findings = [ff for ff in pt.t3_field_parity.findings if belongs_to_org(ff, org_name)]
 
         rollup = rollup_by_type.get(rtype)
         entries = object_inventory.get(rtype, [])
@@ -125,9 +109,7 @@ def filter_validation_result_for_org(
 
         expl_f, expl_s, unexplained = count_explained_from_missing(missing_details)
 
-        mismatch_sids = {
-            ff.source_id for ff in findings if ff.source_id is not None
-        }
+        mismatch_sids = {ff.source_id for ff in findings if ff.source_id is not None}
         mismatching = len(mismatch_sids) if mismatch_sids else (1 if findings else 0)
         if rollup is not None and rollup.field_mismatches:
             mismatching = rollup.field_mismatches
@@ -135,47 +117,42 @@ def filter_validation_result_for_org(
         matching = max(0, compared - mismatching)
 
         # Drop types with nothing for this org (keeps report focused)
-        if (
-            source == 0 and missing == 0 and extra == 0
-            and not findings and not entries
-        ):
+        if source == 0 and missing == 0 and extra == 0 and not findings and not entries:
             continue
 
-        per_type.append(PerTypeResult(
-            resource_type=rtype,
-            display_name=pt.display_name,
-            t1_counts=T1Counts(
-                source=source,
-                target=target,
-                delta=source - target,
-                explained_failures=expl_f,
-                explained_skips=expl_s,
-                unexplained=unexplained,
-            ),
-            t2_existence=T2Existence(
-                matched=matched,
-                missing_on_target=missing,
-                extra_on_target=extra,
-                missing_details=missing_details,
-                extra_details=extra_details,
-            ),
-            t3_field_parity=T3FieldParity(
-                compared=compared,
-                matching=matching,
-                mismatching=mismatching,
-                findings=findings,
-            ),
-        ))
+        per_type.append(
+            PerTypeResult(
+                resource_type=rtype,
+                display_name=pt.display_name,
+                t1_counts=T1Counts(
+                    source=source,
+                    target=target,
+                    delta=source - target,
+                    explained_failures=expl_f,
+                    explained_skips=expl_s,
+                    unexplained=unexplained,
+                ),
+                t2_existence=T2Existence(
+                    matched=matched,
+                    missing_on_target=missing,
+                    extra_on_target=extra,
+                    missing_details=missing_details,
+                    extra_details=extra_details,
+                ),
+                t3_field_parity=T3FieldParity(
+                    compared=compared,
+                    matching=matching,
+                    mismatching=mismatching,
+                    findings=findings,
+                ),
+            )
+        )
 
     t4 = _filter_t4_for_org(result.t4_host_sampling, object_inventory)
 
-    sync_entries = [
-        entry for entry in result.sync_entries
-        if belongs_to_org(entry, org_name)
-    ]
+    sync_entries = [entry for entry in result.sync_entries if belongs_to_org(entry, org_name)]
     workflow_comparisons = [
-        item for item in result.workflow_comparisons
-        if not item.org or item.org == org_name
+        item for item in result.workflow_comparisons if not item.org or item.org == org_name
     ]
 
     per_type = apply_migration_buckets(per_type, object_inventory)
@@ -201,13 +178,8 @@ def _filter_t4_for_org(
     t4: T4HostSampling,
     object_inventory: dict[str, list],
 ) -> T4HostSampling:
-    org_inv_names = {
-        e.name for e in object_inventory.get("inventories", []) if e.name
-    }
-    details = [
-        d for d in t4.per_inventory_count_parity.details
-        if d.inventory in org_inv_names
-    ]
+    org_inv_names = {e.name for e in object_inventory.get("inventories", []) if e.name}
+    details = [d for d in t4.per_inventory_count_parity.details if d.inventory in org_inv_names]
     matching = sum(1 for d in details if d.delta == 0)
     mismatching = sum(1 for d in details if d.delta != 0)
 

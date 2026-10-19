@@ -46,14 +46,12 @@ report, reproduce the behavior, and find related reports.
     ```bash
     uv venv --seed --python 3.12
     source .venv/bin/activate
-
-    ```text
+    ```
 
 2. **Install dependencies:**
 
     ```bash
     make install-dev
-
     ```
 
 ## Styleguides
@@ -76,4 +74,4 @@ Run `make check` before submitting your PR to run all these tools.
 ## License
 
 By contributing, you agree that your contributions will be licensed under its
-MIT License.
+GNU General Public License v3.0 (GPL-3.0-or-later).

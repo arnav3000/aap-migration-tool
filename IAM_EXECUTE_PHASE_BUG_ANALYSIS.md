@@ -3,7 +3,18 @@
 **Date:** 2026-08-14  
 **Component:** `src/aap_migration/iam/analyser.py`  
 **Severity:** Critical (BUG-1), High (BUG-2, BUG-3), Low (BUG-4)  
-**Status:** Open — no fixes applied
+**Status:** Historical analysis. The findings below describe the code and
+dataset reviewed on 2026-08-14; current code status is summarized here:
+
+| Finding | Current status |
+|---|---|
+| BUG-1: execute phase checkpointing | Fixed: `_migrate_permissions` saves checkpoints during and after execution. |
+| BUG-2: execute phase is sequential | Still present: `--workers` applies to scanning, not execution. |
+| BUG-3: `object_roles/` 404 is indistinguishable from a missing role | Partially addressed: the current error names HTTP 404, but `_target_paginate` returns an empty list for both an empty response and a 404, so the cause is still ambiguous. |
+| BUG-4: `--workers` scope is unclear | Addressed: the CLI help states that workers apply to the scan phase only. |
+
+The dataset counts, timing estimates, and logs in this report are historical
+observations from that migration, not general performance guarantees.
 
 ---
 
@@ -36,11 +47,11 @@ def _migrate_permissions(
     dry_run: bool = False,
 ) -> None:
     ...
-    for idx, entry in enumerate(permissions):   # line 1472
+    for idx, entry in enumerate(permissions):  # line 1472
         ...
-        entry.status = "migrated"               # updated in memory only
+        entry.status = "migrated"  # updated in memory only
         stats.permissions_migrated += 1
-        time.sleep(self.rate_limit_delay)        # line 1580
+        time.sleep(self.rate_limit_delay)  # line 1580
     # ← function ends here — no _save_checkpoint() call anywhere
 ```
 
@@ -69,6 +80,7 @@ The process ran continuously from 2026-07-28 to 2026-08-08 (10 days), actively P
 | 2026-08-09 11:49 | Silent SIGKILL (no traceback in logs) | Scan re-run partially lost |
 
 The Aug 8 interruption was confirmed from the migration log traceback:
+
 ```
 File "analyser.py", line 1782, in migrate
     self._migrate_permissions(permissions, stats, dry_run=dry_run)
@@ -101,7 +113,7 @@ for idx, entry in enumerate(permissions):
     if entry.status in ("migrated", "failed", "skipped", "dry_run"):
         continue
 
-    ... # existing logic
+    ...  # existing logic
 
     time.sleep(self.rate_limit_delay)
 
@@ -115,7 +127,7 @@ Additionally, add a status check at the top of the loop so that `--resume` corre
 ```python
 for idx, entry in enumerate(permissions):
     if entry.status in ("migrated", "failed", "skipped"):
-        continue   # already done in a prior run
+        continue  # already done in a prior run
     ...
 ```
 
@@ -137,6 +149,7 @@ Operators running `iam migrate --workers 10` reasonably expect 10x throughput im
 ### Evidence From Code
 
 **CLI definition** (`iam.py:181`):
+
 ```python
 @click.option(
     "--workers",
@@ -147,17 +160,19 @@ Operators running `iam migrate --workers 10` reasonably expect 10x throughput im
 ```
 
 **Analyser constructor** (`analyser.py:117`):
+
 ```python
-max_workers: int = 1,
+max_workers: int = (1,)
 ...
-self.max_workers = max(1, max_workers)   # stored but...
+self.max_workers = max(1, max_workers)  # stored but...
 ```
 
 **Scan phase** (`analyser.py:860`): `ThreadPoolExecutor(max_workers=self.max_workers)` — used here.
 
 **Execute phase** (`analyser.py:1472`):
+
 ```python
-for idx, entry in enumerate(permissions):   # plain sequential loop — max_workers never referenced
+for idx, entry in enumerate(permissions):  # plain sequential loop — max_workers never referenced
     ...
     time.sleep(self.rate_limit_delay)
 ```
@@ -225,12 +240,13 @@ Furthermore, **all permissions for that resource are dropped silently**. There i
 # analyser.py:1516
 cache_key = f"{entry.resource_type}/{target_resource_id}"
 if cache_key not in target_role_cache:
-    roles_data = self._target_paginate(              # line 1518
+    roles_data = self._target_paginate(  # line 1518
         f"{entry.resource_type}/{target_resource_id}/object_roles/"
     )
     # If 404 → _paginate returns [] → cache = {}
     target_role_cache[cache_key] = {
-        r["name"]: r["id"] for r in roles_data      # → empty dict
+        r["name"]: r["id"]
+        for r in roles_data  # → empty dict
     }
 
 target_role_id = target_role_cache.get(cache_key, {}).get(mapped_role)
@@ -238,9 +254,7 @@ target_role_id = target_role_cache.get(cache_key, {}).get(mapped_role)
 
 if not target_role_id:
     entry.status = "failed"
-    entry.error = (
-        f"Role '{entry.role_name}' not found on target resource"  # misleading
-    )
+    entry.error = f"Role '{entry.role_name}' not found on target resource"  # misleading
     stats.permissions_failed += 1
     continue
 ```
@@ -281,13 +295,11 @@ Distinguish the 404 case explicitly, log the correct root cause, and optionally 
 # analyser.py:1517 — distinguish 404 from empty roles
 cache_key = f"{entry.resource_type}/{target_resource_id}"
 if cache_key not in target_role_cache:
-    roles_data = self._target_paginate(
-        f"{entry.resource_type}/{target_resource_id}/object_roles/"
-    )
+    roles_data = self._target_paginate(f"{entry.resource_type}/{target_resource_id}/object_roles/")
     if not roles_data:
         # Distinguish: was this a 404, or does the resource genuinely have no roles?
         # Mark with a sentinel so we don't retry repeatedly
-        target_role_cache[cache_key] = None   # None = endpoint failed, {} = empty roles
+        target_role_cache[cache_key] = None  # None = endpoint failed, {} = empty roles
     else:
         target_role_cache[cache_key] = {r["name"]: r["id"] for r in roles_data}
 

@@ -1,8 +1,8 @@
 """
 Main CLI entry point for AAP Bridge.
 
-This module provides the command-line interface for migrating from
-Ansible Automation Platform 2.3 to 2.6.
+This module provides the command-line interface for migrating between
+Ansible Automation Platform instances.
 """
 
 import sys
@@ -81,16 +81,16 @@ def cli(
         aap-bridge
 
         # Validate configuration
-        aap-bridge config validate --config config.yaml
+        aap-bridge --config config.yaml config validate
 
         # Run full migration
-        aap-bridge migrate full --config config.yaml
+        aap-bridge --config config.yaml migrate
 
         # Export resources only
-        aap-bridge export --config config.yaml --output export.json
+        aap-bridge --config config.yaml export --output exports/
 
         # Show migration status
-        aap-bridge migrate status --config config.yaml
+        aap-bridge --config config.yaml migrate status
     """
     # Setup logging with optional file output
     # If --log-file is provided, use it; otherwise default to logs/migration.log

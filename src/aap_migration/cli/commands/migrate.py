@@ -85,21 +85,21 @@ async def _map_managed_credential_types(source_client: Any, target_client: Any, 
     them from both systems and creates mappings based on name matching.
 
     Args:
-        source_client: AAP 2.3 source client
-        target_client: AAP 2.6 target client
+        source_client: source AAP client
+        target_client: target AAP client
         state: Migration state manager
 
     Returns:
         Number of credential types successfully mapped
     """
     try:
-        # Fetch managed types from source (AAP 2.3)
+        # Fetch managed types from source AAP
         source_types_response = await source_client.get(
             "credential_types/", params={"managed": "true", "page_size": 200}
         )
         source_types = source_types_response.get("results", [])
 
-        # Fetch managed types from target (AAP 2.6)
+        # Fetch managed types from target AAP
         target_types_response = await target_client.get(
             "credential_types/", params={"managed": "true", "page_size": 200}
         )
@@ -335,7 +335,7 @@ def _run_migration_workflow(
     # PHASE 1: EXPORT
     # ============================================
     _check_abort("export")
-    echo_info("Phase 1: Exporting RAW data from AAP 2.3...")
+    echo_info("Phase 1: Exporting raw data from the source AAP...")
     click.echo()
 
     # Call export command programmatically via _call_command (direct in-process click dispatch)
@@ -357,7 +357,7 @@ def _run_migration_workflow(
     # PHASE 2: TRANSFORM
     # ============================================
     _check_abort("transform")
-    echo_info("Phase 2: Transforming data for AAP 2.6 compatibility...")
+    echo_info("Phase 2: Transforming data for the target AAP...")
     click.echo()
 
     # Call transform command programmatically via _call_command (direct in-process click dispatch)
@@ -668,13 +668,13 @@ def migrate(
     skip_prep: bool,
     phase: str,
 ) -> None:
-    """Execute migration from AAP 2.3 to 2.6.
+    """Execute migration between the configured source and target AAP instances.
 
     Runs the complete four-phase workflow:
     0. Prep: Discover endpoints and generate schemas (optional with --skip-prep)
-    1. Export: Fetch RAW data from AAP 2.3 → exports/
-    2. Transform: Convert data for AAP 2.6 compatibility → xformed/
-    3. Import: Load data into AAP 2.6
+    1. Export: Fetch raw data from the source → exports/
+    2. Transform: Convert data for the target → xformed/
+    3. Import: Load data into the target
 
     If a subcommand is provided (status), it runs that instead.
     Otherwise, runs the full prep → export → transform → import workflow.
@@ -742,7 +742,7 @@ def status(ctx: MigrationContext) -> None:
 
     Examples:
 
-        aap-bridge migrate status --config config.yaml
+        aap-bridge --config config.yaml migrate status
     """
     echo_info("Migration Status")
     click.echo()
@@ -821,10 +821,10 @@ def resume(
     Examples:
 
         # Resume from last checkpoint
-        aap-bridge migrate resume --config config.yaml
+        aap-bridge --config config.yaml migrate resume
 
         # Resume from specific phase
-        aap-bridge migrate resume --config config.yaml --from-phase inventories
+        aap-bridge --config config.yaml migrate resume --from-phase inventories
     """
     if quiet:
         from aap_migration.utils import logging as app_logging

@@ -6,7 +6,8 @@ We release patches for security vulnerabilities for the following versions:
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| 1.x     | :white_check_mark: |
+| 0.x     | :x: |
 
 ## Reporting a Vulnerability
 
@@ -14,7 +15,7 @@ We release patches for security vulnerabilities for the following versions:
 
 If you discover a security vulnerability in AAP Bridge, please report it by emailing:
 
-**aap.bridge.183yy@simplelogin.com**
+**<aap.bridge.183yy@simplelogin.com>**
 
 Please include the following information:
 
@@ -90,7 +91,8 @@ This project uses automated security scanning:
 - **Trivy**: Filesystem and dependency scanning
 - **Dependabot**: Automated dependency updates
 
-All scans run automatically on every push and pull request.
+The workflow runs on pushes to `main` and `develop`, pull requests targeting
+those branches, a weekly schedule, and manual dispatch.
 
 ## Security Updates
 
@@ -108,9 +110,9 @@ We do not currently have a bug bounty program. However, we greatly appreciate re
 
 For security-related questions or concerns:
 
-- **Email**: aap.bridge.183yy@simplelogin.com
-- **GitHub**: Create a security advisory (https://github.com/arnav3000/aap-bridge-fork/security/advisories/new)
+- **Email**: <aap.bridge.183yy@simplelogin.com>
+- **GitHub**: [Create a security advisory](https://github.com/arnav3000/aap-migration-tool/security/advisories/new)
 
 ---
 
-**Last Updated**: 2026-03-30
+**Last Updated**: 2026-10-19
