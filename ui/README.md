@@ -6,22 +6,17 @@ second container (`aap-bridge-ui`) that reverse-proxies `/api/v1` to the API
 container — no API CORS change required.
 
 Relation to [ansible/ansible-ui](https://github.com/ansible/ansible-ui): that repo
-is a full AWX/EDA/Hub monorepo whose Job Output view is hard-wired to AWX's
-`/api/v2/jobs` + `job_events` backend, so it cannot be embedded as a component.
-This UI instead reuses the same design system (PatternFly, including
-`@patternfly/react-log-viewer`, the component family AWX uses for stdout) and
-mimics the AWX Job Output UX — dark log surface, line numbers, event filter,
-search, autoscroll, live polling, download — against the migration-job API
+is a full AWX/EDA/Hub monorepo whose Job Output view is tied to AWX's
+`/api/v2/jobs` and `job_events` backend. This UI implements a similar job
+output experience using PatternFly components and the migration API
 (`GET /jobs/{id}/console`, `GET /jobs/{id}/artifacts`).
 
 ## Look & feel (ansible-ui)
 
-The UI deliberately mirrors AWX Job Output and AAP console chrome:
-`src/components/awx/` vendors the presentational patterns (output grid,
-toolbar, status header) from [ansible/ansible-ui](https://github.com/ansible/ansible-ui)
-(Apache-2.0), rewired to the migration console API. See `ui/NOTICE` for
-attribution. No ansible-ui code is executed beyond presentation — no
-framework packages, routing, or AWX data layer.
+The output styling and controls in `src/components/awx/` include adapted
+presentational code. See `ui/NOTICE` for the source files and attribution.
+The app uses its own API client and routes; it does not connect to an AWX
+job-events backend.
 
 ## Screens (full migration workflow)
 

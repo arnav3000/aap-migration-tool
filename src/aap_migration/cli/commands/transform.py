@@ -1,7 +1,7 @@
-"""Transform command for AAP 2.3 → 2.6 data transformation.
+"""Transform command for source AAP → target AAP data transformation.
 
 This module provides the standalone transform command that reads raw
-AAP 2.3 exports and transforms them to AAP 2.6 compatible format.
+source AAP exports and transforms them to target-compatible format.
 
 Architecture:
     Export → RAW data (exports/) → Transform → Transformed data (xformed/) → Import
@@ -196,16 +196,16 @@ def transform(
     defer_project_sync: bool,
     yes: bool,
 ) -> None:
-    """Transform RAW AAP 2.3 data to AAP 2.6 compatible format.
+    """Transform raw source AAP data to target-compatible format.
 
-    Reads RAW exports from input directory, transforms them for AAP 2.6
-    compatibility, and writes to output directory. This is the middle
+    Reads raw exports from input directory, transforms them for the target
+    AAP version, and writes to output directory. This is the middle
     phase in the three-phase migration process:
 
     \b
     1. Export → RAW data to exports/
     2. Transform → RAW to transformed (exports/ → xformed/)
-    3. Import → transformed data to AAP 2.6
+    3. Import → transformed data to the target AAP
 
     Examples:
 
@@ -317,7 +317,7 @@ def transform(
             # Log transformer config to file
             logger.info(
                 "transformer_config",
-                mode="AAP 2.3 → 2.6",
+                mode="source AAP → target AAP",
                 schema_file=schema_file_path,
                 auto_apply=schema_file_path is not None,
                 defer_project_sync=defer_project_sync,
@@ -352,7 +352,7 @@ def transform(
             progress_enabled = not quiet and not disable_progress
 
             with MigrationProgressDisplay(
-                title="🔄 AAP Transform Progress (2.3 → 2.6)", enabled=progress_enabled
+                title="🔄 AAP Transform Progress (source → target)", enabled=progress_enabled
             ) as progress:
                 if progress_enabled:
                     # Set total phases BEFORE initialize_phases to avoid jitter

@@ -262,9 +262,9 @@ def build_dependency_closure(
     # Sort by migration_order to ensure dependencies come first
     sorted_types = sorted(
         needed_types,
-        key=lambda t: cast(Any, RESOURCE_REGISTRY.get(t)).migration_order
-        if t in RESOURCE_REGISTRY
-        else 999,
+        key=lambda t: (
+            cast(Any, RESOURCE_REGISTRY.get(t)).migration_order if t in RESOURCE_REGISTRY else 999
+        ),
     )
 
     return sorted_types
@@ -366,7 +366,7 @@ def export(
     resume: bool,
     yes: bool,
 ) -> None:
-    """Export RAW resources from source AAP 2.3 to directory structure.
+    """Export raw resources from the source AAP to a directory structure.
 
     Exports RAW resources from the source AAP instance to a directory with separate
     files for each resource type. Data is saved without transformation to preserve
@@ -378,7 +378,7 @@ def export(
     Three-phase workflow:
         1. aap-bridge export (RAW data → exports/)
         2. aap-bridge transform (exports/ → xformed/)
-        3. aap-bridge import (xformed/ → AAP 2.6)
+        3. aap-bridge import (xformed/ → target AAP)
 
     Examples:
 
@@ -1021,7 +1021,7 @@ def import_cmd(
     phase: str,
     yes: bool,
 ) -> None:
-    """Import TRANSFORMED resources to target AAP 2.6.
+    """Import transformed resources to the target AAP.
 
     Imports transformed resources from xformed/ directory to the target AAP
     instance. Data must be pre-transformed using the 'transform' command.
@@ -1034,7 +1034,7 @@ def import_cmd(
     Three-phase workflow:
         1. aap-bridge export (RAW data → exports/)
         2. aap-bridge transform (exports/ → xformed/)
-        3. aap-bridge import (xformed/ → AAP 2.6)
+        3. aap-bridge import (xformed/ → target AAP)
 
     Dependencies are automatically resolved and imported. For example,
     importing inventory_sources will automatically import organizations,
@@ -1137,7 +1137,7 @@ def import_cmd(
     if "transform_timestamp" not in metadata:
         echo_error("❌ Input directory contains RAW export data, not transformed data")
         echo_info("")
-        echo_info("This directory appears to contain RAW exports from AAP 2.3.")
+        echo_info("This directory appears to contain raw exports from the source AAP.")
         echo_info("Import requires transformed data. Please run:")
         echo_info("")
         echo_info(f"  aap-bridge transform --input {input_dir} --output xformed/")
@@ -1223,7 +1223,7 @@ def import_cmd(
         # This is critical for credential_types to be imported before credentials, etc.
         types_to_import = sorted(
             requested_types,
-            key=lambda t: (RESOURCE_REGISTRY[t].migration_order if t in RESOURCE_REGISTRY else 999),
+            key=lambda t: RESOURCE_REGISTRY[t].migration_order if t in RESOURCE_REGISTRY else 999,
         )
 
     # Filter by phase if specified

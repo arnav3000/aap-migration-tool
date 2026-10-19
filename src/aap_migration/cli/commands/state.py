@@ -61,10 +61,10 @@ def show_state(ctx: MigrationContext, detailed: bool) -> None:
     Examples:
 
         # Show basic state
-        aap-bridge state show --config config.yaml
+        aap-bridge --config config.yaml state show
 
         # Show detailed state
-        aap-bridge state show --detailed --config config.yaml
+        aap-bridge --config config.yaml state show --detailed
     """
     echo_info("Loading migration state...")
 
@@ -153,21 +153,21 @@ def show_mappings(
     """Show ID mappings between source and target.
 
     Displays ID mappings that track the relationship between
-    source AAP 2.3 resource IDs and target AAP 2.6 resource IDs.
+    source and target AAP resource IDs.
 
     Examples:
 
         # Show all mappings (limited)
-        aap-bridge state mappings --config config.yaml
+        aap-bridge --config config.yaml state mappings
 
         # Show mappings for specific resource type
-        aap-bridge state mappings --resource-type inventories --config config.yaml
+        aap-bridge --config config.yaml state mappings --resource-type inventories
 
         # Show mapping for specific source ID
-        aap-bridge state mappings --resource-type hosts --source-id 12345 --config config.yaml
+        aap-bridge --config config.yaml state mappings --resource-type hosts --source-id 12345
 
         # Show more mappings
-        aap-bridge state mappings --limit 100 --config config.yaml
+        aap-bridge --config config.yaml state mappings --limit 100
     """
     echo_info("Loading ID mappings...")
 
@@ -262,13 +262,13 @@ def reset_state(
     Examples:
 
         # Reset all state
-        aap-bridge state reset --config config.yaml
+        aap-bridge --config config.yaml state reset
 
         # Reset specific resource type
-        aap-bridge state reset --resource-type inventories --config config.yaml
+        aap-bridge --config config.yaml state reset --resource-type inventories
 
         # Reset progress but keep ID mappings
-        aap-bridge state reset --keep-mappings --config config.yaml
+        aap-bridge --config config.yaml state reset --keep-mappings
     """
     if resource_type:
         echo_warning(f"Resetting state for: {resource_type}")
@@ -329,10 +329,10 @@ def export_state(
     Examples:
 
         # Export state
-        aap-bridge state export --output state-backup.json --config config.yaml
+        aap-bridge --config config.yaml state export --output state-backup.json
 
         # Export without mappings
-        aap-bridge state export --output state.json --no-include-mappings --config config.yaml
+        aap-bridge --config config.yaml state export --output state.json --no-include-mappings
     """
     echo_info(f"Exporting migration state to {output}...")
 

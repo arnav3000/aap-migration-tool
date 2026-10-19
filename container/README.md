@@ -121,7 +121,7 @@ aap-bridge export -y && aap-bridge transform -y && aap-bridge import -y
 
 **Characteristics:**
 
-- ✅ Better performance for large migrations (100k+ resources)
+- ✅ Supports concurrent access to migration state
 - ✅ Concurrent access support
 - ✅ Advanced querying capabilities
 - ⚠️  Requires separate PostgreSQL container
@@ -209,25 +209,20 @@ All migration data persists on the host via volume mounts:
 
 ## Building Custom Images
 
-### Build from specific branch
+The Containerfile downloads a source archive from GitHub. To build from a
+specific branch, pass the archive URL using the supported `AAP_BRIDGE_ZIP`
+build argument:
 
 ```bash
 podman build \
   -f container/Containerfile \
-  --build-arg BRANCH=fix-containers \
-  -t aap-bridge:fix-containers \
+  --build-arg AAP_BRIDGE_ZIP=https://github.com/arnav3000/aap-migration-tool/archive/refs/heads/release/v1.x.zip \
+  -t aap-bridge:custom \
   .
 ```
 
-### Build with custom Python version
-
-```bash
-podman build \
-  -f container/Containerfile \
-  --build-arg PYTHON_VERSION=3.11 \
-  -t aap-bridge:py311 \
-  .
-```
+The Containerfile does not define `BRANCH` or `PYTHON_VERSION` build arguments;
+change the Containerfile itself if you need a different Python base version.
 
 ## Troubleshooting
 
