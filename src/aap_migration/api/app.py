@@ -113,8 +113,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
         else:
             log.warning("API shutdown; no job manager initialized")
-    except Exception:
-        pass
+    except Exception as exc:
+        # Shutdown is best-effort; report the failure without leaking details.
+        log.warning("API shutdown cleanup failed (%s)", type(exc).__name__)
 
 
 def _validation_error_detail(exc: RequestValidationError) -> str:
@@ -141,6 +142,14 @@ def create_app() -> FastAPI:
         # exactly the failure path lifespan was built for.
         log.warning("API DB init in create_app failed (degraded): %s", exc)
     os.environ.setdefault("AAP_BRIDGE_STARTUP_CWD", os.getcwd())
+    # NOTE (ui-cors-follow-up, tracking only — behavior intentionally unchanged):
+    # the optional aap-bridge-ui container reaches this API through its own
+    # nginx reverse proxy (same-origin /api/ -> aap-bridge-api:8000), so no
+    # CORS is configured here. If we ever want browsers to call this API
+    # directly (separately hosted UI, custom dashboards), add opt-in
+    # CORSMiddleware gated by an env var (e.g. AAP_BRIDGE_API_CORS_ORIGINS
+    # with an explicit origin allowlist) — never "*" while X-API-Key auth
+    # is in use.
     app = FastAPI(
         title="AAP Bridge REST API",
         description=(

@@ -7,12 +7,15 @@ migrations
 ## Supported Versions
 
 **Source AAP:**
+
 - AAP 2.4, 2.5 (RPM-based or containerized)
 
 **Target AAP:**
+
 - AAP 2.5, 2.6 (containerized recommended)
 
 **Common Migration Path:**
+
 - AAP 2.4 (RPM-based) → AAP 2.6 (containerized) ✅ Tested
 
 The tool automatically detects AAP versions and validates compatibility before migration.
@@ -22,6 +25,7 @@ The tool automatically detects AAP versions and validates compatibility before m
 ### Prerequisites: Running AAP Instances
 
 This migration tool requires **two accessible AAP instances**:
+
 - **Source AAP** (version 2.4 or 2.5)
 - **Target AAP** (version 2.5 or 2.6)
 
@@ -42,6 +46,7 @@ curl -k https://your-target-aap/api/controller/v2/ping/
 ✅ **If both commands return JSON with version info, you're ready to proceed.**
 
 ❌ **If you get connection errors:**
+
 - Verify AAP instances are running
 - Check network connectivity and firewall rules
 - Verify URLs are correct (note `/api/controller/v2` for AAP 2.6)
@@ -49,15 +54,18 @@ curl -k https://your-target-aap/api/controller/v2/ping/
 #### Don't Have AAP Instances Yet?
 
 **Option 1: Use Existing AAP Infrastructure**
+
 - Contact your AAP administrator for access
 - You need **admin** or **superuser** permissions on both instances
 
 **Option 2: Set Up Test Instances**
+
 - Follow [AAP Installation Guide](https://access.redhat.com/documentation/en-us/red_hat_ansible_automation_platform)
 - Minimum requirements: 8GB RAM per instance
 - Recommended ports: 8443 (source), 10443 (target)
 
 **Option 3: Red Hat Demo Environment**
+
 - Request AAP sandbox from Red Hat for testing
 
 ## Features
@@ -82,6 +90,7 @@ curl -k https://your-target-aap/api/controller/v2/ping/
 - **Split-File Export/Import**: Automatic file splitting for large datasets with
   metadata tracking
 - **Dual Interface**: Interactive TUI for guided experience, or powerful CLI for automation and scripting
+- **🖥️ Optional Web UI**: PatternFly console (second container, `--profile ui`) with AWX-style job output, connection management, and the full export → transform → import workflow in the browser
 - **RBAC Migration**: Separate script for migrating role-based access control assignments
 
 ## Architecture
@@ -176,6 +185,50 @@ aap-bridge
 
 💡 **Quick Tip:** First time using AAP Bridge? Launch the TUI with `aap-bridge` for a guided, interactive experience!
 
+#### Option 3: Web UI (Optional) 🖥️
+
+A PatternFly web console with an AWX-style job output view, served by an
+optional second container. It talks only to the REST API — the CLI/TUI above
+keep working exactly as before if you skip this.
+
+**Option 3a: UI via containers (recommended)**
+
+```bash
+# 1. Configure environment (ONLY the API token — source/target AAP
+#    endpoints are entered in the UI Setup page, never in this file)
+cd container
+cp .env.container .env
+vi .env
+# Set: AAP_BRIDGE_API_TOKEN=<a-long-random-token>
+
+# 2. Start the API + UI (default CLI-only service is unchanged;
+#    these two only start with the 'ui' profile)
+mkdir -p volumes/{database,logs,exports,xformed,config,api_jobs}
+podman-compose --profile ui up -d --build
+
+# 3. Open the UI, enter your AAP_BRIDGE_API_TOKEN, then add your
+#    source/target endpoints on the Setup page
+# UI:  http://localhost:8080
+# API docs: http://localhost:8000/api/v1/docs
+```
+
+**Option 3b: UI via local dev**
+
+```bash
+# 1. Start the API (from repo root, Python env from Option 2)
+export AAP_BRIDGE_API_TOKEN=dev-token-change-me
+aap-bridge-api
+# Serves http://127.0.0.1:8000, docs at /api/v1/docs
+
+# 2. Start the UI (Node 18+, new terminal)
+cd ui
+npm install
+npm run dev
+# Open http://localhost:3000 (/api is proxied to :8000, no CORS setup needed)
+```
+
+📖 **For UI screens, architecture, and troubleshooting**, see the [UI Guide](ui/README.md)
+
 ### Configuration
 
 The project includes configuration files with recommended default values. You need to set up your environment variables for AAP credentials and the database.
@@ -209,6 +262,7 @@ SQLite is a file-based database that requires no server setup. Perfect for most 
 ##### Option B: PostgreSQL (Optional - For Enterprise Scale)
 
 Consider PostgreSQL only if you need:
+
 - Very large migrations
 - Distributed/remote state access
 - Cloud RDS integration
@@ -225,6 +279,7 @@ psql -d aap_migration -c "GRANT ALL ON SCHEMA public TO aap_migration_user;"
 ```
 
 Then update `.env`:
+
 ```bash
 MIGRATION_STATE_DB_PATH=postgresql://aap_migration_user:password@localhost:5432/aap_migration
 ```
@@ -249,6 +304,7 @@ You need API tokens with **write** permissions for both Source and Target AAP in
 7. **⚠️ Copy the token immediately!** It will only be shown once.
 
 **Required Permissions:**
+
 - Your user account needs **Superuser** or **Organization Admin** permissions
 - Token must have **Write** scope (not just Read)
 - Tokens don't expire by default but can be revoked
@@ -309,6 +365,7 @@ AAP 2.6:     https://your-aap/api/controller/v2
 AAP 2.6 uses "Platform Gateway" which provides a unified API entry point. Always use `/api/controller/v2` for target AAP 2.6.
 
 **How to verify:**
+
 ```bash
 # AAP 2.6 responds to Platform Gateway path
 curl -k https://your-aap26/api/controller/v2/ping/
@@ -400,6 +457,7 @@ aap-bridge
 ```
 
 **Why use the TUI?**
+
 - ✅ User-friendly guided workflow
 - ✅ Built-in progress tracking and status display
 - ✅ Step-by-step control with granular import
@@ -409,6 +467,7 @@ aap-bridge
 - ✅ Visual progress bars and phase tracking
 
 **Recommended TUI Workflow:**
+
 1. Launch TUI: `aap-bridge`
 2. Select **Option 1: Export Resources**
 3. Select **Option 2: Transform Resources**
@@ -419,6 +478,7 @@ aap-bridge
    - Check status after each phase completes
 
 **Important Notes When Using TUI:**
+
 - ⚠️ After importing inventory sources, check them manually for outdated Execution Environments pointing to older AAP-2.4 automation hub addresses
 - ✓ Projects are automatically patched with SCM details during import
 - ✓ All organization-scoped resources (teams, credentials, projects) are properly deduplicated
@@ -501,11 +561,13 @@ python rbac_migration.py
 **Understanding `--skip-prep`:**
 
 The `--skip-prep` flag skips the schema discovery phase. Use it when:
+
 - ✅ You've already run schema prep once (schemas already exist in `schemas/` directory)
 - ✅ Running subsequent migration phases after Phase 1
 - ✅ Re-running migrations in the same session
 
 Don't use `--skip-prep` when:
+
 - ❌ First time running the migration (no schemas exist yet)
 - ❌ Schema files were deleted or need to be regenerated
 - ❌ AAP instances were upgraded and schemas may have changed
@@ -543,6 +605,7 @@ curl -sk -H "Authorization: Bearer $TOKEN" \
 ```
 
 **LDAP Settings Checklist:**
+
 - [ ] Test LDAP login with test user
 - [ ] Verify LDAP settings are present (Controller or Gateway)
 - [ ] Manually enter `AUTH_LDAP_BIND_PASSWORD` (not migrated for security)
@@ -551,6 +614,7 @@ curl -sk -H "Authorization: Bearer $TOKEN" \
 - [ ] Check LDAP organization mappings
 
 **Troubleshooting:**
+
 - If LDAP settings appear in Controller but authentication fails → May need to configure in Gateway
 - Check `SETTINGS-REVIEW-REPORT.md` for all LDAP-related settings
 - Consult AAP 2.6 documentation for Platform Gateway authentication configuration
@@ -571,6 +635,7 @@ aap-bridge credentials report [--output ./reports/status.md]
 ```
 
 **What happens during credential migration:**
+
 1. ✅ Compares credentials to find missing ones
 2. ✅ Migrates organizations (dependency)
 3. ✅ Migrates credential types (dependency)
@@ -595,6 +660,7 @@ aap-bridge import -r organizations
 ```
 
 **File locations:**
+
 - Exported data: `exports/<resource_type>/`
 - Transformed data: `xformed/<resource_type>/`
 - State database: `migration_state.db`
@@ -633,6 +699,7 @@ aap-bridge import --dry-run
 | Test without changes | `aap-bridge import --dry-run` | `--dry-run` |
 
 **Important:**
+
 - ✅ Failed resources (`status="failed"`) are **automatically retried** - no special flag needed
 - ✅ `--force-reimport` clears import progress for specified types only (not dependencies)
 - ✅ Use `--force-reimport` when resources were successfully imported but deleted from target AAP
@@ -855,11 +922,13 @@ PHASE 10: ACCESS CONTROL (Final Step)
 ### Critical Dependency Rules
 
 🔴 **MUST MIGRATE IN ORDER:**
+
 1. **Organizations → Credential Types → Credentials** (This sequence is MANDATORY)
 2. **Credentials → Projects/Inventories** (Projects & inventories need credentials)
 3. **Job Templates LAST** (They depend on almost everything)
 
 ⚠️ **Common Mistakes to Avoid:**
+
 - ❌ Migrating credentials before credential types → **WILL FAIL** (missing credential type mappings)
 - ❌ Migrating credentials before organizations → **WILL FAIL** (missing organization references)
 - ❌ Migrating job templates before credentials → **WILL FAIL** (missing credential dependencies)
@@ -868,20 +937,24 @@ PHASE 10: ACCESS CONTROL (Final Step)
 ### Why This Order Matters
 
 **Organizations First:**
+
 - Organizations are referenced by credentials, projects, inventories, job templates
 - Without organizations, most resources will fail to import
 
 **Credential Types Before Credentials:**
+
 - Credentials reference credential types by ID
 - Managed credential types must be looked up and mapped in target AAP
 - Custom credential types must be created before credentials can use them
 
 **Credentials Before Projects/Inventories:**
+
 - Projects need credentials for SCM authentication
 - Inventory sources need credentials for dynamic inventory sync
 - Without credentials, projects/inventories will import but won't be functional
 
 **Inventory Sources Are Automatically Synced:**
+
 - ✅ Inventory sources are automatically synced after import
 - Syncing triggers the actual data fetch from SCM/cloud providers
 - Dynamic inventory hosts are fetched during the sync process
@@ -889,23 +962,27 @@ PHASE 10: ACCESS CONTROL (Final Step)
 - Manual sync commands are available in Phase 3b if needed for troubleshooting
 
 **Execution Environments & Instance Groups Before Job Templates:**
+
 - Execution environments define the container images used to run playbooks
 - Instance groups define which controller nodes can execute jobs
 - Job templates reference both execution environments and instance groups
 - These must be migrated before job templates to avoid missing dependency errors
 
 **Job Templates & Workflows Before Schedules:**
+
 - Job templates reference: organizations, projects, inventories, credentials, execution environments, instance groups
 - Workflow job templates reference: job templates
 - Schedules reference: projects, inventory sources, job templates, workflow job templates
 - All dependencies must exist before schedules can be created
 
 **Schedules After Job Templates:**
+
 - Schedules can be attached to projects, inventory sources, job templates, and workflow job templates
 - Schedules define when these resources should run automatically (e.g., nightly, weekly)
 - Must be migrated after all schedulable resources exist
 
 **Settings Migration (Optional):**
+
 - Settings is a singleton resource containing global AAP configuration (LDAP, logging, UI settings, etc.)
 - ⚠️ **Review carefully before applying**: Settings are environment-specific and may not be appropriate for the target environment
 - Settings migration is optional and independent of other resources
@@ -966,6 +1043,7 @@ export:
 ```
 
 **What Gets Migrated:**
+
 - ✅ Inventory containers (dynamic and static)
 - ✅ Inventory sources (SCM configuration)
 - ✅ Inventory source schedules
@@ -978,6 +1056,7 @@ export:
 A specialized tool migrates credential structure and metadata without database load:
 
 **The Problem:**
+
 - Source and Target AAP use different encryption keys (SECRET_KEY)
 - Direct database copy won't work (target can't decrypt)
 - Secret values return as `$encrypted$` from the API
@@ -997,6 +1076,7 @@ ansible-playbook credential_migration/migrate_credentials.yml
 ```
 
 **Benefits:**
+
 - ✅ Credential structure migration successful
 - ✅ Zero database load (uses API only - 3 calls total)
 - ✅ Proper encryption (fresh credentials in target)
@@ -1010,6 +1090,7 @@ ansible-playbook credential_migration/migrate_credentials.yml
 ### Testing
 
 The tool has been tested with:
+
 - ✅ **AAP 2.4 → AAP 2.6** migrations
 - ✅ Organizations, users, teams, and RBAC
 - ✅ Inventories including dynamic inventories
@@ -1018,6 +1099,7 @@ The tool has been tested with:
 - ✅ Projects and execution environments
 
 For detailed information, see **[USER-GUIDE.md](USER-GUIDE.md)** for comprehensive documentation including:
+
 - Complete setup and installation instructions
 - Configuration reference
 - Step-by-step migration process
@@ -1117,23 +1199,28 @@ make check
 The tool migrates all AAP resources in the correct dependency order:
 
 ✅ **Foundation Resources:**
+
 - Organizations (100%)
 - Users (100%)
 - Teams (100%)
 - Labels (100%)
 
 ✅ **Credentials:**
+
 - Credential Types (100%)
 - Credentials (100% - metadata only, secrets must be recreated)
 
 ✅ **Execution Environment:**
+
 - Execution Environments (100%)
 - Instance Groups (100%)
 
 ✅ **Projects:**
+
 - Projects (100% - with automatic sync)
 
 ✅ **Inventories:**
+
 - Static Inventories (100%)
 - Dynamic Inventories (100%)
 - Inventory Sources (SCM configuration)
@@ -1141,11 +1228,13 @@ The tool migrates all AAP resources in the correct dependency order:
 - All Hosts (bulk operations)
 
 ✅ **Templates:**
+
 - Job Templates (100%)
 - Workflow Job Templates (100%)
 - Workflow Nodes (100%)
 
 ✅ **Access Control:**
+
 - RBAC Role Assignments (70-95% - via separate script)
 
 **Total Migration Success Rate:** 89-95% of all resources (based on production testing)
@@ -1181,6 +1270,7 @@ For detailed information on what's included and what requires manual steps, see 
 ### Getting Help
 
 **Quick References:**
+
 ```bash
 # Show all available commands
 aap-bridge --help
@@ -1196,6 +1286,7 @@ tail -f logs/migration.log
 ```
 
 **Common Questions:**
+
 - How do I check which credentials are missing? → Run `aap-bridge credentials compare`
 - Can I migrate only credentials? → Yes, run `aap-bridge credentials migrate`
 - What if credentials fail to migrate? → Check `./reports/credential-comparison.md` and logs
@@ -1207,6 +1298,7 @@ tail -f logs/migration.log
 **Current Version**: 0.2.0 - Credential-First Release
 
 **What's New in v0.2.0:**
+
 - ✨ Credential-first migration workflow
 - ✨ Automatic credential comparison before migration
 - ✨ New CLI commands: `aap-bridge credentials`

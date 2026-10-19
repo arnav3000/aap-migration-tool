@@ -13,7 +13,6 @@ from aap_migration.migration import importer as compat_shim
 from aap_migration.migration.importers import (
     ORGANIZATION_REQUIRED_RESOURCES,
     ORGANIZATION_SCOPED_RESOURCES,
-    RESOURCE_SPECS,
     ResourceImporter,
     create_importer,
 )
@@ -21,7 +20,10 @@ from aap_migration.migration.importers import _base_helpers as helpers
 from aap_migration.migration.importers._registry import (
     DEFAULT_GRANULAR_STEPS,
     get_ordered_resource_types,
+    get_resource_specs,
 )
+
+RESOURCE_SPECS = get_resource_specs()
 
 LEGACY_SCOPED = {
     "teams",
@@ -90,7 +92,8 @@ LEGACY_FACTORY_TYPES = {
 
 def test_registry_covers_legacy_factory_vocabulary() -> None:
     assert set(RESOURCE_SPECS) == LEGACY_FACTORY_TYPES
-    for name, (cls, order, scoped, required) in RESOURCE_SPECS.items():
+    for name, spec in RESOURCE_SPECS.items():
+        cls, order, scoped, required = spec
         assert isinstance(cls, type) and issubclass(cls, ResourceImporter), name
         assert isinstance(order, int), name
         assert scoped == (name in LEGACY_SCOPED), name
