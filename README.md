@@ -8,15 +8,15 @@ migrations
 
 **Source AAP:**
 
-- AAP 2.4, 2.5 (RPM-based or containerized)
+- AAP 2.4 and 2.5 (RPM-based or containerized)
 
 **Target AAP:**
 
-- AAP 2.5, 2.6 (containerized recommended)
+- AAP 2.5 and 2.6 (containerized recommended)
 
 **Common Migration Path:**
 
-- AAP 2.4 (RPM-based) → AAP 2.6 (containerized) ✅ Tested
+- AAP 2.4 (RPM-based) → AAP 2.6 (containerized)
 
 The tool automatically detects AAP versions and validates compatibility before migration.
 
@@ -56,12 +56,13 @@ curl -k https://your-target-aap/api/controller/v2/ping/
 **Option 1: Use Existing AAP Infrastructure**
 
 - Contact your AAP administrator for access
-- You need **admin** or **superuser** permissions on both instances
+- Use a source account with read access and a target account with write access;
+  some resource types may need elevated privileges
 
 **Option 2: Set Up Test Instances**
 
 - Follow [AAP Installation Guide](https://access.redhat.com/documentation/en-us/red_hat_ansible_automation_platform)
-- Minimum requirements: 8GB RAM per instance
+- Size the environment for your AAP deployment and migration dataset
 - Recommended ports: 8443 (source), 10443 (target)
 
 **Option 3: Red Hat Demo Environment**
@@ -71,7 +72,7 @@ curl -k https://your-target-aap/api/controller/v2/ping/
 ## Features
 
 - **🎯 Interactive TUI**: User-friendly Text User Interface with guided workflows, real-time progress tracking, and step-by-step control
-- **🔐 Credential-First Migration**: Ensures credentials are checked, compared, and migrated BEFORE all other resources
+- **🔐 Credential-First Migration**: Checks credentials and imports them before resources that depend on them
 - **Bulk Operations**: Leverages AAP bulk APIs for high-performance migrations
 - **State Management**: SQLite or PostgreSQL-backed state tracking with checkpoint/resume capability
 - **Idempotency**: Safely resume interrupted migrations without creating duplicates
@@ -111,10 +112,11 @@ The tool is organized into several key components:
 ### Prerequisites
 
 - **Python 3.12** or higher
-- **Hardware**: Minimum 8GB RAM recommended for large migrations
+- **Hardware**: Size capacity for your AAP deployment and migration dataset
 - **Network**: Access to Source AAP and Target AAP
-- **Credentials**: Admin access to both Source and Target AAP instances
-- **Database**: SQLite (built-in, no setup) or PostgreSQL (optional, for 100k+ resources)
+- **Permissions**: Read access on the source and write access on the target;
+  elevated privileges may be needed for some resource types
+- **Database**: SQLite by default or PostgreSQL for deployments that need a server-backed state database
 - **HashiCorp Vault** (Optional but recommended): For migrating encrypted
   credentials securely
 
@@ -122,7 +124,7 @@ The tool is organized into several key components:
 
 #### Option 1: Containerized Deployment (Recommended) 🐳
 
-Production-ready containerized deployment with zero Python setup required:
+Containerized deployment with no Python setup on the host:
 
 ```bash
 # 1. Build the container
@@ -174,7 +176,7 @@ pip install -e .
 ```bash
 # Check installation was successful
 aap-bridge --version
-# Should display: AAP Bridge version 0.2.0
+# Should display: aap-bridge, version 1.0.0
 
 # View available commands
 aap-bridge --help
@@ -220,9 +222,9 @@ export AAP_BRIDGE_API_TOKEN=dev-token-change-me
 aap-bridge-api
 # Serves http://127.0.0.1:8000, docs at /api/v1/docs
 
-# 2. Start the UI (Node 18+, new terminal)
+# 2. Start the UI (Node.js 24+, new terminal)
 cd ui
-npm install
+npm ci
 npm run dev
 # Open http://localhost:3000 (/api is proxied to :8000, no CORS setup needed)
 ```
@@ -255,7 +257,6 @@ SQLite is a file-based database that requires no server setup. Perfect for most 
 - ✅ **Automatic setup** - Database file created on first run
 - ✅ **Handles large migrations** - Supports substantial workloads
 - ✅ **Easy backup** - Just copy the `migration_state.db` file
-- ✅ **Production-ready** - Successfully used in AAP migrations
 
 **No configuration needed!** The default `.env` uses SQLite.
 
@@ -286,7 +287,7 @@ MIGRATION_STATE_DB_PATH=postgresql://aap_migration_user:password@localhost:5432/
 
 #### 2. Getting AAP API Tokens
 
-You need API tokens with **write** permissions for both Source and Target AAP instances.
+Use a source token with read access and a target token with write access.
 
 ##### Method 1: AAP Web UI (Recommended)
 
@@ -299,14 +300,15 @@ You need API tokens with **write** permissions for both Source and Target AAP in
 5. Fill in the form:
    - **Description:** `Migration Tool - Source` (or `Target`)
    - **Application:** Leave blank
-   - **Scope:** Select **"Write"**
+   - **Scope:** Use read scope for the source token and write scope for the target token
 6. Click **"Save"**
 7. **⚠️ Copy the token immediately!** It will only be shown once.
 
 **Required Permissions:**
 
-- Your user account needs **Superuser** or **Organization Admin** permissions
-- Token must have **Write** scope (not just Read)
+- The source account needs enough read access to enumerate the resources you
+  intend to migrate. The target account needs write access to create them.
+- Some resource types may require elevated privileges.
 - Tokens don't expire by default but can be revoked
 
 ##### Method 2: CLI/API
@@ -408,8 +410,7 @@ MIGRATION_STATE_DB_PATH=sqlite:///./migration_state.db
 VAULT__URL=https://vault.company.com:8200
 VAULT__ROLE_ID=$VAULT_ROLE_ID
 VAULT__SECRET_ID=$VAULT_SECRET_ID
-VAULT__MOUNT_POINT=secret
-VAULT__PATH=aap/credentials
+VAULT__PATH_PREFIX=secret/aap/credentials
 ```
 
 **Example 3: Enterprise Scale with PostgreSQL**
@@ -469,10 +470,11 @@ aap-bridge
 **Recommended TUI Workflow:**
 
 1. Launch TUI: `aap-bridge`
-2. Select **Option 1: Export Resources**
-3. Select **Option 2: Transform Resources**
-4. Select **Option 3: Import Resources**
-5. Choose **Option 3: Granular Import (Step-by-Step Control)**
+2. Select **Option 1: Prep Phase** to discover endpoints and generate schemas.
+3. Select **Option 2: Export (All)**.
+4. Select **Option 3: Transform (All)**.
+5. Select **Option 4: Import Resources (Enhanced)**. In its submenu, choose
+   **Granular Import (Step-by-Step Control)** to import one phase at a time.
    - Import one phase at a time with full visibility
    - See exactly what's being imported in each phase
    - Check status after each phase completes
@@ -482,8 +484,6 @@ aap-bridge
 - ⚠️ After importing inventory sources, check them manually for outdated Execution Environments pointing to older AAP-2.4 automation hub addresses
 - ✓ Projects are automatically patched with SCM details during import
 - ✓ All organization-scoped resources (teams, credentials, projects) are properly deduplicated
-
-**📸 [View TUI Screenshots](docs/TUI-SCREENSHOTS.md)** - See detailed visual examples of the TUI interface
 
 ---
 
@@ -514,7 +514,7 @@ aap-bridge migrate -r teams --skip-prep
 #   2. SKIP the users/teams migration step - LDAP/AD users will authenticate automatically
 #   3. Only migrate local admin/service accounts using the users command
 
-# Phase 2: Credentials (CRITICAL - must be 100% complete)
+# Phase 2: Credentials (review imports and re-enter required secrets)
 aap-bridge migrate -r credential_types --skip-prep
 aap-bridge migrate -r credentials --skip-prep
 
@@ -552,7 +552,7 @@ aap-bridge migrate -r notification_templates --skip-prep
 # See Post-Migration Verification section below for details.
 
 # Step 4: Validate migration
-aap-bridge validate all --sample-size 4000
+aap-bridge validate
 
 # Step 5: Migrate RBAC role assignments (after main migration)
 python rbac_migration.py
@@ -574,54 +574,31 @@ Don't use `--skip-prep` when:
 
 **Note:** The `export`, `transform`, and `import` commands don't use `--skip-prep` because they don't perform schema discovery.
 
-#### Post-Migration: Verify LDAP Authentication (AAP 2.6)
+#### Post-migration: verify LDAP authentication (AAP 2.6)
 
-**⚠️ Important for AAP 2.6 LDAP Settings:**
+For AAP 2.6, the settings importer sends supported LDAP authentication
+configuration to Platform Gateway authenticators and maps. Other safe settings
+are applied through the Controller API. The LDAP bind password is excluded
+from migration and must be entered on the target.
 
-In AAP 2.6, LDAP authentication settings may be managed by Platform Gateway instead of Controller. The current migration imports all settings to Controller (`/api/controller/v2/settings/all/`).
+After importing settings:
 
-**After settings migration, verify LDAP authentication works:**
+1. Test login with an LDAP user.
+2. Verify the authenticator and maps in the AAP 2.6 UI under **Settings → Authentication**, or query the Gateway API:
 
-```bash
-# 1. Test LDAP login with a test user
-# Try logging in to AAP 2.6 with an LDAP user account
+   ```bash
+   curl -sk -H "Authorization: Bearer $TOKEN" \
+     https://target-aap/api/gateway/v1/authenticators/
+   curl -sk -H "Authorization: Bearer $TOKEN" \
+     https://target-aap/api/gateway/v1/authenticator_maps/
+   ```
 
-# 2. If login fails, check where LDAP settings are configured
-# Option A: Check Controller settings
-curl -sk -H "Authorization: Bearer $TOKEN" \
-  https://target-aap/api/controller/v2/settings/ldap/
-
-# Option B: Check Gateway settings (AAP 2.6)
-curl -sk -H "Authorization: Bearer $TOKEN" \
-  https://target-aap/api/gateway/v1/settings/authentication/
-
-# 3. Manually enter LDAP bind password (required)
-# Via AAP 2.6 UI: Settings → Authentication → LDAP
-# Enter AUTH_LDAP_BIND_PASSWORD value
-
-# 4. If LDAP still doesn't work, manually configure via Gateway
-# Use AAP 2.6 UI: Settings → Authentication → Configure LDAP
-# Or use Gateway API to update LDAP settings
-```
-
-**LDAP Settings Checklist:**
-
-- [ ] Test LDAP login with test user
-- [ ] Verify LDAP settings are present (Controller or Gateway)
-- [ ] Manually enter `AUTH_LDAP_BIND_PASSWORD` (not migrated for security)
-- [ ] Test LDAP authentication again
-- [ ] Verify LDAP group mappings work
-- [ ] Check LDAP organization mappings
-
-**Troubleshooting:**
-
-- If LDAP settings appear in Controller but authentication fails → May need to configure in Gateway
-- Check `SETTINGS-REVIEW-REPORT.md` for all LDAP-related settings
-- Consult AAP 2.6 documentation for Platform Gateway authentication configuration
+3. Enter the LDAP bind password in the target UI if required.
+4. Review the generated settings report and complete any remaining follow-up actions.
 
 #### Credential Management Commands
 
-New in v0.2.0 - Dedicated credential management:
+Dedicated credential management commands:
 
 ```bash
 # Compare credentials between source and target
@@ -706,46 +683,18 @@ aap-bridge import --dry-run
 
 ---
 
-#### Output Control
+#### Logging and progress
 
-The tool provides flexible output modes for different environments:
-
-```bash
-
-# Default: Live progress display with clean console output
-aap-bridge migrate -r organizations -r credential_types -r credentials --skip-prep
-
-# Quiet mode: Errors only (for scripting)
-aap-bridge migrate -r organizations -r credential_types -r credentials --skip-prep --quiet
-
-# Disable progress: For CI/CD environments
-aap-bridge migrate -r organizations -r credential_types -r credentials --skip-prep --disable-progress
-
-# Detailed stats: Show additional metrics
-aap-bridge migrate -r organizations -r credential_types -r credentials --skip-prep --show-stats
-
-# Combination: Quiet + no progress for automation
-aap-bridge migrate -r organizations -r credential_types -r credentials --skip-prep --quiet --disable-progress
-
-```
-
-**Output Modes:**
-
-- **Normal** (default): Live progress display with real-time metrics, WARNING-level console logs
-- **Quiet** (`--quiet`): Minimal output, errors only
-- **CI/CD** (`--disable-progress`): No live display, structured logs suitable for CI pipelines
-- **Detailed** (`--show-stats`): Additional statistics and timing information
-
-**Environment Variables:**
+The top-level CLI accepts `--log-level` (`DEBUG`, `INFO`, `WARNING`, or
+`ERROR`) and `--log-file`. These options must appear before the command:
 
 ```bash
-
-# Configure via environment
-export AAP_BRIDGE__LOGGING__CONSOLE_LEVEL=WARNING
-export AAP_BRIDGE__LOGGING__DISABLE_PROGRESS=true
-aap-bridge migrate -r organizations -r credential_types -r credentials --skip-prep
-
+aap-bridge --log-level INFO --log-file logs/migration.log migrate --skip-prep
 ```
+
+`transform` also accepts `--quiet` and `--disable-progress`. The migration
+configuration supports `LOGGING__DISABLE_PROGRESS=true` and
+`LOGGING__SHOW_STATS=true` for progress display settings.
 
 #### Split-File Export/Import
 
@@ -756,8 +705,8 @@ For large datasets, the tool automatically splits exports into multiple files:
 # Export with custom split size (default: 1000 records/file)
 aap-bridge export --output exports/ --records-per-file 500
 
-# Import handles multiple files automatically
-aap-bridge import --input exports/
+# Import reads transformed data (not the raw exports)
+aap-bridge import --input xformed/
 
 ```
 
@@ -779,13 +728,6 @@ exports/
 
 ```
 
-## Performance Targets (TBD)
-
-- **Migration Rate**:
-- **API Request Rate**:
-- **Memory Usage**:
-- **Total Time**:
-
 ## Key Design Principles
 
 ### Bulk Operations
@@ -805,8 +747,8 @@ All migrations are checkpoint-based, allowing safe resumption:
 # Resume from last checkpoint
 aap-bridge migrate resume
 
-# Resume from specific checkpoint
-aap-bridge migrate resume --checkpoint inventories_batch_50
+# Resume from a specific resource phase
+aap-bridge migrate resume --from-phase inventories
 
 ```
 
@@ -816,456 +758,77 @@ The tool tracks all migrated resources in a state database, ensuring that runnin
 
 ## Migration Order and Dependencies
 
-⚠️ **CRITICAL**: Resources MUST be migrated in the correct dependency order to avoid failures.
+The migration registry defines resource ordering and importer dependencies.
+For a standard run, use `aap-bridge migrate` to run the configured workflow, or
+use `export`, `transform`, and `import` as separate steps. The import command
+resolves dependencies automatically by default; `--check-dependencies` shows
+the types it plans to import. Use `--skip-dependencies` only when you have
+already handled prerequisites yourself.
 
-### Dependency Flow Diagram
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                   CORRECT MIGRATION DEPENDENCY ORDER                    │
-└─────────────────────────────────────────────────────────────────────────┘
-
-PHASE 1: FOUNDATION (No Dependencies)
-┌────────────────────────────────────────┐
-│  1. Organizations                      │  ← START HERE (Required by almost everything)
-│  2. Users                              │  ← Independent, can run in parallel with orgs
-│  3. Labels                             │  ← Independent
-└────────────────────────────────────────┘
-                    ↓
-PHASE 2: TEAMS (Requires Organizations)
-┌────────────────────────────────────────┐
-│  4. Teams                              │  ← Requires: Organizations
-└────────────────────────────────────────┘
-                    ↓
-PHASE 3: EXECUTION ENVIRONMENTS (Independent)
-┌────────────────────────────────────────┐
-│  5. Execution Environments             │  ← Can run after Phase 1 or in parallel
-└────────────────────────────────────────┘
-                    ↓
-PHASE 4: CREDENTIALS (CRITICAL - Requires Organizations & Credential Types)
-┌────────────────────────────────────────┐
-│  6. Credential Types (MUST BE FIRST)   │  ← Required by: Credentials
-│     - Migrate all managed types        │
-│     - Migrate all custom types         │
-└────────────────────────────────────────┘
-                    ↓
-┌────────────────────────────────────────┐
-│  7. Credentials (MUST BE SECOND)       │  ← Requires: Organizations, Credential Types
-│     ⚠️ 100% completion required        │
-│     before proceeding                  │
-└────────────────────────────────────────┘
-                    ↓
-PHASE 5: PROJECTS & INVENTORIES (Require Credentials)
-┌────────────────────────────────────────┐
-│  8. Projects                           │  ← Requires: Organizations, Credentials
-│     (with automatic sync)              │     (for SCM authentication)
-└────────────────────────────────────────┘
-                    ↓
-┌────────────────────────────────────────┐
-│  9. Inventories                        │  ← Requires: Organizations
-│     (static & dynamic)                 │
-└────────────────────────────────────────┘
-                    ↓
-┌────────────────────────────────────────┐
-│  10. Inventory Sources                 │  ← Requires: Inventories, Projects
-│      (SCM configuration)               │     Credentials (for SCM auth)
-└────────────────────────────────────────┘
-                    ↓
-┌────────────────────────────────────────┐
-│  11. Hosts (bulk operations)           │  ← Requires: Inventories
-│      (200/batch - AAP maximum)         │
-└────────────────────────────────────────┘
-                    ↓
-PHASE 6: EXECUTION ENVIRONMENTS & INSTANCE GROUPS
-┌────────────────────────────────────────┐
-│  12. Execution Environments            │  ← Requires: Organizations
-│      (container images)                │
-└────────────────────────────────────────┘
-                    ↓
-┌────────────────────────────────────────┐
-│  13. Instance Groups                   │  ← Requires: None (infrastructure)
-│      (controller node groups)          │
-└────────────────────────────────────────┘
-                    ↓
-PHASE 7: JOB TEMPLATES & WORKFLOWS (Require Everything Above)
-┌────────────────────────────────────────┐
-│  14. Job Templates                     │  ← Requires: Organizations, Projects,
-│                                        │     Inventories, Credentials,
-│                                        │     Execution Environments, Instance Groups
-└────────────────────────────────────────┘
-                    ↓
-┌────────────────────────────────────────┐
-│  15. Workflow Job Templates            │  ← Requires: Job Templates
-│      & Workflow Nodes                  │
-└────────────────────────────────────────┘
-                    ↓
-PHASE 8: SCHEDULES
-┌────────────────────────────────────────┐
-│  16. Schedules                         │  ← Requires: Projects, Inventory Sources
-│      (for job templates, workflows,    │     Job Templates, Workflow Job Templates
-│       inventory sources, projects)     │
-└────────────────────────────────────────┘
-                    ↓
-PHASE 9: SETTINGS (Optional)
-┌────────────────────────────────────────┐
-│  17. Settings (Global Configuration)   │  ← Optional: None (singleton)
-│      (LDAP, logging, UI settings)      │     Review before applying
-└────────────────────────────────────────┘
-                    ↓
-PHASE 10: ACCESS CONTROL (Final Step)
-┌────────────────────────────────────────┐
-│  18. RBAC Role Assignments             │  ← Requires: ALL resources above
-│      (via rbac_migration.py)           │     to exist first
-└────────────────────────────────────────┘
-```
-
-### Critical Dependency Rules
-
-🔴 **MUST MIGRATE IN ORDER:**
-
-1. **Organizations → Credential Types → Credentials** (This sequence is MANDATORY)
-2. **Credentials → Projects/Inventories** (Projects & inventories need credentials)
-3. **Job Templates LAST** (They depend on almost everything)
-
-⚠️ **Common Mistakes to Avoid:**
-
-- ❌ Migrating credentials before credential types → **WILL FAIL** (missing credential type mappings)
-- ❌ Migrating credentials before organizations → **WILL FAIL** (missing organization references)
-- ❌ Migrating job templates before credentials → **WILL FAIL** (missing credential dependencies)
-- ❌ Migrating RBAC before resources exist → **WILL FAIL** (no resources to assign roles to)
-
-### Why This Order Matters
-
-**Organizations First:**
-
-- Organizations are referenced by credentials, projects, inventories, job templates
-- Without organizations, most resources will fail to import
-
-**Credential Types Before Credentials:**
-
-- Credentials reference credential types by ID
-- Managed credential types must be looked up and mapped in target AAP
-- Custom credential types must be created before credentials can use them
-
-**Credentials Before Projects/Inventories:**
-
-- Projects need credentials for SCM authentication
-- Inventory sources need credentials for dynamic inventory sync
-- Without credentials, projects/inventories will import but won't be functional
-
-**Inventory Sources Are Automatically Synced:**
-
-- ✅ Inventory sources are automatically synced after import
-- Syncing triggers the actual data fetch from SCM/cloud providers
-- Dynamic inventory hosts are fetched during the sync process
-- You can verify sync status in AAP Web UI or via API
-- Manual sync commands are available in Phase 3b if needed for troubleshooting
-
-**Execution Environments & Instance Groups Before Job Templates:**
-
-- Execution environments define the container images used to run playbooks
-- Instance groups define which controller nodes can execute jobs
-- Job templates reference both execution environments and instance groups
-- These must be migrated before job templates to avoid missing dependency errors
-
-**Job Templates & Workflows Before Schedules:**
-
-- Job templates reference: organizations, projects, inventories, credentials, execution environments, instance groups
-- Workflow job templates reference: job templates
-- Schedules reference: projects, inventory sources, job templates, workflow job templates
-- All dependencies must exist before schedules can be created
-
-**Schedules After Job Templates:**
-
-- Schedules can be attached to projects, inventory sources, job templates, and workflow job templates
-- Schedules define when these resources should run automatically (e.g., nightly, weekly)
-- Must be migrated after all schedulable resources exist
-
-**Settings Migration (Optional):**
-
-- Settings is a singleton resource containing global AAP configuration (LDAP, logging, UI settings, etc.)
-- ⚠️ **Review carefully before applying**: Settings are environment-specific and may not be appropriate for the target environment
-- Settings migration is optional and independent of other resources
-- Common settings to review: authentication backends, logging levels, session timeouts, UI configurations
-
-### Dependency Reference Table
-
-| Resource Type | Requires (Dependencies) | Required By |
-|--------------|-------------------------|-------------|
-| Organizations | None | Teams, Credentials, Projects, Inventories, Job Templates |
-| Users | None | Teams, RBAC |
-| Labels | None | Various resources |
-| Teams | Organizations | RBAC |
-| Execution Environments | Organizations (optional) | Job Templates |
-| Instance Groups | None (infrastructure) | Job Templates |
-| **Credential Types** | None | **Credentials** |
-| **Credentials** | **Organizations, Credential Types** | **Projects, Inventory Sources, Job Templates** |
-| Projects | Organizations, Credentials (for SCM) | Inventory Sources, Job Templates |
-| Inventories | Organizations | Hosts, Inventory Sources, Job Templates |
-| Inventory Sources | Inventories, Projects, Credentials | Schedules |
-| Hosts | Inventories | Job Templates |
-| Job Templates | Organizations, Projects, Inventories, Credentials, Execution Environments, Instance Groups | Workflows, Schedules |
-| Workflow Job Templates | Job Templates | Schedules |
-| Schedules | Projects, Inventory Sources, Job Templates, Workflow Job Templates | None |
-| Settings | None (singleton) | None (global configuration) |
-| RBAC | All resources above | None |
+Credential secrets are not returned by the AAP API. The tool migrates
+credential metadata, but secret values may need to be entered again on the
+target. Review the credential comparison and import reports before proceeding
+to dependent resources.
 
 ## Known Issues and Limitations
 
-### Critical Limitations
+### Important limitations
 
-1. **Encrypted Credentials**: AAP API returns `$encrypted$` for secret fields. **Solution:**
-   - Use the credential migration tool (see `docs/guides/credential-migration.md`)
-   - Automated playbook generation from source AAP
-   - Interactive secret filling workflow
-   - Structure migration with proper encryption handling
-   - Alternative: HashiCorp Vault integration or manual recreation
+- **Credential secrets:** The AAP API masks secret fields (for example, with
+  `$encrypted$`). The tool cannot recover those values; re-enter them on the
+  target as needed.
+- **AAP API paths:** Configure the source with its Controller API base URL
+  (commonly `/api/v2`) and the target with the Platform Gateway path
+  (`/api/controller/v2`) where applicable. The `.env.example` file shows the
+  expected variable names.
+- **RBAC:** `rbac_migration.py` is a separate script and is not part of the
+  main ETL command sequence.
+- **Environment-specific settings:** Review settings before importing them;
+  source authentication and other environment-specific values may not be
+  appropriate for the target.
 
-2. **Duplicate Hostnames**: AAP 2.6 enforces stricter hostname uniqueness validation. If source AAP has duplicate hostnames within the same inventory, those hosts will fail to migrate. Solution: Rename duplicates in source before migration.
+### Dynamic inventories
 
-3. **API Timeouts**: Large operations may timeout with default settings. If you encounter timeouts:
-   - Increase timeout values in `.env` (e.g., `SOURCE__TIMEOUT=300`, `TARGET__TIMEOUT=300`)
-   - Reduce concurrency in `config/config.yaml` (e.g., `max_concurrent: 5`, `rate_limit: 10`)
+The registry includes inventory sources, inventory groups, hosts, and host
+membership resources. Source synchronization behavior depends on the resource
+configuration and the target AAP instance; verify inventory data and sync
+status in the target after import.
 
-4. **Platform Gateway (AAP 2.6+)**: Target URL must use Platform Gateway path `/api/controller/v2` (not `/api/v2`)
+### Validation and development checks
 
-5. **Manual RBAC Migration**: Role-based access control assignments are migrated via separate `rbac_migration.py` script (not included in main migration workflow)
+Run the unit suite with `python -m pytest tests/unit/`. The repository also
+provides `make lint`, `make typecheck`, and `make check` for development
+checks. The checked-in test tree currently contains unit tests; integration
+and performance test directories are not included.
 
-### Dynamic Inventories
+## Supported resource types
 
-Dynamic inventories are fully supported with the following configuration in `config/config.yaml`:
+The resource registry currently includes organizations, labels, users, teams,
+credential types, credentials, credential input sources, execution
+execution environments, instance groups, projects, inventories, inventory sources,
+inventory groups, hosts, host inventory memberships, host group memberships,
+instances, job templates, workflow job templates, system job templates,
+schedules, notification templates, applications, and settings. The `jobs`
+entry is an API-only type and is not exported or imported by the migration
+workflow. Support and transformations vary by resource type; consult the
+registry and review generated reports for the specific migration.
 
-```yaml
-export:
-  skip_dynamic_hosts: false
-  skip_smart_inventories: false
-  skip_hosts_with_inventory_sources: false
-```
-
-**What Gets Migrated:**
-
-- ✅ Inventory containers (dynamic and static)
-- ✅ Inventory sources (SCM configuration)
-- ✅ Inventory source schedules
-- ✅ All hosts (including hosts from dynamic inventories)
-
-**Post-Migration:** You can manually trigger inventory source syncs or wait for scheduled syncs to update hosts from external sources.
-
-### Credential Metadata Migration
-
-A specialized tool migrates credential structure and metadata without database load:
-
-**The Problem:**
-
-- Source and Target AAP use different encryption keys (SECRET_KEY)
-- Direct database copy won't work (target can't decrypt)
-- Secret values return as `$encrypted$` from the API
-- Manual recreation is time-consuming and error-prone
-
-**The Solution:**
-
-```bash
-# Step 1: Export credential metadata (5 mins - API only, zero DB load)
-python scripts/export_credentials_for_migration.py
-
-# Step 2: Fill secrets interactively (10-20 mins - secure prompts)
-python scripts/fill_secrets_interactive.py
-
-# Step 3: Migrate to target (2 mins - creates with proper encryption)
-ansible-playbook credential_migration/migrate_credentials.yml
-```
-
-**Benefits:**
-
-- ✅ Credential structure migration successful
-- ✅ Zero database load (uses API only - 3 calls total)
-- ✅ Proper encryption (fresh credentials in target)
-- ✅ Automated playbook generation
-- ✅ Efficient credential migration workflow
-
-⚠️ **Important:** Secrets (passwords, tokens, keys) must be manually filled as AAP API doesn't export them.
-
-**Documentation:** See [credential-migration.md](docs/guides/credential-migration.md) for complete guide.
-
-### Testing
-
-The tool has been tested with:
-
-- ✅ **AAP 2.4 → AAP 2.6** migrations
-- ✅ Organizations, users, teams, and RBAC
-- ✅ Inventories including dynamic inventories
-- ✅ Credentials across multiple credential types
-- ✅ Job templates with dependencies
-- ✅ Projects and execution environments
-
-For detailed information, see **[USER-GUIDE.md](USER-GUIDE.md)** for comprehensive documentation including:
-
-- Complete setup and installation instructions
-- Configuration reference
-- Step-by-step migration process
-- RBAC migration guide
-- Troubleshooting and FAQ
-- Best practices
+Credentials migrate as metadata because secret values are masked by the AAP
+API. RBAC role assignments are handled separately by `rbac_migration.py`.
 
 ## Documentation
 
-Full documentation is available via MkDocs with the Material theme, and comprehensive user guidance in [USER-GUIDE.md](USER-GUIDE.md).
+The maintained guides in this repository are:
 
-### Viewing Documentation Locally
+- [Container deployment](container/README.md)
+- [Optional web UI](ui/README.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Changelog](CHANGELOG.md)
 
-```bash
-# Serve docs locally (hot-reload enabled)
-mkdocs serve
-
-# Open in browser: http://127.0.0.1:8000
-```
-
-### Building Static Documentation
-
-```bash
-# Build static HTML site
-mkdocs build
-
-# Output is in site/ directory
-```
-
-### Documentation Structure
-
-```text
-docs/
-├── index.md                           # Home page
-├── getting-started/
-│   ├── installation.md                # Installation guide
-│   ├── quickstart.md                  # Quick start tutorial
-│   └── configuration.md               # Configuration reference
-├── user-guide/
-│   ├── cli-reference.md               # CLI command reference
-│   ├── migration-workflow.md          # Migration workflow guide
-│   └── troubleshooting.md             # Troubleshooting guide
-├── developer-guide/
-│   ├── contributing.md                # Contribution guidelines
-│   ├── adding-resource-types.md       # How to add new resource types
-│   └── architecture.md                # Architecture overview
-└── reference/
-    └── changelog.md                   # Version history
-```
-
-## Development
-
-### Running Tests
-
-```bash
-
-# Run all tests
-pytest
-
-# Run unit tests only (fast)
-pytest tests/unit/
-
-# Run with coverage
-pytest --cov=src/aap_migration --cov-report=html
-
-# Run integration tests (requires AAP instances)
-pytest tests/integration/ -m integration
-
-# Run performance benchmarks
-pytest tests/performance/
-
-# Disable progress display for CI
-pytest tests/unit/ --disable-progress
-
-```
-
-### Code Quality
-
-```bash
-
-# Format code
-make format
-
-# Run linters
-make lint
-
-# Type checking
-make typecheck
-
-# Run all checks
-make check
-
-```
-
-## What Gets Migrated
-
-The tool migrates all AAP resources in the correct dependency order:
-
-✅ **Foundation Resources:**
-
-- Organizations (100%)
-- Users (100%)
-- Teams (100%)
-- Labels (100%)
-
-✅ **Credentials:**
-
-- Credential Types (100%)
-- Credentials (100% - metadata only, secrets must be recreated)
-
-✅ **Execution Environment:**
-
-- Execution Environments (100%)
-- Instance Groups (100%)
-
-✅ **Projects:**
-
-- Projects (100% - with automatic sync)
-
-✅ **Inventories:**
-
-- Static Inventories (100%)
-- Dynamic Inventories (100%)
-- Inventory Sources (SCM configuration)
-- Inventory Source Schedules
-- All Hosts (bulk operations)
-
-✅ **Templates:**
-
-- Job Templates (100%)
-- Workflow Job Templates (100%)
-- Workflow Nodes (100%)
-
-✅ **Access Control:**
-
-- RBAC Role Assignments (70-95% - via separate script)
-
-**Total Migration Success Rate:** 89-95% of all resources (based on production testing)
-
-For detailed information on what's included and what requires manual steps, see [USER-GUIDE.md](USER-GUIDE.md).
-
-## 📚 Documentation
-
-### Getting Started
-
-1. **[QUICK-START.md](QUICK-START.md)** - Quick start guide
-2. **[USER-GUIDE.md](USER-GUIDE.md)** - Complete user manual
-
-### Workflow Guides
-
-- **[Credential-First Migration](docs/workflows/CREDENTIAL-FIRST-WORKFLOW.md)** - Detailed credential workflow
-- **[Migration Workflow Diagrams](docs/workflows/MIGRATION-WORKFLOW-DIAGRAM.md)** - Visual process diagrams
-- **[RBAC Migration](docs/workflows/RBAC-MIGRATION-GUIDE.md)** - Role-based access control migration
-- **[Credential Migration Guide](docs/guides/credential-migration.md)** - Comprehensive credential guide
-
-### Configuration
-
-- **[.env.example](.env.example)** - Environment variable template
-- **[config/config.yaml](config/config.yaml)** - Application configuration
-- **[config/mappings.yaml.example](config/mappings.yaml.example)** - Resource name mapping examples
-
-### Additional Documentation
-
-- **[docs/](docs/)** - Complete documentation (getting started, user guides, developer guides)
-- **[examples/](examples/)** - Example configurations and playbooks
-- **[CHANGELOG.md](CHANGELOG.md)** - Version history
+The environment and application configuration examples are in
+[`.env.example`](.env.example), [`container/.env.container`](container/.env.container),
+and [`config/config.yaml`](config/config.yaml).
 
 ### Getting Help
 
@@ -1295,18 +858,8 @@ tail -f logs/migration.log
 
 ## Project Status
 
-**Current Version**: 0.2.0 - Credential-First Release
-
-**What's New in v0.2.0:**
-
-- ✨ Credential-first migration workflow
-- ✨ Automatic credential comparison before migration
-- ✨ New CLI commands: `aap-bridge credentials`
-- ✨ Detailed credential comparison reports
-- ✨ Validated with regression and full migration tests
-- 🐛 Fixed method name: `store_id_mapping` → `save_id_mapping`
-
-See [CHANGELOG.md](CHANGELOG.md) for version history.
+The package version declared in `pyproject.toml` is **1.0.0**. See
+[CHANGELOG.md](CHANGELOG.md) for recorded changes.
 
 ## Contributing
 
@@ -1326,7 +879,7 @@ For security concerns and vulnerability reporting, please see [SECURITY.md](SECU
 
 ## Support
 
-- **Issues**: Report bugs and request features via [GitHub Issues](https://github.com/antonysallas/aap-bridge/issues)
+- **Issues**: Report bugs and request features via [GitHub Issues](https://github.com/arnav3000/aap-migration-tool/issues)
 - **Security**: Report vulnerabilities privately (see [SECURITY.md](SECURITY.md))
 
 ## Acknowledgments

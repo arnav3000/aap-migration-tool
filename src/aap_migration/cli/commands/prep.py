@@ -59,7 +59,7 @@ def prep(ctx: MigrationContext, output_dir: Path, force: bool) -> None:
     """Discover endpoints and generate schemas from AAP instances.
 
     This command:
-    1. Connects to source AAP 2.3 and target AAP 2.6
+    1. Connects to the configured source and target AAP instances
     2. Discovers all available endpoints
     3. Generates schemas for each endpoint
     4. Compares schemas and generates transformation rules
@@ -75,15 +75,15 @@ def prep(ctx: MigrationContext, output_dir: Path, force: bool) -> None:
 
         \\b
         # Discover and generate schemas
-        aap-bridge prep --config config.yaml
+        aap-bridge --config config.yaml prep
 
         \\b
         # Force re-discovery
-        aap-bridge prep --config config.yaml --force
+        aap-bridge --config config.yaml prep --force
 
         \\b
         # Custom output directory
-        aap-bridge prep --config config.yaml --output-dir my_schemas/
+        aap-bridge --config config.yaml prep --output-dir my_schemas/
     """
     # Force console logging to WARNING to hide verbose API logs during prep
     # unless user explicitly requested DEBUG

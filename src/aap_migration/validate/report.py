@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC
 from html import escape
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 from aap_migration.validate.common import count_failed_resource_types
@@ -70,18 +71,14 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
     )
     total_field_mm = sum(t.t3_field_parity.mismatching for t in result.per_type)
     total_sync_failed = sum(1 for s in result.sync_entries if s.failed)
-    workflow_mismatch_count = sum(
-        1 for w in result.workflow_comparisons if w.verdict == "mismatch"
-    )
+    workflow_mismatch_count = sum(1 for w in result.workflow_comparisons if w.verdict == "mismatch")
     types_failed = count_failed_resource_types(result.per_type)
     n_types = len(result.per_type)
     n_orgs = len(result.per_org)
     orgs_red = sum(1 for o in result.per_org.values() if o.health == "red")
     orgs_amber = sum(1 for o in result.per_org.values() if o.health == "amber")
     orgs_green = n_orgs - orgs_red - orgs_amber
-    orgs_explained_failures = sum(
-        o.explained_failures for o in result.per_org.values()
-    )
+    orgs_explained_failures = sum(o.explained_failures for o in result.per_org.values())
     scoped_orgs = list(meta.organizations or [])
     scope_banner = ""
     scope_callout = ""
@@ -149,10 +146,13 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
     nav_top = "115px" if is_mock else "73px"
 
     exc = meta.exclusion_sets
-    type_overrides_str = " | ".join(
-        f"{escape(k)}: {', '.join(escape(v) for v in vals)}"
-        for k, vals in exc.type_specific_overrides.items()
-    ) or "None"
+    type_overrides_str = (
+        " | ".join(
+            f"{escape(k)}: {', '.join(escape(v) for v in vals)}"
+            for k, vals in exc.type_specific_overrides.items()
+        )
+        or "None"
+    )
     tiers_str = ", ".join(meta.tiers_run) if meta.tiers_run else "None"
 
     # Host T4 data for client-side inventory filter (mismatch default + searchable name)
@@ -160,11 +160,7 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
     inv_parity = hs.per_inventory_count_parity
     host_matched = hs.matched_hosts
     host_missing = hs.missing_hosts
-    host_issues = (
-        host_missing
-        + inv_parity.mismatching
-        + hs.field_mismatches_in_sample
-    )
+    host_issues = host_missing + inv_parity.mismatching + hs.field_mismatches_in_sample
     host_t4_payload = {
         "total_hosts_source": hs.total_hosts_source,
         "total_hosts_target": hs.total_hosts_target,
@@ -192,7 +188,11 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
     aud_rows = []
     for ad in ac.details:
         gw = "&#10003; Assigned" if ad.gateway_has_platform_auditor else "&#10007; Not assigned"
-        vtag = '<span class="tag tag-match">MATCH</span>' if ad.match else '<span class="tag tag-miss">MISMATCH</span>'
+        vtag = (
+            '<span class="tag tag-match">MATCH</span>'
+            if ad.match
+            else '<span class="tag tag-miss">MISMATCH</span>'
+        )
         src_str = str(ad.source_id) if ad.source_id is not None else "—"
         tgt_str = str(ad.target_id) if ad.target_id is not None else "—"
         aud_rows.append(
@@ -209,11 +209,7 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
             "</td></tr>"
         )
     else:
-        aud_html = (
-            '<tr><td colspan="4" class="empty-msg">'
-            "No auditor data available."
-            "</td></tr>"
-        )
+        aud_html = '<tr><td colspan="4" class="empty-msg">No auditor data available.</td></tr>'
 
     is_live_validate = meta.mode == "validate-live"
     host_tab_ran = bool(host_t4_payload["ran"])
@@ -223,9 +219,7 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
         else "all exported types and organizations in this run"
     )
     t1_coverage = f"100% &mdash; {scope_cov}"
-    t2_coverage = (
-        "100% &mdash; in-scope identity checks (missing on target + extra on target)"
-    )
+    t2_coverage = "100% &mdash; in-scope identity checks (missing on target + extra on target)"
     t3_coverage = (
         "100% of matched non-host objects (live mode)"
         if is_live_validate
@@ -249,13 +243,11 @@ def generate_validation_html(result: ValidationResult, field_data: dict | None =
     )
     if meta.mode == "validate-live" and scoped_orgs:
         auditor_tab_badge = (
-            ' <span class="ct skip" title="Skipped for org-scoped validation">'
-            "skipped</span>"
+            ' <span class="ct skip" title="Skipped for org-scoped validation">skipped</span>'
         )
     elif meta.mode == "validate-live":
         auditor_tab_badge = (
-            f' <span class="ct{" ok" if ac.mismatches == 0 else ""}">'
-            f"{_fmt(ac.mismatches)}</span>"
+            f' <span class="ct{" ok" if ac.mismatches == 0 else ""}">{_fmt(ac.mismatches)}</span>'
         )
     else:
         auditor_tab_badge = ""
@@ -498,13 +490,13 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 <nav>
   <div class="shell">
   <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
-  <button class="tab-btn" data-tab="orgs">Org Health <span class="ct{' ok' if (orgs_red + orgs_amber) == 0 else ''}" title="Organizations with red or amber health">{_fmt(orgs_red + orgs_amber)}</span></button>
-  <button class="tab-btn" data-tab="types">Resource Types <span style="opacity:.55;font-weight:600">T1</span> <span class="ct{' ok' if types_failed == 0 else ''}" title="Resource types with failures">{_fmt(types_failed)}</span></button>
-  <button class="tab-btn" data-tab="missing">Missing <span style="opacity:.55;font-weight:600">T2</span> <span class="ct{' ok' if total_missing == 0 else ''}">{_fmt(total_missing)}</span></button>
-  <button class="tab-btn" data-tab="extra">Extra <span style="opacity:.55;font-weight:600">T2</span>{f' <span class="ct{" ok" if total_extra_listed == 0 else " warn"}" title="Target objects not matched to export (hosts omitted from list)">{_fmt(total_extra_listed)}</span>' if is_live_validate else ''}</button>
-  <button class="tab-btn" data-tab="syncs">Syncs <span style="opacity:.55;font-weight:600">T2</span>{f' <span class="ct{" ok" if total_sync_failed == 0 else ""}" title="Failed project or inventory source syncs">{_fmt(total_sync_failed)}</span>' if is_live_validate else ''}</button>
-  <button class="tab-btn" data-tab="workflows">Workflows <span style="opacity:.55;font-weight:600">T3</span>{f' <span class="ct{" ok" if workflow_mismatch_count == 0 else ""}" title="Workflow structure mismatches">{_fmt(workflow_mismatch_count)}</span>' if is_live_validate else ''}</button>
-  <button class="tab-btn" data-tab="fields">Field Changes <span style="opacity:.55;font-weight:600">T4</span>{f' <span class="ct{" ok" if total_field_mm == 0 else " warn"}" title="Objects with ≥1 field mismatch">{_fmt(total_field_mm)}</span>' if is_live_validate else ''}</button>
+  <button class="tab-btn" data-tab="orgs">Org Health <span class="ct{" ok" if (orgs_red + orgs_amber) == 0 else ""}" title="Organizations with red or amber health">{_fmt(orgs_red + orgs_amber)}</span></button>
+  <button class="tab-btn" data-tab="types">Resource Types <span style="opacity:.55;font-weight:600">T1</span> <span class="ct{" ok" if types_failed == 0 else ""}" title="Resource types with failures">{_fmt(types_failed)}</span></button>
+  <button class="tab-btn" data-tab="missing">Missing <span style="opacity:.55;font-weight:600">T2</span> <span class="ct{" ok" if total_missing == 0 else ""}">{_fmt(total_missing)}</span></button>
+  <button class="tab-btn" data-tab="extra">Extra <span style="opacity:.55;font-weight:600">T2</span>{f' <span class="ct{" ok" if total_extra_listed == 0 else " warn"}" title="Target objects not matched to export (hosts omitted from list)">{_fmt(total_extra_listed)}</span>' if is_live_validate else ""}</button>
+  <button class="tab-btn" data-tab="syncs">Syncs <span style="opacity:.55;font-weight:600">T2</span>{f' <span class="ct{" ok" if total_sync_failed == 0 else ""}" title="Failed project or inventory source syncs">{_fmt(total_sync_failed)}</span>' if is_live_validate else ""}</button>
+  <button class="tab-btn" data-tab="workflows">Workflows <span style="opacity:.55;font-weight:600">T3</span>{f' <span class="ct{" ok" if workflow_mismatch_count == 0 else ""}" title="Workflow structure mismatches">{_fmt(workflow_mismatch_count)}</span>' if is_live_validate else ""}</button>
+  <button class="tab-btn" data-tab="fields">Field Changes <span style="opacity:.55;font-weight:600">T4</span>{f' <span class="ct{" ok" if total_field_mm == 0 else " warn"}" title="Objects with ≥1 field mismatch">{_fmt(total_field_mm)}</span>' if is_live_validate else ""}</button>
   <button class="tab-btn" data-tab="hosts">Hosts <span style="opacity:.55;font-weight:600">T5</span>{f' <span class="ct{" ok" if host_issues == 0 else ""}">{_fmt(host_issues)}</span>' if host_tab_ran else ""}</button>
   <button class="tab-btn" data-tab="auditor">Auditor <span style="opacity:.55;font-weight:600">T5</span>{auditor_tab_badge}</button>
   <button class="tab-btn" data-tab="method">Methodology</button>
@@ -532,7 +524,7 @@ code{{font-family:'SF Mono',Consolas,monospace;font-size:.83em;background:var(--
 <div class="cards" style="grid-template-columns:repeat(4,1fr);">
   <div class="card"><div class="v">{_fmt(ac.source_system_auditors)}</div><div class="l">Source auditors</div></div>
   <div class="card"><div class="v">{_fmt(ac.gateway_platform_auditors)}</div><div class="l">Gateway auditors</div></div>
-  <div class="card"><div class="v{' ok' if ac.mismatches == 0 else ' bad'}">{_fmt(ac.mismatches)}</div><div class="l">Mismatches</div></div>
+  <div class="card"><div class="v{" ok" if ac.mismatches == 0 else " bad"}">{_fmt(ac.mismatches)}</div><div class="l">Mismatches</div></div>
   <div class="card"><div class="v">{len(ac.details)}</div><div class="l">Checked</div></div>
 </div>
 <table><thead><tr><th>Username</th><th>Gateway Platform Auditor</th><th>Verdict</th></tr></thead>
@@ -2558,10 +2550,7 @@ init();
 
 def slug_report_path_segment(name: str) -> str:
     """Filesystem-safe single path segment (org or resource type name)."""
-    cleaned = "".join(
-        c if c.isalnum() or c in "-_" else "-"
-        for c in (name or "").strip()
-    )
+    cleaned = "".join(c if c.isalnum() or c in "-_" else "-" for c in (name or "").strip())
     while "--" in cleaned:
         cleaned = cleaned.replace("--", "-")
     return cleaned.strip("-_") or "unnamed"
@@ -2582,11 +2571,11 @@ def resolve_validate_report_dir(
     ``<OrgSlug>/`` paths as a single ``--orgs`` run (see
     ``write_org_scoped_validation_reports``).
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     root = Path(base_dir)
     if day is None:
-        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        day = datetime.now(UTC).strftime("%Y-%m-%d")
     mode = "live" if live else "database"
     path = root / "validate" / day / mode
 

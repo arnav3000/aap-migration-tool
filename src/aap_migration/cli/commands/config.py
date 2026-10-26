@@ -53,10 +53,10 @@ def validate(ctx: MigrationContext, check_connectivity: bool) -> None:
     Examples:
 
         # Basic validation
-        aap-bridge config validate --config config.yaml
+        aap-bridge --config config.yaml config validate
 
         # Validate and test connectivity
-        aap-bridge config validate --config config.yaml --check-connectivity
+        aap-bridge --config config.yaml config validate --check-connectivity
     """
     echo_info(f"Validating configuration: {ctx.config_path}")
 
@@ -206,7 +206,7 @@ def show(ctx: MigrationContext) -> None:
 
     Examples:
 
-        aap-bridge config show --config config.yaml
+        aap-bridge --config config.yaml config show
     """
     config = ctx.config
 
