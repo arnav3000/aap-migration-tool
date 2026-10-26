@@ -16,7 +16,7 @@ tenacity==9.2.1
 
 # Configuration Management
 pydantic==2.14.1
-pydantic-settings==2.16.0
+pydantic-settings==2.16.1
 PyYAML==6.0.3
 python-dotenv==1.2.4
 
@@ -27,8 +27,8 @@ tqdm==4.70.1
 hvac==2.4.0
 
 # Database
-sqlalchemy==2.1.5
-alembic==1.20.0
+sqlalchemy==2.1.6
+alembic==1.20.1
 
 # Utilities
 python-dateutil==2.9.0.post0
