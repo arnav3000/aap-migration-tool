@@ -35,5 +35,5 @@ python-dateutil==2.9.0.post0
 psutil==7.2.2
 
 # REST API (release/v1.x-rest-api)
-fastapi==0.148.0
+fastapi==0.161.1
 uvicorn[standard]==0.54.0
