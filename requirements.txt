@@ -15,8 +15,8 @@ structlog==26.1.0
 tenacity==9.2.1
 
 # Configuration Management
-pydantic==2.14.1
-pydantic-settings==2.16.1
+pydantic==2.14.2
+pydantic-settings==2.16.2
 PyYAML==6.0.3
 python-dotenv==1.2.4
 
